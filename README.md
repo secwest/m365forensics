@@ -8,7 +8,7 @@ This PowerShell code represents an analysis framework designed specifically for 
 
 ## Purpose
 
-After an admin-level compromise in Microsoft 365, attackers often establish persistence mechanisms to maintain access even after the initial breach is discovered. This framework helps security teams:
+After an admin-level compromise in Microsoft M365, attackers often establish persistence mechanisms to maintain access even after the initial breach is discovered. This framework helps security teams:
 
 - Systematically scan all major M365 services for suspicious configurations
 - Identify potential backdoors and persistence mechanisms
