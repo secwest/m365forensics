@@ -7,7 +7,7 @@
     list of potential persistence points relevant for M365 E3 subscriptions.
     It outputs findings to the console and to text files in a timestamped report directory.
 .NOTES
-    Version: 3.24
+    Version: 3.56
     Author: Dragos Ruiu
     Requires: PowerShell 7.2+, ExchangeOnlineManagement module, Microsoft.Graph module. MSOnline module (for DAP check).
     Permissions: Global Administrator or equivalent read permissions across M365 services.
@@ -2377,61 +2377,4790 @@ function Invoke-GeneralAzureChecks {
     $GeneralReportFile = "GeneralAzure_CrossService_Report.txt"
 
     # --- 34. Azure Automation Accounts and Runbooks ---
-    Write-Log -Message "Checking Azure Automation Accounts and Runbooks (Requires Az module & context)..." -Type "SUBSECTION" -SpecificLogFile $GeneralReportFile
-    Write-Log -Message "TODO: Implement Azure Automation checks. Requires Az PowerShell module." -Type "WARN" -SpecificLogFile $GeneralReportFile
+    Write-Log -Message "Checking Azure Automation Accounts and Runbooks..." -Type "SUBSECTION" -SpecificLogFile $GeneralReportFile
+    try {
+        # Check if Az module is available
+        if (-not (Get-Module -ListAvailable -Name Az.Automation)) {
+            Write-Log -Message "Az.Automation module not found. Install using: Install-Module -Name Az.Automation -Repository PSGallery -Force" -Type "WARN" -SpecificLogFile $GeneralReportFile
+            Write-Log -Message "Skipping Azure Automation checks due to missing Az.Automation module." -Type "WARN" -SpecificLogFile $GeneralReportFile
+            return
+        }
+
+        # Check if already connected to Azure
+        $azContext = Get-AzContext -ErrorAction SilentlyContinue
+        if (-not $azContext) {
+            Write-Log -Message "Not connected to Azure. Please use Connect-AzAccount before running this script for Azure-specific checks." -Type "WARN" -SpecificLogFile $GeneralReportFile
+            Write-Log -Message "Skipping Azure Automation checks due to missing Azure connection." -Type "WARN" -SpecificLogFile $GeneralReportFile
+            return
+        }
+
+        Write-Log -Message "Connected to Azure subscription: $($azContext.Subscription.Name) ($($azContext.Subscription.Id))" -SpecificLogFile $GeneralReportFile
+        
+        # Get all automation accounts
+        $automationAccounts = Get-AzAutomationAccount -ErrorAction SilentlyContinue
+        
+        if (-not $automationAccounts) {
+            Write-Log -Message "No Azure Automation accounts found in the current subscription." -Type "INFO" -SpecificLogFile $GeneralReportFile
+            return
+        }
+
+        Write-Log -Message "Found $($automationAccounts.Count) Automation accounts. Analyzing each..." -SpecificLogFile $GeneralReportFile
+        
+        # Suspicious patterns in runbooks to look for
+        $suspiciousPatterns = @(
+            "Invoke-WebRequest", "Invoke-RestMethod", "Net.WebClient", "DownloadFile", 
+            "DownloadString", "Start-Process", "Start-Job", "Invoke-Expression", "IEX", 
+            "ExecutionPolicy", "Bypass", "-EncodedCommand", "FromBase64", "System.Convert",
+            "Get-Credential", "New-Object", "DirectoryServices.DirectoryEntry", "ADSI",
+            "RunAs", "psexec", "ConvertTo-SecureString", "Add-MsolRoleMember", "New-AzADServicePrincipal",
+            "Add-AzRoleAssignment", "Get-RunAsAccount", "Invoke-Command", "PSSession", "PSRemoting",
+            "scriptblock", "password", "secret", "token", "key", "certificate"
+        )
+        
+        foreach ($aa in $automationAccounts) {
+            Write-Log -Message "Automation Account: $($aa.AutomationAccountName) (Resource Group: $($aa.ResourceGroupName), Location: $($aa.Location))" -SpecificLogFile $GeneralReportFile
+            Write-Log -Message "Created on: $($aa.CreationTime), Last Modified: $($aa.LastModifiedTime)" -SpecificLogFile $GeneralReportFile
+            
+            # Check recent creation
+            if ((New-TimeSpan -Start $aa.CreationTime -End (Get-Date)).TotalDays -lt $script:LookbackDays) {
+                Write-Log -Message "ALERT: Automation Account '$($aa.AutomationAccountName)' was created recently ($($aa.CreationTime))." -Type "ALERT" -IsAlert -SpecificLogFile $GeneralReportFile
+            }
+            
+            # Check runbooks in this account
+            $runbooks = Get-AzAutomationRunbook -AutomationAccountName $aa.AutomationAccountName -ResourceGroupName $aa.ResourceGroupName -ErrorAction SilentlyContinue
+            
+            if ($runbooks) {
+                Write-Log -Message "Found $($runbooks.Count) runbooks in account '$($aa.AutomationAccountName)':" -SpecificLogFile $GeneralReportFile
+                
+                foreach ($rb in $runbooks) {
+                    Write-Log -Message "  Runbook: $($rb.Name) (Type: $($rb.RunbookType), State: $($rb.State), Created: $($rb.CreationTime), Last Modified: $($rb.LastModifiedTime))" -SpecificLogFile $GeneralReportFile
+                    
+                    # Check recent creation/modification
+                    if ((New-TimeSpan -Start $rb.CreationTime -End (Get-Date)).TotalDays -lt $script:LookbackDays) {
+                        Write-Log -Message "  ALERT: Runbook '$($rb.Name)' in account '$($aa.AutomationAccountName)' was created recently ($($rb.CreationTime))." -Type "ALERT" -IsAlert -SpecificLogFile $GeneralReportFile
+                    }
+                    if ((New-TimeSpan -Start $rb.LastModifiedTime -End (Get-Date)).TotalDays -lt $script:LookbackDays) {
+                        Write-Log -Message "  ALERT: Runbook '$($rb.Name)' in account '$($aa.AutomationAccountName)' was modified recently ($($rb.LastModifiedTime))." -Type "ALERT" -IsAlert -SpecificLogFile $GeneralReportFile
+                    }
+                    
+                    # Get runbook content for PowerShell-based runbooks
+                    if ($rb.RunbookType -like "*PowerShell*" -or $rb.RunbookType -eq "Script") {
+                        try {
+                            $rbContent = Export-AzAutomationRunbook -Name $rb.Name -AutomationAccountName $aa.AutomationAccountName -ResourceGroupName $aa.ResourceGroupName -Slot "Published" -ErrorAction SilentlyContinue
+                            
+                            if ($rbContent) {
+                                # Save runbook content to file
+                                $rbContentFile = Join-Path -Path $ReportDir -ChildPath "Runbook_$($aa.AutomationAccountName)_$($rb.Name).ps1"
+                                $rbContent | Out-File -FilePath $rbContentFile -Encoding UTF8 -Force
+                                Write-Log -Message "  Runbook content saved to: $rbContentFile" -SpecificLogFile $GeneralReportFile
+                                
+                                # Check for suspicious patterns
+                                $foundPatterns = @()
+                                foreach ($pattern in $suspiciousPatterns) {
+                                    if ($rbContent -match $pattern) {
+                                        $foundPatterns += $pattern
+                                    }
+                                }
+                                
+                                if ($foundPatterns.Count -gt 0) {
+                                    Write-Log -Message "  ALERT: Runbook '$($rb.Name)' contains potentially suspicious patterns: $($foundPatterns -join ', '). Review content manually." -Type "ALERT" -IsAlert -SpecificLogFile $GeneralReportFile
+                                }
+                            } else {
+                                Write-Log -Message "  WARN: Could not export content for runbook '$($rb.Name)'." -Type "WARN" -SpecificLogFile $GeneralReportFile
+                            }
+                        } catch {
+                            Write-Log -Message "  ERROR: Failed to analyze runbook '$($rb.Name)' content: $($_.Exception.Message)" -Type "ERROR" -SpecificLogFile $GeneralReportFile
+                        }
+                    }
+                    
+                    # Check runbook schedules
+                    try {
+                        $schedules = Get-AzAutomationScheduledRunbook -AutomationAccountName $aa.AutomationAccountName -ResourceGroupName $aa.ResourceGroupName -RunbookName $rb.Name -ErrorAction SilentlyContinue
+                        if ($schedules) {
+                            Write-Log -Message "  Runbook '$($rb.Name)' has $($schedules.Count) schedules:" -SpecificLogFile $GeneralReportFile
+                            foreach ($schedule in $schedules) {
+                                Write-Log -Message "    Schedule: $($schedule.ScheduleName), Frequency: $($schedule.Frequency), Created: $($schedule.CreationTime)" -SpecificLogFile $GeneralReportFile
+                                if ((New-TimeSpan -Start $schedule.CreationTime -End (Get-Date)).TotalDays -lt $script:LookbackDays) {
+                                    Write-Log -Message "    ALERT: Schedule '$($schedule.ScheduleName)' for runbook '$($rb.Name)' was created recently ($($schedule.CreationTime))." -Type "ALERT" -IsAlert -SpecificLogFile $GeneralReportFile
+                                }
+                            }
+                        }
+                    } catch {
+                        Write-Log -Message "  WARN: Could not retrieve schedules for runbook '$($rb.Name)': $($_.Exception.Message)" -Type "WARN" -SpecificLogFile $GeneralReportFile
+                    }
+                    
+                    # Check runbook webhooks (if supported by the runbook type)
+                    try {
+                        $webhooks = Get-AzAutomationWebhook -AutomationAccountName $aa.AutomationAccountName -ResourceGroupName $aa.ResourceGroupName -RunbookName $rb.Name -ErrorAction SilentlyContinue
+                        if ($webhooks) {
+                            Write-Log -Message "  ALERT: Runbook '$($rb.Name)' has $($webhooks.Count) webhooks defined. Webhooks allow external triggering of runbooks." -Type "ALERT" -IsAlert -SpecificLogFile $GeneralReportFile
+                            foreach ($webhook in $webhooks) {
+                                Write-Log -Message "    Webhook: $($webhook.Name), Created: $($webhook.CreationTime), Expires: $($webhook.ExpiryTime)" -SpecificLogFile $GeneralReportFile
+                                if ((New-TimeSpan -Start $webhook.CreationTime -End (Get-Date)).TotalDays -lt $script:LookbackDays) {
+                                    Write-Log -Message "    ALERT: Webhook '$($webhook.Name)' for runbook '$($rb.Name)' was created recently ($($webhook.CreationTime))." -Type "ALERT" -IsAlert -SpecificLogFile $GeneralReportFile
+                                }
+                            }
+                        }
+                    } catch {
+                        Write-Log -Message "  WARN: Could not retrieve webhooks for runbook '$($rb.Name)': $($_.Exception.Message)" -Type "WARN" -SpecificLogFile $GeneralReportFile
+                    }
+                }
+            } else {
+                Write-Log -Message "No runbooks found in account '$($aa.AutomationAccountName)' or error retrieving them." -Type "INFO" -SpecificLogFile $GeneralReportFile
+            }
+            
+            # Check for credentials, certificates, and connections in the automation account
+            try {
+                $credentials = Get-AzAutomationCredential -AutomationAccountName $aa.AutomationAccountName -ResourceGroupName $aa.ResourceGroupName -ErrorAction SilentlyContinue
+                if ($credentials) {
+                    Write-Log -Message "Found $($credentials.Count) credential assets in automation account '$($aa.AutomationAccountName)':" -SpecificLogFile $GeneralReportFile
+                    foreach ($cred in $credentials) {
+                        Write-Log -Message "  Credential: $($cred.Name), Created: $($cred.CreationTime), Last Modified: $($cred.LastModifiedTime), Username: $($cred.UserName)" -SpecificLogFile $GeneralReportFile
+                        if ((New-TimeSpan -Start $cred.CreationTime -End (Get-Date)).TotalDays -lt $script:LookbackDays) {
+                            Write-Log -Message "  ALERT: Credential '$($cred.Name)' in account '$($aa.AutomationAccountName)' was created recently ($($cred.CreationTime))." -Type "ALERT" -IsAlert -SpecificLogFile $GeneralReportFile
+                        }
+                        if ((New-TimeSpan -Start $cred.LastModifiedTime -End (Get-Date)).TotalDays -lt $script:LookbackDays) {
+                            Write-Log -Message "  ALERT: Credential '$($cred.Name)' in account '$($aa.AutomationAccountName)' was modified recently ($($cred.LastModifiedTime))." -Type "ALERT" -IsAlert -SpecificLogFile $GeneralReportFile
+                        }
+                    }
+                }
+                
+                $certificates = Get-AzAutomationCertificate -AutomationAccountName $aa.AutomationAccountName -ResourceGroupName $aa.ResourceGroupName -ErrorAction SilentlyContinue
+                if ($certificates) {
+                    Write-Log -Message "Found $($certificates.Count) certificate assets in automation account '$($aa.AutomationAccountName)':" -SpecificLogFile $GeneralReportFile
+                    foreach ($cert in $certificates) {
+                        Write-Log -Message "  Certificate: $($cert.Name), Created: $($cert.CreationTime), Last Modified: $($cert.LastModifiedTime), Expires: $($cert.ExpiryTime)" -SpecificLogFile $GeneralReportFile
+                        if ((New-TimeSpan -Start $cert.CreationTime -End (Get-Date)).TotalDays -lt $script:LookbackDays) {
+                            Write-Log -Message "  ALERT: Certificate '$($cert.Name)' in account '$($aa.AutomationAccountName)' was created recently ($($cert.CreationTime))." -Type "ALERT" -IsAlert -SpecificLogFile $GeneralReportFile
+                        }
+                    }
+                }
+                
+                $connections = Get-AzAutomationConnection -AutomationAccountName $aa.AutomationAccountName -ResourceGroupName $aa.ResourceGroupName -ErrorAction SilentlyContinue
+                if ($connections) {
+                    Write-Log -Message "Found $($connections.Count) connection assets in automation account '$($aa.AutomationAccountName)':" -SpecificLogFile $GeneralReportFile
+                    foreach ($conn in $connections) {
+                        Write-Log -Message "  Connection: $($conn.Name), Type: $($conn.ConnectionTypeName), Created: $($conn.CreationTime), Last Modified: $($conn.LastModifiedTime)" -SpecificLogFile $GeneralReportFile
+                        if ((New-TimeSpan -Start $conn.CreationTime -End (Get-Date)).TotalDays -lt $script:LookbackDays) {
+                            Write-Log -Message "  ALERT: Connection '$($conn.Name)' in account '$($aa.AutomationAccountName)' was created recently ($($conn.CreationTime))." -Type "ALERT" -IsAlert -SpecificLogFile $GeneralReportFile
+                        }
+                    }
+                }
+            } catch {
+                Write-Log -Message "  WARN: Could not retrieve credential, certificate, or connection assets for automation account '$($aa.AutomationAccountName)': $($_.Exception.Message)" -Type "WARN" -SpecificLogFile $GeneralReportFile
+            }
+        }
+        
+        Write-Log -Message "Completed Azure Automation account and runbook checks." -SpecificLogFile $GeneralReportFile
+        
+    } catch {
+        Write-Log -Message "Error checking Azure Automation Accounts and Runbooks: $($_.Exception.Message)" -Type "ERROR" -SpecificLogFile $GeneralReportFile
+    }
 
     # --- 35. Microsoft Graph API Subscriptions (Webhooks) ---
     Write-Log -Message "Checking Microsoft Graph API Subscriptions (Webhooks)..." -Type "SUBSECTION" -SpecificLogFile $GeneralReportFile
-    Write-Log -Message "TODO: Implement Microsoft Graph API Subscription checks." -Type "WARN" -SpecificLogFile $GeneralReportFile
+    try {
+        if (-not $GraphConnected) {
+            Write-Log -Message "Graph API not connected. Cannot check Graph Subscriptions." -Type "WARN" -SpecificLogFile $GeneralReportFile
+            return
+        }
+
+        # Ensure we have the required permission
+        $context = Get-MgContext
+        $hasRequiredPermission = $false
+        if ($context.Scopes) {
+            if ($context.Scopes -contains "Subscription.Read.All" -or 
+                $context.Scopes -contains "Directory.Read.All" -or 
+                $context.Scopes -contains "Directory.ReadWrite.All") {
+                $hasRequiredPermission = $true
+            }
+        }
+
+        if (-not $hasRequiredPermission) {
+            Write-Log -Message "Connected to Graph API but missing required permissions (Subscription.Read.All, Directory.Read.All, or Directory.ReadWrite.All). Some subscription details may not be available." -Type "WARN" -SpecificLogFile $GeneralReportFile
+        }
+
+        # Define potentially suspicious notification URLs
+        $suspiciousUrlPatterns = @(
+            "ngrok.io", "tunnel.me", "serveo.net", "webhookrelay", "hookbin", "requestcatcher",
+            "requestbin", "pipedream.net", "cloudflare.workers", "glitch.me", "free.beeceptor.com",
+            ".000webhostapp.com", "herokuapp.com", ".repl.co", ".deta.dev", "pastebin", ".workers.dev",
+            "example.com", "test.com", "onion."
+        )
+
+        # Get Graph subscriptions
+        $subscriptions = Get-MgSubscription -All -ErrorAction SilentlyContinue
+        
+        if (-not $subscriptions) {
+            Write-Log -Message "No Microsoft Graph subscriptions found or unable to retrieve them." -Type "INFO" -SpecificLogFile $GeneralReportFile
+            return
+        }
+
+        Write-Log -Message "Found $($subscriptions.Count) Microsoft Graph API subscriptions. Analyzing each..." -SpecificLogFile $GeneralReportFile
+        
+        # Check subscriptions
+        foreach ($sub in $subscriptions) {
+            $createdDateTime = $sub.CreatedDateTime ?? "Unknown"
+            $expirationDateTime = $sub.ExpirationDateTime ?? "Unknown"
+            
+            Write-Log -Message "Subscription: ID: $($sub.Id)" -SpecificLogFile $GeneralReportFile
+            Write-Log -Message "  Created: $createdDateTime, Expires: $expirationDateTime" -SpecificLogFile $GeneralReportFile
+            Write-Log -Message "  Resource: $($sub.Resource)" -SpecificLogFile $GeneralReportFile
+            Write-Log -Message "  Change Type: $($sub.ChangeType)" -SpecificLogFile $GeneralReportFile
+            Write-Log -Message "  Notification URL: $($sub.NotificationUrl)" -SpecificLogFile $GeneralReportFile
+            Write-Log -Message "  Application ID: $($sub.ApplicationId)" -SpecificLogFile $GeneralReportFile
+            Write-Log -Message "  Client State: $($sub.ClientState)" -SpecificLogFile $GeneralReportFile
+            
+            # Check if recently created
+            if ($createdDateTime -ne "Unknown") {
+                try {
+                    if ((New-TimeSpan -Start $createdDateTime -End (Get-Date)).TotalDays -lt $script:LookbackDays) {
+                        Write-Log -Message "  ALERT: Subscription was created recently ($createdDateTime)." -Type "ALERT" -IsAlert -SpecificLogFile $GeneralReportFile
+                    }
+                } catch {
+                    Write-Log -Message "  WARN: Unable to parse creation date to check recency." -Type "WARN" -SpecificLogFile $GeneralReportFile
+                }
+            }
+            
+            # Check for suspicious notification URLs
+            if ($sub.NotificationUrl) {
+                $isSuspiciousUrl = $false
+                $suspiciousPatternMatched = ""
+                
+                foreach ($pattern in $suspiciousUrlPatterns) {
+                    if ($sub.NotificationUrl -like "*$pattern*") {
+                        $isSuspiciousUrl = $true
+                        $suspiciousPatternMatched = $pattern
+                        break
+                    }
+                }
+                
+                if ($isSuspiciousUrl) {
+                    Write-Log -Message "  ALERT: Subscription has potentially suspicious notification URL matching pattern '$suspiciousPatternMatched': $($sub.NotificationUrl)" -Type "ALERT" -IsAlert -SpecificLogFile $GeneralReportFile
+                }
+                
+                # Check for non-HTTPS URLs (security issue)
+                if ($sub.NotificationUrl -notlike "https://*") {
+                    Write-Log -Message "  ALERT: Subscription using non-HTTPS notification URL: $($sub.NotificationUrl)" -Type "ALERT" -IsAlert -SpecificLogFile $GeneralReportFile
+                }
+            }
+            
+            # Check the resources being monitored
+            $sensitiveResources = @(
+                "users", "groups", "directoryObjects", "servicePrincipals", "applications", 
+                "auditLogs", "signIns", "identityRiskEvents", "deviceManagement", 
+                "roleManagement", "identityGovernance", "security"
+            )
+            
+            $isMonitoringSensitiveResource = $false
+            $sensitiveResourceMatched = ""
+            
+            foreach ($resource in $sensitiveResources) {
+                if ($sub.Resource -like "*$resource*") {
+                    $isMonitoringSensitiveResource = $true
+                    $sensitiveResourceMatched = $resource
+                    break
+                }
+            }
+            
+            if ($isMonitoringSensitiveResource) {
+                Write-Log -Message "  ALERT: Subscription is monitoring sensitive resource type '$sensitiveResourceMatched': $($sub.Resource)" -Type "ALERT" -IsAlert -SpecificLogFile $GeneralReportFile
+            }
+            
+            # Try to get app info if Application ID is present
+            if ($sub.ApplicationId) {
+                try {
+                    $appInfo = Get-MgServicePrincipal -Filter "appId eq '$($sub.ApplicationId)'" -ErrorAction SilentlyContinue
+                    if ($appInfo) {
+                        Write-Log -Message "  Application Name: $($appInfo.DisplayName)" -SpecificLogFile $GeneralReportFile
+                        Write-Log -Message "  Application Owner: $($appInfo.AppOwnerOrganizationId)" -SpecificLogFile $GeneralReportFile
+                        
+                        # Check if app is from this tenant
+                        if ($appInfo.AppOwnerOrganizationId -ne $script:TenantId) {
+                            Write-Log -Message "  ALERT: Subscription is for an application from another tenant (Owner: $($appInfo.AppOwnerOrganizationId), Current Tenant: $($script:TenantId))." -Type "ALERT" -IsAlert -SpecificLogFile $GeneralReportFile
+                        }
+                    } else {
+                        Write-Log -Message "  ALERT: Could not retrieve information about the application ID: $($sub.ApplicationId). The application might have been deleted or is inaccessible." -Type "ALERT" -IsAlert -SpecificLogFile $GeneralReportFile
+                    }
+                } catch {
+                    Write-Log -Message "  WARN: Error retrieving application information: $($_.Exception.Message)" -Type "WARN" -SpecificLogFile $GeneralReportFile
+                }
+            }
+            
+            # Check for specifically concerning combinations (e.g., monitoring admin activity with external callback)
+            $adminResources = @("roleManagement", "auditLogs", "security/alerts")
+            $isMonitoringAdminResource = $false
+            
+            foreach ($resource in $adminResources) {
+                if ($sub.Resource -like "*$resource*") {
+                    $isMonitoringAdminResource = $true
+                    break
+                }
+            }
+            
+            if ($isMonitoringAdminResource -and $isSuspiciousUrl) {
+                Write-Log -Message "  CRITICAL ALERT: Subscription is monitoring admin activity ($($sub.Resource)) and sending notifications to a suspicious URL: $($sub.NotificationUrl). This could indicate an attacker monitoring admin actions!" -Type "ALERT" -IsAlert -SpecificLogFile $GeneralReportFile
+            }
+        }
+        
+        Write-Log -Message "Completed Microsoft Graph API Subscriptions check." -SpecificLogFile $GeneralReportFile
+        
+    } catch {
+        Write-Log -Message "Error checking Microsoft Graph API Subscriptions: $($_.Exception.Message)" -Type "ERROR" -SpecificLogFile $GeneralReportFile
+    }
 
     # --- 36. Application Proxy Configurations ---
     Write-Log -Message "Checking Application Proxy Configurations..." -Type "SUBSECTION" -SpecificLogFile $GeneralReportFile
-    Write-Log -Message "TODO: Implement Application Proxy Configuration checks." -Type "WARN" -SpecificLogFile $GeneralReportFile
+    try {
+        if (-not $GraphConnected) {
+            Write-Log -Message "Graph API not connected. Cannot check Application Proxy configurations." -Type "WARN" -SpecificLogFile $GeneralReportFile
+            return
+        }
+
+        # Ensure we have the required permission
+        $context = Get-MgContext
+        $hasRequiredPermission = $false
+        if ($context.Scopes) {
+            if ($context.Scopes -contains "Application.Read.All" -or 
+                $context.Scopes -contains "Directory.Read.All" -or 
+                $context.Scopes -contains "Directory.ReadWrite.All") {
+                $hasRequiredPermission = $true
+            }
+        }
+
+        if (-not $hasRequiredPermission) {
+            Write-Log -Message "Connected to Graph API but missing required permissions (Application.Read.All, Directory.Read.All, or Directory.ReadWrite.All). Some application proxy details may not be available." -Type "WARN" -SpecificLogFile $GeneralReportFile
+        }
+
+        # Get all applications with onPremisesPublishing configuration
+        $filter = "onPremisesPublishing/enabled eq true"
+        $select = "id,appId,displayName,createdDateTime,onPremisesPublishing,web,verifiedPublisher,publisherName,signInAudience,requiredResourceAccess"
+        
+        $appProxyApps = Get-MgApplication -Filter $filter -Property $select -All -ErrorAction SilentlyContinue
+        
+        if (-not $appProxyApps -or $appProxyApps.Count -eq 0) {
+            Write-Log -Message "No Application Proxy applications found." -Type "INFO" -SpecificLogFile $GeneralReportFile
+            
+            # Check if there are any on-premises application proxy connectors
+            Write-Log -Message "Checking for Application Proxy connectors..." -SpecificLogFile $GeneralReportFile
+            
+            try {
+                $connectors = Get-MgOnPremisesPublishingProfile -ErrorAction SilentlyContinue
+                if ($connectors -and $connectors.ConnectorGroups) {
+                    Write-Log -Message "Found Application Proxy connector groups with no published applications:" -Type "WARN" -SpecificLogFile $GeneralReportFile
+                    
+                    foreach ($connectorGroup in $connectors.ConnectorGroups) {
+                        Write-Log -Message "  Connector Group: $($connectorGroup.Name) (ID: $($connectorGroup.Id))" -SpecificLogFile $GeneralReportFile
+                        
+                        if ($connectorGroup.Connectors -and $connectorGroup.Connectors.Count -gt 0) {
+                            foreach ($connector in $connectorGroup.Connectors) {
+                                Write-Log -Message "    Connector: $($connector.Name) (ID: $($connector.Id), Status: $($connector.Status))" -SpecificLogFile $GeneralReportFile
+                                if ($connector.MachineName) {
+                                    Write-Log -Message "      Machine: $($connector.MachineName), Connector Version: $($connector.ConnectorVersion)" -SpecificLogFile $GeneralReportFile
+                                }
+                            }
+                        } else {
+                            Write-Log -Message "    No connectors in this group." -SpecificLogFile $GeneralReportFile
+                        }
+                    }
+                    
+                    Write-Log -Message "WARN: Application Proxy connectors exist but no applications are published. This could be normal in a staging environment or could indicate incomplete attack setup." -Type "WARN" -SpecificLogFile $GeneralReportFile
+                } else {
+                    Write-Log -Message "No Application Proxy connectors found." -Type "INFO" -SpecificLogFile $GeneralReportFile
+                }
+            } catch {
+                Write-Log -Message "Error checking Application Proxy connectors: $($_.Exception.Message)" -Type "ERROR" -SpecificLogFile $GeneralReportFile
+            }
+            
+            return
+        }
+
+        Write-Log -Message "Found $($appProxyApps.Count) Application Proxy applications. Analyzing each..." -SpecificLogFile $GeneralReportFile
+        
+        # Define potentially suspicious URL patterns
+        $suspiciousUrlPatterns = @(
+            "ngrok.io", "tunnel.me", "serveo.net", "webhookrelay", "hookbin", "requestcatcher",
+            "requestbin", "pipedream.net", "cloudflare.workers", "glitch.me", "free.beeceptor.com",
+            ".000webhostapp.com", "herokuapp.com", ".repl.co", ".deta.dev", "pastebin", ".workers.dev"
+        )
+        
+        # Check each application proxy application
+        foreach ($app in $appProxyApps) {
+            Write-Log -Message "Application: $($app.DisplayName) (ID: $($app.Id), AppId: $($app.AppId))" -SpecificLogFile $GeneralReportFile
+            Write-Log -Message "  Created: $($app.CreatedDateTime), Publisher: $($app.PublisherName)" -SpecificLogFile $GeneralReportFile
+            
+            # Check if app was created recently
+            if ((New-TimeSpan -Start $app.CreatedDateTime -End (Get-Date)).TotalDays -lt $script:LookbackDays) {
+                Write-Log -Message "  ALERT: Application Proxy app '$($app.DisplayName)' was created recently ($($app.CreatedDateTime))." -Type "ALERT" -IsAlert -SpecificLogFile $GeneralReportFile
+            }
+            
+            # Check on-premises publishing configuration
+            if ($app.OnPremisesPublishing) {
+                Write-Log -Message "  On-Premises Publishing Configuration:" -SpecificLogFile $GeneralReportFile
+                Write-Log -Message "    External URL: $($app.OnPremisesPublishing.ExternalUrl)" -SpecificLogFile $GeneralReportFile
+                Write-Log -Message "    Internal URL: $($app.OnPremisesPublishing.InternalUrl)" -SpecificLogFile $GeneralReportFile
+                Write-Log -Message "    Pre-Authentication Method: $($app.OnPremisesPublishing.ExternalAuthenticationType)" -SpecificLogFile $GeneralReportFile
+                Write-Log -Message "    Connector Group ID: $($app.OnPremisesPublishing.ConnectorGroupId)" -SpecificLogFile $GeneralReportFile
+                Write-Log -Message "    Allows Persistent Access: $($app.OnPremisesPublishing.IsTranslateLinksInBodyEnabled)" -SpecificLogFile $GeneralReportFile
+                
+                # Check for pass-through authentication (no pre-auth)
+                if ($app.OnPremisesPublishing.ExternalAuthenticationType -eq "passthru") {
+                    Write-Log -Message "  ALERT: Application Proxy app '$($app.DisplayName)' uses pass-through authentication (no pre-authentication). This bypasses Azure AD authentication and relies solely on backend authentication." -Type "ALERT" -IsAlert -SpecificLogFile $GeneralReportFile
+                }
+                
+                # Check for suspicious external URL
+                $suspiciousExternal = $false
+                foreach ($pattern in $suspiciousUrlPatterns) {
+                    if ($app.OnPremisesPublishing.ExternalUrl -like "*$pattern*") {
+                        $suspiciousExternal = $true
+                        Write-Log -Message "  ALERT: Application Proxy app '$($app.DisplayName)' has a suspicious external URL: $($app.OnPremisesPublishing.ExternalUrl) (matches pattern: $pattern)" -Type "ALERT" -IsAlert -SpecificLogFile $GeneralReportFile
+                        break
+                    }
+                }
+                
+                # Check if internal URL is accessible from Internet (should be internal-only)
+                $internalUrl = $app.OnPremisesPublishing.InternalUrl
+                if ($internalUrl -like "https://*.com*" -or 
+                    $internalUrl -like "https://*.net*" -or 
+                    $internalUrl -like "https://*.org*" -or 
+                    $internalUrl -like "https://*.io*" -or 
+                    $internalUrl -like "http://*.com*" -or 
+                    $internalUrl -like "http://*.net*" -or 
+                    $internalUrl -like "http://*.org*" -or 
+                    $internalUrl -like "http://*.io*") {
+                    
+                    # Check if it's not an obvious internal address like intranet.company.com
+                    if ($internalUrl -notlike "*intranet*" -and 
+                        $internalUrl -notlike "*internal*" -and 
+                        $internalUrl -notlike "*corp*" -and 
+                        $internalUrl -notlike "*local*") {
+                        Write-Log -Message "  WARN: Application Proxy app '$($app.DisplayName)' has an internal URL that appears to be a public domain: $internalUrl. Verify this is an internal application." -Type "WARN" -SpecificLogFile $GeneralReportFile
+                    }
+                }
+                
+                # Check for non-HTTPS internal URL
+                if ($internalUrl -like "http://*" -and $internalUrl -notlike "https://*") {
+                    Write-Log -Message "  WARN: Application Proxy app '$($app.DisplayName)' uses non-HTTPS internal URL: $internalUrl. This may expose credentials." -Type "WARN" -SpecificLogFile $GeneralReportFile
+                }
+                
+                # Check if link translation is enabled (can modify content)
+                if ($app.OnPremisesPublishing.IsTranslateLinksInBodyEnabled -eq $true) {
+                    Write-Log -Message "  INFO: Application Proxy app '$($app.DisplayName)' has link translation enabled. This modifies content but is often needed for applications with hardcoded internal URLs." -Type "INFO" -SpecificLogFile $GeneralReportFile
+                }
+                
+                # Check for custom domains
+                if ($app.OnPremisesPublishing.VerifiedCustomDomainName) {
+                    Write-Log -Message "    Custom Domain: $($app.OnPremisesPublishing.VerifiedCustomDomainName)" -SpecificLogFile $GeneralReportFile
+                    Write-Log -Message "    WARN: Application uses a custom domain. Ensure this domain is properly secured and verified." -Type "WARN" -SpecificLogFile $GeneralReportFile
+                }
+                
+                # Check if SSL certificate validation is disabled
+                if ($app.OnPremisesPublishing.IsBackendSSLCertificateValidationEnabled -eq $false) {
+                    Write-Log -Message "  ALERT: Application Proxy app '$($app.DisplayName)' has SSL certificate validation disabled. This could allow MITM attacks." -Type "ALERT" -IsAlert -SpecificLogFile $GeneralReportFile
+                }
+            }
+            
+            # Check redirect URIs for suspicious patterns
+            if ($app.Web -and $app.Web.RedirectUris) {
+                Write-Log -Message "  Redirect URIs:" -SpecificLogFile $GeneralReportFile
+                foreach ($uri in $app.Web.RedirectUris) {
+                    Write-Log -Message "    $uri" -SpecificLogFile $GeneralReportFile
+                    
+                    # Check for suspicious redirect URIs
+                    $suspiciousRedirect = $false
+                    foreach ($pattern in $suspiciousUrlPatterns) {
+                        if ($uri -like "*$pattern*") {
+                            $suspiciousRedirect = $true
+                            Write-Log -Message "    ALERT: Application Proxy app '$($app.DisplayName)' has a suspicious redirect URI: $uri (matches pattern: $pattern)" -Type "ALERT" -IsAlert -SpecificLogFile $GeneralReportFile
+                            break
+                        }
+                    }
+                    
+                    # Check for localhost redirects (not always bad but worth noting)
+                    if ($uri -like "*localhost*" -or $uri -like "*127.0.0.1*") {
+                        Write-Log -Message "    WARN: Application Proxy app '$($app.DisplayName)' has a localhost redirect URI: $uri. This is suspicious for production apps but may be normal for development." -Type "WARN" -SpecificLogFile $GeneralReportFile
+                    }
+                }
+            }
+            
+            # Check sign-in audience
+            if ($app.SignInAudience -eq "AzureADMultipleOrgs" -or $app.SignInAudience -eq "AzureADandPersonalMicrosoftAccount") {
+                Write-Log -Message "  ALERT: Application Proxy app '$($app.DisplayName)' is configured for multi-tenant access ($($app.SignInAudience)). Application Proxy apps should typically be single-tenant." -Type "ALERT" -IsAlert -SpecificLogFile $GeneralReportFile
+            }
+            
+            # Check if app is verified
+            if ($app.VerifiedPublisher -and $app.VerifiedPublisher.IsVerified -eq $true) {
+                Write-Log -Message "  Verified Publisher: Yes (Publisher: $($app.VerifiedPublisher.DisplayName))" -SpecificLogFile $GeneralReportFile
+            } else {
+                Write-Log -Message "  Verified Publisher: No" -SpecificLogFile $GeneralReportFile
+            }
+            
+            # Check for required resource access
+            if ($app.RequiredResourceAccess -and $app.RequiredResourceAccess.Count -gt 0) {
+                Write-Log -Message "  Required Resource Access:" -SpecificLogFile $GeneralReportFile
+                foreach ($resource in $app.RequiredResourceAccess) {
+                    $resourceAppInfo = Get-MgServicePrincipal -Filter "appId eq '$($resource.ResourceAppId)'" -ErrorAction SilentlyContinue | Select-Object -First 1
+                    $resourceAppName = $resourceAppInfo.DisplayName ?? $resource.ResourceAppId
+                    Write-Log -Message "    Resource: $resourceAppName (AppId: $($resource.ResourceAppId))" -SpecificLogFile $GeneralReportFile
+                    
+                    # Check if the app has permissions to sensitive resources
+                    $sensitiveApps = @(
+                        "00000003-0000-0000-c000-000000000000", # Microsoft Graph
+                        "00000002-0000-0ff1-ce00-000000000000", # Exchange Online
+                        "00000003-0000-0ff1-ce00-000000000000"  # SharePoint Online
+                    )
+                    
+                    if ($sensitiveApps -contains $resource.ResourceAppId) {
+                        foreach ($permission in $resource.ResourceAccess) {
+                            $permObject = $null
+                            $permName = $permission.Id # Default to ID if name not found
+                            
+                            if ($permission.Type -eq "Role") { # Application Permission
+                                $permObject = $resourceAppInfo.AppRoles | Where-Object {$_.Id -eq $permission.Id} | Select-Object -First 1
+                                if ($permObject) { $permName = $permObject.Value }
+                                
+                                # High-risk application permissions
+                                $highRiskPerms = @(
+                                    "Directory.ReadWrite.All", "Directory.Read.All", "User.ReadWrite.All", "Mail.ReadWrite", 
+                                    "Mail.Read", "Files.ReadWrite.All", "Sites.ReadWrite.All"
+                                )
+                                
+                                if ($permObject -and $highRiskPerms -contains $permObject.Value) {
+                                    Write-Log -Message "    ALERT: Application Proxy app '$($app.DisplayName)' has high-risk application permission: $($permObject.Value) for $resourceAppName" -Type "ALERT" -IsAlert -SpecificLogFile $GeneralReportFile
+                                }
+                                
+                                Write-Log -Message "      App Permission (Role): $permName (ID: $($permission.Id))" -SpecificLogFile $GeneralReportFile
+                            } 
+                            elseif ($permission.Type -eq "Scope") { # Delegated Permission
+                                $permObject = $resourceAppInfo.Oauth2PermissionScopes | Where-Object {$_.Id -eq $permission.Id} | Select-Object -First 1
+                                if ($permObject) { $permName = $permObject.Value }
+                                Write-Log -Message "      Delegated Permission (Scope): $permName (ID: $($permission.Id))" -SpecificLogFile $GeneralReportFile
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        
+        # Check the connector groups and connectors
+        Write-Log -Message "Checking Application Proxy connectors and connector groups..." -SpecificLogFile $GeneralReportFile
+        
+        try {
+            $onPremProfile = Get-MgOnPremisesPublishingProfile -ErrorAction SilentlyContinue
+            
+            if ($onPremProfile -and $onPremProfile.ConnectorGroups) {
+                Write-Log -Message "Found $($onPremProfile.ConnectorGroups.Count) connector groups." -SpecificLogFile $GeneralReportFile
+                
+                foreach ($connectorGroup in $onPremProfile.ConnectorGroups) {
+                    Write-Log -Message "Connector Group: $($connectorGroup.Name) (ID: $($connectorGroup.Id))" -SpecificLogFile $GeneralReportFile
+                    
+                    # Get applications using this connector group
+                    $appsUsingGroup = $appProxyApps | Where-Object { $_.OnPremisesPublishing.ConnectorGroupId -eq $connectorGroup.Id }
+                    Write-Log -Message "  Applications using this connector group: $($appsUsingGroup.Count)" -SpecificLogFile $GeneralReportFile
+                    
+                    if ($appsUsingGroup.Count -eq 0) {
+                        Write-Log -Message "  WARN: Connector group '$($connectorGroup.Name)' is not used by any application. Consider removing if not needed." -Type "WARN" -SpecificLogFile $GeneralReportFile
+                    }
+                    
+                    if ($connectorGroup.Connectors -and $connectorGroup.Connectors.Count -gt 0) {
+                        Write-Log -Message "  Connectors in this group: $($connectorGroup.Connectors.Count)" -SpecificLogFile $GeneralReportFile
+                        
+                        foreach ($connector in $connectorGroup.Connectors) {
+                            Write-Log -Message "    Connector: $($connector.Name) (ID: $($connector.Id))" -SpecificLogFile $GeneralReportFile
+                            Write-Log -Message "      Status: $($connector.Status), Machine Name: $($connector.MachineName)" -SpecificLogFile $GeneralReportFile
+                            Write-Log -Message "      Connector Version: $($connector.ConnectorVersion), Externalip: $($connector.ExternalIp)" -SpecificLogFile $GeneralReportFile
+                            
+                            if ($connector.Status -ne "active") {
+                                Write-Log -Message "      WARN: Connector '$($connector.Name)' is not active (Status: $($connector.Status)). Applications using this connector group may not be accessible." -Type "WARN" -SpecificLogFile $GeneralReportFile
+                            }
+                            
+                            # Check if connector was recently created
+                            if ($connector.CreatedDateTime -and (New-TimeSpan -Start $connector.CreatedDateTime -End (Get-Date)).TotalDays -lt $script:LookbackDays) {
+                                Write-Log -Message "      ALERT: Connector '$($connector.Name)' was created recently ($($connector.CreatedDateTime))." -Type "ALERT" -IsAlert -SpecificLogFile $GeneralReportFile
+                            }
+                        }
+                    } else {
+                        Write-Log -Message "  ALERT: Connector group '$($connectorGroup.Name)' has no connectors. Applications using this group will not function." -Type "ALERT" -IsAlert -SpecificLogFile $GeneralReportFile
+                    }
+                }
+            } else {
+                Write-Log -Message "No connector groups found or error retrieving them." -Type "INFO" -SpecificLogFile $GeneralReportFile
+            }
+        } catch {
+            Write-Log -Message "Error checking connector groups: $($_.Exception.Message)" -Type "ERROR" -SpecificLogFile $GeneralReportFile
+        }
+        
+        Write-Log -Message "Completed Application Proxy configurations check." -SpecificLogFile $GeneralReportFile
+        
+    } catch {
+        Write-Log -Message "Error checking Application Proxy configurations: $($_.Exception.Message)" -Type "ERROR" -SpecificLogFile $GeneralReportFile
+    }
 
     # --- 37. Secure Score Settings and History ---
     Write-Log -Message "Checking Secure Score (Informational)..." -Type "SUBSECTION" -SpecificLogFile $GeneralReportFile
-    Write-Log -Message "TODO: Implement Secure Score checks." -Type "WARN" -SpecificLogFile $GeneralReportFile
+    try {
+        if (-not $GraphConnected) {
+            Write-Log -Message "Graph API not connected. Cannot check Secure Score." -Type "WARN" -SpecificLogFile $GeneralReportFile
+            return
+        }
+
+        # Ensure we have the required permission
+        $context = Get-MgContext
+        $hasRequiredPermission = $false
+        if ($context.Scopes) {
+            if ($context.Scopes -contains "SecurityEvents.Read.All" -or 
+                $context.Scopes -contains "Security.Read.All" -or 
+                $context.Scopes -contains "Directory.Read.All") {
+                $hasRequiredPermission = $true
+            }
+        }
+
+        if (-not $hasRequiredPermission) {
+            Write-Log -Message "Connected to Graph API but missing required permissions (SecurityEvents.Read.All, Security.Read.All, or Directory.Read.All). Some Secure Score details may not be available." -Type "WARN" -SpecificLogFile $GeneralReportFile
+        }
+
+        # Get current secure scores
+        $secureScores = Invoke-MgGraphRequest -Method GET -Uri "https://graph.microsoft.com/v1.0/security/secureScores?`$top=5" -ErrorAction SilentlyContinue
+        
+        if (-not $secureScores -or -not $secureScores.value -or $secureScores.value.Count -eq 0) {
+            Write-Log -Message "Could not retrieve Secure Score information or no scores available." -Type "WARN" -SpecificLogFile $GeneralReportFile
+            return
+        }
+
+        # Get the most recent score
+        $currentScore = $secureScores.value | Sort-Object -Property createdDateTime -Descending | Select-Object -First 1
+        
+        Write-Log -Message "Current Secure Score: $($currentScore.currentScore) out of $($currentScore.maxScore) ($(($currentScore.currentScore / $currentScore.maxScore).ToString("P2")))" -SpecificLogFile $GeneralReportFile
+        Write-Log -Message "Score recorded on: $($currentScore.createdDateTime)" -SpecificLogFile $GeneralReportFile
+        
+        # Get previous scores for comparison if available
+        if ($secureScores.value.Count -gt 1) {
+            $previousScore = $secureScores.value | Sort-Object -Property createdDateTime -Descending | Select-Object -Skip 1 -First 1
+            $scoreDifference = $currentScore.currentScore - $previousScore.currentScore
+            
+            if ($scoreDifference -gt 0) {
+                Write-Log -Message "Score increased by $scoreDifference points since previous reading on $($previousScore.createdDateTime)." -SpecificLogFile $GeneralReportFile
+            } 
+            elseif ($scoreDifference -lt 0) {
+                $absDifference = [Math]::Abs($scoreDifference)
+                Write-Log -Message "ALERT: Score decreased by $absDifference points since previous reading on $($previousScore.createdDateTime). Review recent security changes." -Type "ALERT" -IsAlert -SpecificLogFile $GeneralReportFile
+            }
+            else {
+                Write-Log -Message "Score unchanged since previous reading on $($previousScore.createdDateTime)." -SpecificLogFile $GeneralReportFile
+            }
+        }
+        
+        # Get secure score control profiles
+        $secureScoreControls = Invoke-MgGraphRequest -Method GET -Uri "https://graph.microsoft.com/v1.0/security/secureScoreControlProfiles" -ErrorAction SilentlyContinue
+        
+        if ($secureScoreControls -and $secureScoreControls.value) {
+            Write-Log -Message "Found $($secureScoreControls.value.Count) secure score controls. Analyzing status..." -SpecificLogFile $GeneralReportFile
+            
+            # Get secure score control profiles with their current states
+            $currentControlStates = Invoke-MgGraphRequest -Method GET -Uri "https://graph.microsoft.com/v1.0/security/secureScores/$($currentScore.id)/controlScores" -ErrorAction SilentlyContinue
+            
+            if ($currentControlStates -and $currentControlStates.value) {
+                $controlStatesById = @{}
+                foreach ($controlState in $currentControlStates.value) {
+                    $controlStatesById[$controlState.controlName] = $controlState
+                }
+                
+                # Define critical security controls that should be implemented
+                $criticalControls = @(
+                    "AdminMFAV2", "MFARegistrationV2", "PWAgePolicyNew", "OneAdmin", 
+                    "SelfServicePasswordReset", "ModernAuthentication",
+                    "PrivilegedIdentity", "DLPEnabled", "LegacyAuthDisabled", 
+                    "RoleGroupMFA", "Malware"
+                )
+                
+                # Define mapping for control display names
+                $controlDisplayNames = @{
+                    "AdminMFAV2" = "MFA for Administrators"
+                    "MFARegistrationV2" = "MFA Registration"
+                    "PWAgePolicyNew" = "Password Expiration Policy"
+                    "OneAdmin" = "More Than One Global Admin"
+                    "SelfServicePasswordReset" = "Self-Service Password Reset"
+                    "ModernAuthentication" = "Modern Authentication"
+                    "PrivilegedIdentity" = "Privileged Identity Management"
+                    "DLPEnabled" = "DLP Policies"
+                    "LegacyAuthDisabled" = "Legacy Authentication Disabled"
+                    "RoleGroupMFA" = "MFA for Role Groups"
+                    "Malware" = "Malware Protection"
+                    # Add more mappings as needed
+                }
+                
+                # Lists for tracking control status
+                $implementedControls = New-Object System.Collections.Generic.List[string]
+                $partialControls = New-Object System.Collections.Generic.List[string]
+                $notImplementedControls = New-Object System.Collections.Generic.List[string]
+                $criticalNotImplemented = New-Object System.Collections.Generic.List[string]
+                
+                # Process each control
+                foreach ($control in $secureScoreControls.value) {
+                    $controlState = $controlStatesById[$control.id]
+                    $displayName = $control.title
+                    $maxScore = $control.maxScore
+                    
+                    if ($controlState) {
+                        $currentScore = $controlState.score
+                        $implementationStatus = "Unknown"
+                        
+                        if ($currentScore -eq $maxScore) {
+                            $implementationStatus = "Fully Implemented"
+                            $implementedControls.Add($displayName)
+                        } 
+                        elseif ($currentScore -gt 0) {
+                            $implementationStatus = "Partially Implemented"
+                            $partialControls.Add($displayName)
+                        }
+                        else {
+                            $implementationStatus = "Not Implemented"
+                            $notImplementedControls.Add($displayName)
+                            
+                            # Check if this is a critical control
+                            if ($criticalControls -contains $control.id) {
+                                $criticalControlName = if ($controlDisplayNames.ContainsKey($control.id)) { $controlDisplayNames[$control.id] } else { $displayName }
+                                $criticalNotImplemented.Add($criticalControlName)
+                            }
+                        }
+                        
+                        Write-Log -Message "  Control: $displayName (ID: $($control.id))" -SpecificLogFile $GeneralReportFile
+                        Write-Log -Message "    Status: $implementationStatus - Score $currentScore/$maxScore" -SpecificLogFile $GeneralReportFile
+                        Write-Log -Message "    Description: $($control.description)" -SpecificLogFile $GeneralReportFile
+                        
+                        # Add more specific alerts for certain critical controls
+                        if ($control.id -eq "AdminMFAV2" -and $implementationStatus -ne "Fully Implemented") {
+                            Write-Log -Message "    ALERT: MFA for administrators is not fully implemented. This is a critical security control." -Type "ALERT" -IsAlert -SpecificLogFile $GeneralReportFile
+                        }
+                        if ($control.id -eq "OneAdmin" -and $implementationStatus -ne "Fully Implemented") {
+                            Write-Log -Message "    ALERT: Only one Global Administrator detected. This creates a single point of failure." -Type "ALERT" -IsAlert -SpecificLogFile $GeneralReportFile
+                        }
+                        if ($control.id -eq "LegacyAuthDisabled" -and $implementationStatus -ne "Fully Implemented") {
+                            Write-Log -Message "    ALERT: Legacy authentication is not fully disabled. This poses a significant security risk for credential attacks." -Type "ALERT" -IsAlert -SpecificLogFile $GeneralReportFile
+                        }
+                    }
+                    else {
+                        Write-Log -Message "  Control: $displayName (ID: $($control.id))" -SpecificLogFile $GeneralReportFile
+                        Write-Log -Message "    Status: Not Found in Current Scores" -SpecificLogFile $GeneralReportFile
+                        Write-Log -Message "    Description: $($control.description)" -SpecificLogFile $GeneralReportFile
+                    }
+                }
+                
+                # Summarize control implementation status
+                Write-Log -Message "Summary of Secure Score Controls:" -SpecificLogFile $GeneralReportFile
+                Write-Log -Message "  Fully Implemented: $($implementedControls.Count)" -SpecificLogFile $GeneralReportFile
+                Write-Log -Message "  Partially Implemented: $($partialControls.Count)" -SpecificLogFile $GeneralReportFile
+                Write-Log -Message "  Not Implemented: $($notImplementedControls.Count)" -SpecificLogFile $GeneralReportFile
+                
+                if ($criticalNotImplemented.Count -gt 0) {
+                    Write-Log -Message "ALERT: The following critical security controls are not implemented:" -Type "ALERT" -IsAlert -SpecificLogFile $GeneralReportFile
+                    foreach ($control in $criticalNotImplemented) {
+                        Write-Log -Message "  - $control" -Type "ALERT" -IsAlert -SpecificLogFile $GeneralReportFile
+                    }
+                }
+                
+                # Get score history for trend analysis
+                try {
+                    $scoreHistory = Invoke-MgGraphRequest -Method GET -Uri "https://graph.microsoft.com/v1.0/security/secureScores?`$top=90" -ErrorAction SilentlyContinue
+                    
+                    if ($scoreHistory -and $scoreHistory.value -and $scoreHistory.value.Count -gt 0) {
+                        $historicalScores = $scoreHistory.value | Sort-Object -Property createdDateTime
+                        $oldestScore = $historicalScores[0]
+                        $newestScore = $historicalScores[-1]
+                        
+                        $longTermChange = $newestScore.currentScore - $oldestScore.currentScore
+                        $percentChange = if ($oldestScore.currentScore -gt 0) { ($longTermChange / $oldestScore.currentScore).ToString("P2") } else { "N/A" }
+                        
+                        Write-Log -Message "Secure Score Trend Analysis:" -SpecificLogFile $GeneralReportFile
+                        Write-Log -Message "  Period: $($oldestScore.createdDateTime) to $($newestScore.createdDateTime)" -SpecificLogFile $GeneralReportFile
+                        
+                        if ($longTermChange -gt 0) {
+                            Write-Log -Message "  Positive trend: Score increased by $longTermChange points ($percentChange) over this period." -SpecificLogFile $GeneralReportFile
+                        } 
+                        elseif ($longTermChange -lt 0) {
+                            $absChange = [Math]::Abs($longTermChange)
+                            Write-Log -Message "  ALERT: Negative trend: Score decreased by $absChange points ($percentChange) over this period." -Type "ALERT" -IsAlert -SpecificLogFile $GeneralReportFile
+                        }
+                        else {
+                            Write-Log -Message "  Neutral trend: Score unchanged over this period." -SpecificLogFile $GeneralReportFile
+                        }
+                        
+                        # Check for significant drops in score (potential security regression)
+                        $significantDrops = New-Object System.Collections.Generic.List[PSObject]
+                        
+                        for ($i = 1; $i -lt $historicalScores.Count; $i++) {
+                            $currentEntry = $historicalScores[$i]
+                            $previousEntry = $historicalScores[$i-1]
+                            $scoreDrop = $previousEntry.currentScore - $currentEntry.currentScore
+                            
+                            if ($scoreDrop -gt 5) { # Threshold for significant drop
+                                $dropInfo = [PSCustomObject]@{
+                                    Date = $currentEntry.createdDateTime
+                                    Drop = $scoreDrop
+                                    PreviousScore = $previousEntry.currentScore
+                                    NewScore = $currentEntry.currentScore
+                                }
+                                $significantDrops.Add($dropInfo)
+                            }
+                        }
+                        
+                        if ($significantDrops.Count -gt 0) {
+                            Write-Log -Message "  ALERT: Detected $($significantDrops.Count) significant score drops in the historical data:" -Type "ALERT" -IsAlert -SpecificLogFile $GeneralReportFile
+                            
+                            foreach ($drop in $significantDrops) {
+                                Write-Log -Message "    - On $($drop.Date): Score dropped by $($drop.Drop) points (from $($drop.PreviousScore) to $($drop.NewScore))" -Type "ALERT" -IsAlert -SpecificLogFile $GeneralReportFile
+                            }
+                            
+                            Write-Log -Message "    These drops may indicate security controls being disabled or security policy changes." -Type "ALERT" -IsAlert -SpecificLogFile $GeneralReportFile
+                        }
+                    }
+                }
+                catch {
+                    Write-Log -Message "Error retrieving score history: $($_.Exception.Message)" -Type "ERROR" -SpecificLogFile $GeneralReportFile
+                }
+                
+                # Provide recommendations for improvement
+                Write-Log -Message "Top 5 Recommended Actions for Improving Secure Score:" -SpecificLogFile $GeneralReportFile
+                
+                # Combine unimplemented critical controls with highest impact controls
+                $recommendationControls = New-Object System.Collections.Generic.List[PSObject]
+                
+                foreach ($control in $secureScoreControls.value) {
+                    $controlState = $controlStatesById[$control.id]
+                    if ($controlState -and $controlState.score -lt $control.maxScore) {
+                        $implementationPercentage = if ($control.maxScore -gt 0) { ($controlState.score / $control.maxScore) } else { 0 }
+                        $isImplemented = $implementationPercentage -ge 0.9 # Consider 90%+ as effectively implemented
+                        
+                        if (-not $isImplemented) {
+                            $isCritical = $criticalControls -contains $control.id
+                            $displayName = $control.title
+                            $impact = $control.maxScore
+                            
+                            $recommendationControls.Add([PSCustomObject]@{
+                                Name = $displayName
+                                Description = $control.description
+                                Impact = $impact
+                                IsCritical = $isCritical
+                                Implementation = $implementationPercentage
+                                RecommendationLink = $control.implementationPath
+                            })
+                        }
+                    }
+                }
+                
+                # Sort by critical first, then by impact
+                $topRecommendations = $recommendationControls | Sort-Object -Property @{Expression="IsCritical"; Descending=$true}, @{Expression="Impact"; Descending=$true} | Select-Object -First 5
+                
+                foreach ($recommendation in $topRecommendations) {
+                    $criticalTag = if ($recommendation.IsCritical) { " [CRITICAL]" } else { "" }
+                    Write-Log -Message "  - $($recommendation.Name)$criticalTag - Impact: $($recommendation.Impact) points" -SpecificLogFile $GeneralReportFile
+                    Write-Log -Message "    $($recommendation.Description)" -SpecificLogFile $GeneralReportFile
+                    if ($recommendation.RecommendationLink) {
+                        Write-Log -Message "    Implementation Guidance: $($recommendation.RecommendationLink)" -SpecificLogFile $GeneralReportFile
+                    }
+                }
+            }
+            else {
+                Write-Log -Message "Could not retrieve control scores for the current Secure Score." -Type "WARN" -SpecificLogFile $GeneralReportFile
+            }
+        }
+        else {
+            Write-Log -Message "Could not retrieve Secure Score control profiles." -Type "WARN" -SpecificLogFile $GeneralReportFile
+        }
+        
+        Write-Log -Message "Completed Secure Score check." -SpecificLogFile $GeneralReportFile
+        
+    } catch {
+        Write-Log -Message "Error checking Secure Score: $($_.Exception.Message)" -Type "ERROR" -SpecificLogFile $GeneralReportFile
+    }
 
     # --- 38. API Permissions Changes (Auditing) ---
-    Write-Log -Message "Checking API Permissions Changes (via Audit Logs - requires AuditLog.Read.All)..." -Type "SUBSECTION" -SpecificLogFile $GeneralReportFile
-    Write-Log -Message "TODO: Implement API Permissions Changes audit." -Type "WARN" -SpecificLogFile $GeneralReportFile
+    Write-Log -Message "Checking API Permissions Changes (via Audit Logs)..." -Type "SUBSECTION" -SpecificLogFile $GeneralReportFile
+    try {
+        if (-not $GraphConnected) {
+            Write-Log -Message "Graph API not connected. Cannot check API Permissions Changes." -Type "WARN" -SpecificLogFile $GeneralReportFile
+            return
+        }
+
+        # Ensure we have the required permission
+        $context = Get-MgContext
+        $hasRequiredPermission = $false
+        if ($context.Scopes) {
+            if ($context.Scopes -contains "AuditLog.Read.All" -or 
+                $context.Scopes -contains "Directory.Read.All") {
+                $hasRequiredPermission = $true
+            }
+        }
+
+        if (-not $hasRequiredPermission) {
+            Write-Log -Message "Connected to Graph API but missing required permissions (AuditLog.Read.All or Directory.Read.All). Cannot check API permission changes." -Type "WARN" -SpecificLogFile $GeneralReportFile
+            return
+        }
+
+        # Define the time period to look back (using script's global LookbackDays)
+        $startTime = (Get-Date).AddDays(-$script:LookbackDays).ToString("yyyy-MM-ddTHH:mm:ssZ")
+        $endTime = (Get-Date).ToString("yyyy-MM-ddTHH:mm:ssZ")
+        
+        Write-Log -Message "Searching for API permission changes from $startTime to $endTime..." -SpecificLogFile $GeneralReportFile
+        
+        # Define operations related to API permissions that we want to audit
+        $permissionOperations = @(
+            "Consent to application", 
+            "Add app role assignment", 
+            "Add delegated permission grant", 
+            "Add OAuth2PermissionGrant", 
+            "Add service principal", 
+            "Add application",
+            "Update application"
+        )
+        
+        # Create filter for the specific operations we're interested in
+        $operationFilter = $permissionOperations | ForEach-Object { "activityDisplayName eq '$_'" }
+        $filter = "activityDateTime ge $startTime and ($($operationFilter -join ' or '))"
+        
+        # Query audit logs with the filter
+        $auditLogs = Get-MgAuditLogDirectoryAudit -Filter $filter -All -ErrorAction SilentlyContinue
+        
+        if (-not $auditLogs -or $auditLogs.Count -eq 0) {
+            Write-Log -Message "No API permission changes found in the audit logs for the specified period." -Type "INFO" -SpecificLogFile $GeneralReportFile
+            return
+        }
+
+        Write-Log -Message "Found $($auditLogs.Count) API permission change events. Analyzing each..." -SpecificLogFile $GeneralReportFile
+        
+        # Define high-risk permissions to specifically flag
+        $highRiskPermissions = @(
+            "Directory.ReadWrite.All", "Directory.Read.All", "RoleManagement.ReadWrite.Directory",
+            "AppRoleAssignment.ReadWrite.All", "Application.ReadWrite.All", "Group.ReadWrite.All",
+            "User.ReadWrite.All", "Mail.ReadWrite", "Mail.Send", "Files.ReadWrite.All",
+            "Sites.ReadWrite.All", "Sites.FullControl.All", "MailboxSettings.ReadWrite",
+            "Policy.ReadWrite.ApplicationConfiguration", "DeviceManagementApps.ReadWrite.All"
+        )
+        
+        # Create a summary for each affected application
+        $appPermissionChanges = @{}
+        
+        foreach ($log in $auditLogs) {
+            $timestamp = $log.ActivityDateTime
+            $actor = $log.InitiatedBy.User.UserPrincipalName ?? $log.InitiatedBy.User.DisplayName ?? $log.InitiatedBy.App.DisplayName ?? "Unknown"
+            $activity = $log.ActivityDisplayName
+            $result = $log.Result
+            $resourceId = $log.TargetResources[0].Id
+            $resourceDisplayName = $log.TargetResources[0].DisplayName
+            $resourceType = $log.TargetResources[0].Type
+            
+            # Log the basic event details
+            Write-Log -Message "Permission Change Event:" -SpecificLogFile $GeneralReportFile
+            Write-Log -Message "  Time: $timestamp" -SpecificLogFile $GeneralReportFile
+            Write-Log -Message "  Actor: $actor" -SpecificLogFile $GeneralReportFile
+            Write-Log -Message "  Activity: $activity" -SpecificLogFile $GeneralReportFile
+            Write-Log -Message "  Result: $result" -SpecificLogFile $GeneralReportFile
+            Write-Log -Message "  Resource: $resourceDisplayName (ID: $resourceId, Type: $resourceType)" -SpecificLogFile $GeneralReportFile
+            
+            # Extract modified properties to get permission details
+            $modifiedProps = $log.TargetResources[0].ModifiedProperties
+            $permissionDetails = ""
+            $permissionName = ""
+            $permissionValue = ""
+            $resourceAppId = ""
+            $isHighRisk = $false
+            
+            foreach ($prop in $modifiedProps) {
+                $propName = $prop.DisplayName
+                $newValue = $prop.NewValue
+                $oldValue = $prop.OldValue
+                
+                Write-Log -Message "    Modified Property: $propName" -SpecificLogFile $GeneralReportFile
+                
+                if ($newValue -and $newValue -ne "[]" -and $newValue -ne "null") {
+                    Write-Log -Message "      New Value: $newValue" -SpecificLogFile $GeneralReportFile
+                }
+                
+                if ($oldValue -and $oldValue -ne "[]" -and $oldValue -ne "null") {
+                    Write-Log -Message "      Old Value: $oldValue" -SpecificLogFile $GeneralReportFile
+                }
+                
+                # Try to extract specific permission information based on property name
+                if ($propName -eq "AppRole.Value" -or $propName -eq "OAuth2Permission.Value") {
+                    $permissionName = $propName
+                    $permissionValue = $newValue
+                    
+                    # Check if this is a high-risk permission
+                    foreach ($highRiskPerm in $highRiskPermissions) {
+                        if ($newValue -like "*$highRiskPerm*") {
+                            $isHighRisk = $true
+                            break
+                        }
+                    }
+                }
+                elseif ($propName -eq "ResourceApplication") {
+                    $resourceAppId = $newValue
+                }
+                elseif ($propName -like "*Permission*" -or $propName -like "*AppRole*" -or $propName -like "*Scope*") {
+                    $permissionDetails += "[$propName: $newValue] "
+                }
+            }
+            
+            # Store this change in our application summary dictionary
+            if (-not [string]::IsNullOrEmpty($resourceDisplayName)) {
+                if (-not $appPermissionChanges.ContainsKey($resourceDisplayName)) {
+                    $appPermissionChanges[$resourceDisplayName] = @{
+                        ResourceId = $resourceId
+                        ResourceType = $resourceType
+                        Changes = New-Object System.Collections.Generic.List[PSObject]
+                        HighRiskPermissions = $false
+                    }
+                }
+                
+                $appPermissionChanges[$resourceDisplayName].Changes.Add([PSCustomObject]@{
+                    Timestamp = $timestamp
+                    Actor = $actor
+                    Activity = $activity
+                    Result = $result
+                    PermissionName = $permissionName
+                    PermissionValue = $permissionValue
+                    ResourceAppId = $resourceAppId
+                    PermissionDetails = $permissionDetails
+                    IsHighRisk = $isHighRisk
+                })
+                
+                if ($isHighRisk) {
+                    $appPermissionChanges[$resourceDisplayName].HighRiskPermissions = $true
+                }
+            }
+            
+            # Generate alerts for high-risk or suspicious permission changes
+            if ($isHighRisk) {
+                Write-Log -Message "  ALERT: High-risk permission $permissionValue granted to $resourceDisplayName by $actor on $timestamp." -Type "ALERT" -IsAlert -SpecificLogFile $GeneralReportFile
+            }
+            
+            # Alert on admin consent grants specifically
+            if ($activity -eq "Consent to application") {
+                Write-Log -Message "  ALERT: Admin consent granted to $resourceDisplayName by $actor on $timestamp. Review permission scope carefully." -Type "ALERT" -IsAlert -SpecificLogFile $GeneralReportFile
+            }
+            
+            # Alert on non-admin actors granting permissions (if they're not Global Admins or App Admins)
+            if ($actor -ne "Unknown" -and $actor -ne "Microsoft Azure AD Cloud Sync" -and $actor -ne "MS-PIM" -and $actor -notlike "*admin*") {
+                Write-Log -Message "  ALERT: Permission change for $resourceDisplayName made by $actor who may not be an administrator. Verify this account has permission to make these changes." -Type "ALERT" -IsAlert -SpecificLogFile $GeneralReportFile
+            }
+        }
+        
+        # Generate a summary by application
+        Write-Log -Message "Summary of API Permission Changes by Application:" -SpecificLogFile $GeneralReportFile
+        foreach ($appName in $appPermissionChanges.Keys) {
+            $appInfo = $appPermissionChanges[$appName]
+            $changeCount = $appInfo.Changes.Count
+            $highRiskTag = if ($appInfo.HighRiskPermissions) { " [HIGH RISK PERMISSIONS]" } else { "" }
+            
+            Write-Log -Message "Application: $appName$highRiskTag" -SpecificLogFile $GeneralReportFile
+            Write-Log -Message "  Resource ID: $($appInfo.ResourceId)" -SpecificLogFile $GeneralReportFile
+            Write-Log -Message "  Resource Type: $($appInfo.ResourceType)" -SpecificLogFile $GeneralReportFile
+            Write-Log -Message "  Total Changes: $changeCount" -SpecificLogFile $GeneralReportFile
+            
+            if ($appInfo.HighRiskPermissions) {
+                $highRiskChanges = $appInfo.Changes | Where-Object { $_.IsHighRisk }
+                
+                foreach ($change in $highRiskChanges) {
+                    Write-Log -Message "  High-Risk Change on $($change.Timestamp) by $($change.Actor):" -SpecificLogFile $GeneralReportFile
+                    Write-Log -Message "    Action: $($change.Activity)" -SpecificLogFile $GeneralReportFile
+                    Write-Log -Message "    Permission: $($change.PermissionValue)" -SpecificLogFile $GeneralReportFile
+                    
+                    # Try to resolve resource app name from ID if available
+                    if (-not [string]::IsNullOrEmpty($change.ResourceAppId)) {
+                        try {
+                            $resourceApp = Get-MgServicePrincipal -Filter "appId eq '$($change.ResourceAppId)'" -ErrorAction SilentlyContinue | Select-Object -First 1
+                            if ($resourceApp) {
+                                Write-Log -Message "    Resource App: $($resourceApp.DisplayName) (AppId: $($change.ResourceAppId))" -SpecificLogFile $GeneralReportFile
+                            } else {
+                                Write-Log -Message "    Resource App ID: $($change.ResourceAppId)" -SpecificLogFile $GeneralReportFile
+                            }
+                        } catch {
+                            Write-Log -Message "    Resource App ID: $($change.ResourceAppId)" -SpecificLogFile $GeneralReportFile
+                        }
+                    }
+                }
+            }
+        }
+        
+        # Identify any potential pattern of privilege escalation
+        $potentialEscalationApps = New-Object System.Collections.Generic.List[string]
+        
+        foreach ($appName in $appPermissionChanges.Keys) {
+            $appInfo = $appPermissionChanges[$appName]
+            $appChanges = $appInfo.Changes
+            
+            # Sort changes by timestamp
+            $sortedChanges = $appChanges | Sort-Object -Property Timestamp
+            
+            # Check for progression from low to high privileges
+            $hadLowPrivileges = $false
+            $laterGainedHighPrivileges = $false
+            
+            for ($i = 0; $i -lt $sortedChanges.Count; $i++) {
+                $change = $sortedChanges[$i]
+                
+                if (-not $change.IsHighRisk -and -not $hadLowPrivileges) {
+                    $hadLowPrivileges = $true
+                }
+                
+                if ($change.IsHighRisk -and $hadLowPrivileges) {
+                    $laterGainedHighPrivileges = $true
+                    break
+                }
+            }
+            
+            if ($hadLowPrivileges -and $laterGainedHighPrivileges) {
+                $potentialEscalationApps.Add($appName)
+            }
+        }
+        
+        if ($potentialEscalationApps.Count -gt 0) {
+            Write-Log -Message "ALERT: Detected potential privilege escalation pattern for the following applications:" -Type "ALERT" -IsAlert -SpecificLogFile $GeneralReportFile
+            foreach ($appName in $potentialEscalationApps) {
+                Write-Log -Message "  - $appName" -Type "ALERT" -IsAlert -SpecificLogFile $GeneralReportFile
+            }
+            Write-Log -Message "  These applications initially received low-privilege permissions and later obtained high-privilege permissions." -Type "ALERT" -IsAlert -SpecificLogFile $GeneralReportFile
+        }
+        
+        Write-Log -Message "Completed API Permission Changes audit." -SpecificLogFile $GeneralReportFile
+        
+    } catch {
+        Write-Log -Message "Error checking API Permission Changes: $($_.Exception.Message)" -Type "ERROR" -SpecificLogFile $GeneralReportFile
+    }
 
     # --- 39. Custom Integration Endpoints ---
-    Write-Log -Message "Checking Custom Integration Endpoints (e.g., SharePoint List Webhooks - Manual/Service Specific)..." -Type "SUBSECTION" -SpecificLogFile $GeneralReportFile
-    Write-Log -Message "INFO: Checking custom integration endpoints is service-specific and may require different tools/APIs per service." -Type "INFO" -SpecificLogFile $GeneralReportFile
-    Write-Log -Message "TODO: Implement checks for known custom integration points if applicable." -Type "WARN" -SpecificLogFile $GeneralReportFile
+    Write-Log -Message "Checking Custom Integration Endpoints (e.g., SharePoint List Webhooks, Teams Webhooks)..." -Type "SUBSECTION" -SpecificLogFile $GeneralReportFile
+    try {
+        if (-not $GraphConnected) {
+            Write-Log -Message "Graph API not connected. Many custom integration endpoint checks require Graph API." -Type "WARN" -SpecificLogFile $GeneralReportFile
+            return
+        }
+
+        Write-Log -Message "Checking for custom integration endpoints across multiple services..." -SpecificLogFile $GeneralReportFile
+        
+        # Define potentially suspicious URL patterns (reusing from earlier checks)
+        $suspiciousUrlPatterns = @(
+            "ngrok.io", "tunnel.me", "serveo.net", "webhookrelay", "hookbin", "requestcatcher",
+            "requestbin", "pipedream.net", "cloudflare.workers", "glitch.me", "free.beeceptor.com",
+            ".000webhostapp.com", "herokuapp.com", ".repl.co", ".deta.dev", "pastebin", ".workers.dev",
+            "example.com", "test.com", "onion.", "webhook.site"
+        )
+        
+        # --- 1. SharePoint List Webhooks ---
+        Write-Log -Message "Checking SharePoint List Webhooks..." -SpecificLogFile $GeneralReportFile
+        
+        try {
+            # Get all sites
+            $sites = Get-MgSite -All -Property "Id,DisplayName,WebUrl" -ErrorAction SilentlyContinue
+            
+            if (-not $sites) {
+                Write-Log -Message "  Could not retrieve SharePoint sites or no sites found." -Type "WARN" -SpecificLogFile $GeneralReportFile
+            } else {
+                Write-Log -Message "  Found $($sites.Count) SharePoint sites. Checking for list webhooks..." -SpecificLogFile $GeneralReportFile
+                
+                $siteProcessed = 0
+                $totalWebhooksFound = 0
+                $suspiciousWebhooks = New-Object System.Collections.Generic.List[PSObject]
+                
+                # Progress tracking for many sites
+                $ProgressInterval = [math]::Max(1, [math]::Floor($sites.Count / 10))
+                
+                foreach ($site in $sites) {
+                    $siteProcessed++
+                    
+                    # Show progress periodically
+                    if ($siteProcessed % $ProgressInterval -eq 0 -or $siteProcessed -eq $sites.Count) {
+                        Write-Log -Message "  Processing site $siteProcessed of $($sites.Count): $($site.DisplayName)" -Type "INFO"
+                    }
+                    
+                    try {
+                        # Get all lists in the site
+                        $lists = Get-MgSiteList -SiteId $site.Id -All -ErrorAction SilentlyContinue
+                        
+                        if ($lists) {
+                            foreach ($list in $lists) {
+                                # Check for webhooks on this list
+                                $webhooksUri = "https://graph.microsoft.com/v1.0/sites/$($site.Id)/lists/$($list.Id)/subscriptions"
+                                $webhooks = Invoke-MgGraphRequest -Method Get -Uri $webhooksUri -ErrorAction SilentlyContinue
+                                
+                                if ($webhooks -and $webhooks.value) {
+                                    $listWebhooks = $webhooks.value
+                                    $totalWebhooksFound += $listWebhooks.Count
+                                    
+                                    if ($listWebhooks.Count -gt 0) {
+                                        Write-Log -Message "    Found $($listWebhooks.Count) webhooks on list '$($list.DisplayName)' in site '$($site.DisplayName)':" -SpecificLogFile $GeneralReportFile
+                                        
+                                        foreach ($webhook in $listWebhooks) {
+                                            Write-Log -Message "      Webhook ID: $($webhook.id)" -SpecificLogFile $GeneralReportFile
+                                            Write-Log -Message "        NotificationUrl: $($webhook.notificationUrl)" -SpecificLogFile $GeneralReportFile
+                                            Write-Log -Message "        Expires: $($webhook.expirationDateTime)" -SpecificLogFile $GeneralReportFile
+                                            Write-Log -Message "        Created: $($webhook.createdDateTime)" -SpecificLogFile $GeneralReportFile
+                                            
+                                            # Check for recently created webhooks
+                                            $isRecent = $false
+                                            if ($webhook.createdDateTime) {
+                                                try {
+                                                    $createdDate = [DateTime]$webhook.createdDateTime
+                                                    if ((New-TimeSpan -Start $createdDate -End (Get-Date)).TotalDays -lt $script:LookbackDays) {
+                                                        $isRecent = $true
+                                                    }
+                                                } catch {}
+                                            }
+                                            
+                                            # Check for suspicious notification URLs
+                                            $isSuspicious = $false
+                                            $matchedPattern = ""
+                                            foreach ($pattern in $suspiciousUrlPatterns) {
+                                                if ($webhook.notificationUrl -like "*$pattern*") {
+                                                    $isSuspicious = $true
+                                                    $matchedPattern = $pattern
+                                                    break
+                                                }
+                                            }
+                                            
+                                            # Alert for suspicious or recent webhooks
+                                            if ($isSuspicious) {
+                                                $suspiciousWebhooks.Add([PSCustomObject]@{
+                                                    SiteUrl = $site.WebUrl
+                                                    SiteName = $site.DisplayName
+                                                    ListName = $list.DisplayName
+                                                    WebhookId = $webhook.id
+                                                    NotificationUrl = $webhook.notificationUrl
+                                                    Pattern = $matchedPattern
+                                                    IsRecent = $isRecent
+                                                })
+                                                
+                                                Write-Log -Message "        ALERT: Webhook uses suspicious notification URL matching pattern '$matchedPattern'." -Type "ALERT" -IsAlert -SpecificLogFile $GeneralReportFile
+                                            }
+                                            
+                                            if ($isRecent) {
+                                                Write-Log -Message "        ALERT: Webhook was created recently ($($webhook.createdDateTime))." -Type "ALERT" -IsAlert -SpecificLogFile $GeneralReportFile
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    } catch {
+                        Write-Log -Message "    Error checking lists or webhooks in site '$($site.DisplayName)': $($_.Exception.Message)" -Type "ERROR" -SpecificLogFile $GeneralReportFile
+                    }
+                }
+                
+                Write-Log -Message "  Completed SharePoint List Webhooks check. Found $totalWebhooksFound webhooks across all sites." -SpecificLogFile $GeneralReportFile
+                
+                if ($suspiciousWebhooks.Count -gt 0) {
+                    Write-Log -Message "  ALERT: Found $($suspiciousWebhooks.Count) suspicious SharePoint list webhooks:" -Type "ALERT" -IsAlert -SpecificLogFile $GeneralReportFile
+                    foreach ($webhook in $suspiciousWebhooks) {
+                        $recentTag = if ($webhook.IsRecent) { " [RECENT]" } else { "" }
+                        Write-Log -Message "    - Site: $($webhook.SiteName), List: $($webhook.ListName), URL: $($webhook.NotificationUrl), Pattern: $($webhook.Pattern)$recentTag" -Type "ALERT" -IsAlert -SpecificLogFile $GeneralReportFile
+                    }
+                }
+            }
+        } catch {
+            Write-Log -Message "  Error checking SharePoint List Webhooks: $($_.Exception.Message)" -Type "ERROR" -SpecificLogFile $GeneralReportFile
+        }
+        
+        # --- 2. Teams Incoming Webhooks ---
+        Write-Log -Message "Checking Teams Incoming Webhooks..." -SpecificLogFile $GeneralReportFile
+        
+        try {
+            # Get all teams
+            $teams = Get-MgTeam -All -ErrorAction SilentlyContinue
+            
+            if (-not $teams) {
+                Write-Log -Message "  Could not retrieve Teams or no teams found." -Type "WARN" -SpecificLogFile $GeneralReportFile
+            } else {
+                Write-Log -Message "  Found $($teams.Count) Teams. Checking for incoming webhooks..." -SpecificLogFile $GeneralReportFile
+                
+                $teamsProcessed = 0
+                $totalConnectorsFound = 0
+                $suspiciousConnectors = New-Object System.Collections.Generic.List[PSObject]
+                
+                # Progress tracking for many teams
+                $ProgressInterval = [math]::Max(1, [math]::Floor($teams.Count / 10))
+                
+                foreach ($team in $teams) {
+                    $teamsProcessed++
+                    
+                    # Show progress periodically
+                    if ($teamsProcessed % $ProgressInterval -eq 0 -or $teamsProcessed -eq $teams.Count) {
+                        Write-Log -Message "  Processing team $teamsProcessed of $($teams.Count): $($team.DisplayName)" -Type "INFO"
+                    }
+                    
+                    try {
+                        # Get all channels in the team
+                        $channels = Get-MgTeamChannel -TeamId $team.Id -All -ErrorAction SilentlyContinue
+                        
+                        if ($channels) {
+                            foreach ($channel in $channels) {
+                                # Check for webhooks (connectors) on this channel
+                                $connectorsUri = "https://graph.microsoft.com/v1.0/teams/$($team.Id)/channels/$($channel.Id)/tabs"
+                                $tabs = Invoke-MgGraphRequest -Method Get -Uri $connectorsUri -ErrorAction SilentlyContinue
+                                
+                                if ($tabs -and $tabs.value) {
+                                    # Look for connector tabs
+                                    $connectorTabs = $tabs.value | Where-Object { 
+                                        $_.teamsApp.id -eq "405a659c-238a-450d-aaff-gho7c00e0cdc" -or  # Exact ID may vary, but we'll cast a wide net
+                                        $_.displayName -like "*Connector*" -or 
+                                        $_.displayName -like "*Webhook*" 
+                                    }
+                                    
+                                    if ($connectorTabs) {
+                                        $totalConnectorsFound += $connectorTabs.Count
+                                        
+                                        Write-Log -Message "    Found $($connectorTabs.Count) potential webhook connector tabs in channel '$($channel.DisplayName)' in team '$($team.DisplayName)':" -SpecificLogFile $GeneralReportFile
+                                        
+                                        foreach ($tab in $connectorTabs) {
+                                            Write-Log -Message "      Tab: $($tab.displayName) (ID: $($tab.id))" -SpecificLogFile $GeneralReportFile
+                                            
+                                            if ($tab.configuration.entityId -or $tab.configuration.contentUrl) {
+                                                Write-Log -Message "        Configuration: $($tab.configuration.entityId ?? $tab.configuration.contentUrl)" -SpecificLogFile $GeneralReportFile
+                                            }
+                                            
+                                            # Check for suspicious configuration
+                                            $isSuspicious = $false
+                                            $matchedPattern = ""
+                                            $configString = $tab.configuration.entityId ?? $tab.configuration.contentUrl ?? ""
+                                            
+                                            foreach ($pattern in $suspiciousUrlPatterns) {
+                                                if ($configString -like "*$pattern*") {
+                                                    $isSuspicious = $true
+                                                    $matchedPattern = $pattern
+                                                    break
+                                                }
+                                            }
+                                            
+                                            # Alert for suspicious webhooks
+                                            if ($isSuspicious) {
+                                                $suspiciousConnectors.Add([PSCustomObject]@{
+                                                    TeamName = $team.DisplayName
+                                                    ChannelName = $channel.DisplayName
+                                                    TabName = $tab.displayName
+                                                    TabId = $tab.id
+                                                    Configuration = $configString
+                                                    Pattern = $matchedPattern
+                                                })
+                                                
+                                                Write-Log -Message "        ALERT: Tab potentially contains suspicious webhook configuration matching pattern '$matchedPattern'." -Type "ALERT" -IsAlert -SpecificLogFile $GeneralReportFile
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    } catch {
+                        Write-Log -Message "    Error checking channels or connectors in team '$($team.DisplayName)': $($_.Exception.Message)" -Type "ERROR" -SpecificLogFile $GeneralReportFile
+                    }
+                }
+                
+                Write-Log -Message "  Completed Teams Incoming Webhooks check. Found $totalConnectorsFound potential webhook connectors across all teams." -SpecificLogFile $GeneralReportFile
+                
+                if ($suspiciousConnectors.Count -gt 0) {
+                    Write-Log -Message "  ALERT: Found $($suspiciousConnectors.Count) suspicious Teams webhook connectors:" -Type "ALERT" -IsAlert -SpecificLogFile $GeneralReportFile
+                    foreach ($connector in $suspiciousConnectors) {
+                        Write-Log -Message "    - Team: $($connector.TeamName), Channel: $($connector.ChannelName), Tab: $($connector.TabName), Configuration: $($connector.Configuration), Pattern: $($connector.Pattern)" -Type "ALERT" -IsAlert -SpecificLogFile $GeneralReportFile
+                    }
+                }
+            }
+        } catch {
+            Write-Log -Message "  Error checking Teams Incoming Webhooks: $($_.Exception.Message)" -Type "ERROR" -SpecificLogFile $GeneralReportFile
+        }
+        
+        # --- 3. Check Power Automate HTTP Webhook Triggers (supplement to earlier Power Platform checks) ---
+        Write-Log -Message "Checking for additional Power Automate HTTP Webhook Triggers..." -SpecificLogFile $GeneralReportFile
+        
+        if (-not $PpAdminConnected) {
+            Write-Log -Message "  Power Platform Admin not connected. Cannot check Power Automate HTTP Triggers." -Type "WARN" -SpecificLogFile $GeneralReportFile
+        } else {
+            try {
+                # This is supplemental to the Power Platform checks (section 31)
+                # It specifically focuses on HTTP triggers that could be used for persistence
+                
+                $environments = Get-AdminPowerAppEnvironment -ErrorAction SilentlyContinue
+                
+                if (-not $environments) {
+                    Write-Log -Message "  Could not retrieve Power Platform environments." -Type "WARN" -SpecificLogFile $GeneralReportFile
+                } else {
+                    $httpTriggerFlows = New-Object System.Collections.Generic.List[PSObject]
+                    
+                    foreach ($env in $environments) {
+                        Write-Log -Message "  Checking for HTTP triggered flows in environment: $($env.DisplayName)..." -SpecificLogFile $GeneralReportFile
+                        
+                        $flows = Get-AdminFlow -EnvironmentName $env.EnvironmentName -ErrorAction SilentlyContinue
+                        
+                        if ($flows) {
+                            $envHttpFlows = $flows | Where-Object { 
+                                $_.Internal.properties.definitionSummary.triggers | Where-Object { 
+                                    $_.Type -eq "Request" -or 
+                                    $_.Kind -like "*HttpWebhook*" -or 
+                                    $_.Kind -like "*Webhook*" 
+                                } 
+                            }
+                            
+                            if ($envHttpFlows) {
+                                Write-Log -Message "    Found $($envHttpFlows.Count) HTTP triggered flows in environment $($env.DisplayName):" -SpecificLogFile $GeneralReportFile
+                                
+                                foreach ($flow in $envHttpFlows) {
+                                    Write-Log -Message "      Flow: $($flow.DisplayName) (ID: $($flow.FlowName))" -SpecificLogFile $GeneralReportFile
+                                    
+                                    # Get trigger details
+                                    $trigger = $flow.Internal.properties.definitionSummary.triggers | Where-Object { 
+                                        $_.Type -eq "Request" -or 
+                                        $_.Kind -like "*HttpWebhook*" -or 
+                                        $_.Kind -like "*Webhook*" 
+                                    } | Select-Object -First 1
+                                    
+                                    Write-Log -Message "        Trigger Type: $($trigger.Type), Kind: $($trigger.Kind)" -SpecificLogFile $GeneralReportFile
+                                    
+                                    # Check creation and modification dates
+                                    $isRecent = $false
+                                    if ($flow.Internal.properties.createdTime) {
+                                        try {
+                                            $createdDate = [DateTime]$flow.Internal.properties.createdTime
+                                            if ((New-TimeSpan -Start $createdDate -End (Get-Date)).TotalDays -lt $script:LookbackDays) {
+                                                $isRecent = $true
+                                                Write-Log -Message "        ALERT: Flow was created recently ($($flow.Internal.properties.createdTime))." -Type "ALERT" -IsAlert -SpecificLogFile $GeneralReportFile
+                                            }
+                                        } catch {}
+                                    }
+                                    
+                                    # Store for summary
+                                    $httpTriggerFlows.Add([PSCustomObject]@{
+                                        EnvironmentName = $env.DisplayName
+                                        FlowName = $flow.DisplayName
+                                        FlowId = $flow.FlowName
+                                        TriggerType = $trigger.Type
+                                        TriggerKind = $trigger.Kind
+                                        IsRecent = $isRecent
+                                    })
+                                }
+                            } else {
+                                Write-Log -Message "    No HTTP triggered flows found in environment $($env.DisplayName)." -SpecificLogFile $GeneralReportFile
+                            }
+                        }
+                    }
+                    
+                    if ($httpTriggerFlows.Count -gt 0) {
+                        $recentFlows = $httpTriggerFlows | Where-Object { $_.IsRecent }
+                        
+                        if ($recentFlows.Count -gt 0) {
+                            Write-Log -Message "  ALERT: Found $($recentFlows.Count) recently created HTTP triggered flows:" -Type "ALERT" -IsAlert -SpecificLogFile $GeneralReportFile
+                            foreach ($flow in $recentFlows) {
+                                Write-Log -Message "    - Environment: $($flow.EnvironmentName), Flow: $($flow.FlowName), Trigger: $($flow.TriggerType)/$($flow.TriggerKind)" -Type "ALERT" -IsAlert -SpecificLogFile $GeneralReportFile
+                            }
+                        }
+                        
+                        # Special note about webhook triggers
+                        Write-Log -Message "  NOTE: HTTP triggered flows can be used legitimately for integration scenarios. Review all flows carefully to determine if they are legitimate." -Type "INFO" -SpecificLogFile $GeneralReportFile
+                    }
+                }
+            } catch {
+                Write-Log -Message "  Error checking Power Automate HTTP Triggers: $($_.Exception.Message)" -Type "ERROR" -SpecificLogFile $GeneralReportFile
+            }
+        }
+        
+        # --- 4. Azure Logic Apps with HTTP Triggers (if applicable) ---
+        Write-Log -Message "Checking Azure Logic Apps with HTTP Triggers (if Az module available)..." -SpecificLogFile $GeneralReportFile
+        
+        # Check if Az module is available
+        if (-not (Get-Module -ListAvailable -Name Az.LogicApp)) {
+            Write-Log -Message "  Az.LogicApp module not available. Skipping Azure Logic Apps check." -Type "INFO" -SpecificLogFile $GeneralReportFile
+        } else {
+            try {
+                # Check if connected to Azure
+                $azContext = Get-AzContext -ErrorAction SilentlyContinue
+                
+                if (-not $azContext) {
+                    Write-Log -Message "  Not connected to Azure. Please use Connect-AzAccount before running this script to check Logic Apps." -Type "WARN" -SpecificLogFile $GeneralReportFile
+                } else {
+                    Write-Log -Message "  Connected to Azure subscription: $($azContext.Subscription.Name). Checking Logic Apps..." -SpecificLogFile $GeneralReportFile
+                    
+                    # Get all Logic Apps
+                    $logicApps = Get-AzLogicApp -ErrorAction SilentlyContinue
+                    
+                    if (-not $logicApps) {
+                        Write-Log -Message "  No Logic Apps found in the current subscription." -Type "INFO" -SpecificLogFile $GeneralReportFile
+                    } else {
+                        Write-Log -Message "  Found $($logicApps.Count) Logic Apps. Checking for HTTP triggers..." -SpecificLogFile $GeneralReportFile
+                        
+                        $httpTriggerApps = New-Object System.Collections.Generic.List[PSObject]
+                        
+                        foreach ($app in $logicApps) {
+                            try {
+                                # Get workflow definition
+                                $definition = Get-AzLogicAppWorkflowDefinition -ResourceGroupName $app.ResourceGroupName -Name $app.Name -ErrorAction SilentlyContinue
+                                
+                                if ($definition -and $definition.Triggers) {
+                                    # Check for HTTP triggers
+                                    $httpTriggers = $definition.Triggers.PSObject.Properties | Where-Object { 
+                                        $_.Value.Type -eq "Request" -or 
+                                        $_.Value.Type -like "*Http*" -or 
+                                        $_.Value.Type -like "*Webhook*" 
+                                    }
+                                    
+                                    if ($httpTriggers) {
+                                        Write-Log -Message "    Logic App with HTTP trigger: $($app.Name) (Resource Group: $($app.ResourceGroupName))" -SpecificLogFile $GeneralReportFile
+                                        
+                                        foreach ($trigger in $httpTriggers) {
+                                            Write-Log -Message "      Trigger: $($trigger.Name), Type: $($trigger.Value.Type)" -SpecificLogFile $GeneralReportFile
+                                            
+                                            if ($trigger.Value.Inputs -and $trigger.Value.Inputs.Schema) {
+                                                Write-Log -Message "        Has defined schema for incoming requests" -SpecificLogFile $GeneralReportFile
+                                            }
+                                        }
+                                        
+                                        # Check if recently created or modified
+                                        if ((New-TimeSpan -Start $app.CreatedTime -End (Get-Date)).TotalDays -lt $script:LookbackDays) {
+                                            Write-Log -Message "      ALERT: Logic App was created recently ($($app.CreatedTime))." -Type "ALERT" -IsAlert -SpecificLogFile $GeneralReportFile
+                                        }
+                                        if ((New-TimeSpan -Start $app.ChangedTime -End (Get-Date)).TotalDays -lt $script:LookbackDays) {
+                                            Write-Log -Message "      ALERT: Logic App was modified recently ($($app.ChangedTime))." -Type "ALERT" -IsAlert -SpecificLogFile $GeneralReportFile
+                                        }
+                                        
+                                        # Store for summary
+                                        $httpTriggerApps.Add([PSCustomObject]@{
+                                            Name = $app.Name
+                                            ResourceGroup = $app.ResourceGroupName
+                                            CreatedTime = $app.CreatedTime
+                                            ChangedTime = $app.ChangedTime
+                                            IsRecentlyCreated = (New-TimeSpan -Start $app.CreatedTime -End (Get-Date)).TotalDays -lt $script:LookbackDays
+                                            IsRecentlyModified = (New-TimeSpan -Start $app.ChangedTime -End (Get-Date)).TotalDays -lt $script:LookbackDays
+                                        })
+                                    }
+                                }
+                            } catch {
+                                Write-Log -Message "    Error checking Logic App $($app.Name): $($_.Exception.Message)" -Type "ERROR" -SpecificLogFile $GeneralReportFile
+                            }
+                        }
+                        
+                        if ($httpTriggerApps.Count -gt 0) {
+                            $recentApps = $httpTriggerApps | Where-Object { $_.IsRecentlyCreated -or $_.IsRecentlyModified }
+                            
+                            if ($recentApps.Count -gt 0) {
+                                Write-Log -Message "  ALERT: Found $($recentApps.Count) recently created or modified Logic Apps with HTTP triggers:" -Type "ALERT" -IsAlert -SpecificLogFile $GeneralReportFile
+                                foreach ($app in $recentApps) {
+                                    $createdTag = if ($app.IsRecentlyCreated) { " [RECENTLY CREATED]" } else { "" }
+                                    $modifiedTag = if ($app.IsRecentlyModified) { " [RECENTLY MODIFIED]" } else { "" }
+                                    Write-Log -Message "    - Logic App: $($app.Name), Resource Group: $($app.ResourceGroup)$createdTag$modifiedTag" -Type "ALERT" -IsAlert -SpecificLogFile $GeneralReportFile
+                                }
+                            }
+                        }
+                    }
+                }
+            } catch {
+                Write-Log -Message "  Error checking Azure Logic Apps: $($_.Exception.Message)" -Type "ERROR" -SpecificLogFile $GeneralReportFile
+            }
+        }
+        
+        # --- 5. Custom SharePoint Framework (SPFx) Extensions with Server-Side Components ---
+        Write-Log -Message "Checking for Custom SharePoint Framework Extensions (SPFx) with potential back doors..." -SpecificLogFile $GeneralReportFile
+        
+        try {
+            if (-not $GraphConnected) {
+                Write-Log -Message "  Graph API not connected. Cannot check SPFx Extensions." -Type "WARN" -SpecificLogFile $GeneralReportFile
+            } else {
+                # Get tenant app catalog
+                $tenantApps = Invoke-MgGraphRequest -Method GET -Uri "https://graph.microsoft.com/v1.0/sites?filter=siteCollection/root ne null and site/template eq 'APPCATALOG#0'" -ErrorAction SilentlyContinue
+                
+                if (-not $tenantApps -or -not $tenantApps.value -or $tenantApps.value.Count -eq 0) {
+                    Write-Log -Message "  Could not retrieve tenant app catalog or no app catalog found." -Type "WARN" -SpecificLogFile $GeneralReportFile
+                } else {
+                    # There should typically be only one tenant app catalog
+                    $appCatalog = $tenantApps.value[0]
+                    Write-Log -Message "  Found tenant app catalog: $($appCatalog.displayName) ($($appCatalog.webUrl))" -SpecificLogFile $GeneralReportFile
+                    
+                    # Get apps in the app catalog
+                    $appCatalogId = $appCatalog.id
+                    $apps = Invoke-MgGraphRequest -Method GET -Uri "https://graph.microsoft.com/v1.0/sites/$appCatalogId/lists" -ErrorAction SilentlyContinue
+                    
+                    if (-not $apps -or -not $apps.value) {
+                        Write-Log -Message "  Could not retrieve apps from tenant app catalog." -Type "WARN" -SpecificLogFile $GeneralReportFile
+                    } else {
+                        # Find the Apps list (contains SPFx solutions)
+                        $appsList = $apps.value | Where-Object { $_.displayName -eq "Apps" -or $_.displayName -eq "TenantAppCatalog" }
+                        
+                        if (-not $appsList) {
+                            Write-Log -Message "  Could not find Apps list in tenant app catalog." -Type "WARN" -SpecificLogFile $GeneralReportFile
+                        } else {
+                            # Get apps from the Apps list
+                            $appsListId = $appsList.id
+                            $spfxApps = Invoke-MgGraphRequest -Method GET -Uri "https://graph.microsoft.com/v1.0/sites/$appCatalogId/lists/$appsListId/items?expand=fields" -ErrorAction SilentlyContinue
+                            
+                            if (-not $spfxApps -or -not $spfxApps.value) {
+                                Write-Log -Message "  Could not retrieve apps from Apps list or no apps found." -Type "INFO" -SpecificLogFile $GeneralReportFile
+                            } else {
+                                Write-Log -Message "  Found $($spfxApps.value.Count) apps in tenant app catalog. Checking for suspicious SPFx solutions..." -SpecificLogFile $GeneralReportFile
+                                
+                                $recentSpfxApps = New-Object System.Collections.Generic.List[PSObject]
+                                
+                                foreach ($app in $spfxApps.value) {
+                                    $appFields = $app.fields
+                                    $appTitle = $appFields.Title
+                                    $appModified = $appFields.Modified
+                                    $appCreated = $appFields.Created
+                                    
+                                    # Some basic app metadata
+                                    Write-Log -Message "    App: $appTitle" -SpecificLogFile $GeneralReportFile
+                                    Write-Log -Message "      Created: $appCreated, Modified: $appModified" -SpecificLogFile $GeneralReportFile
+                                    
+                                    # Check for recent creation or modification
+                                    $isRecentlyCreated = $false
+                                    $isRecentlyModified = $false
+                                    
+                                    if ($appCreated) {
+                                        try {
+                                            $createdDate = [DateTime]$appCreated
+                                            if ((New-TimeSpan -Start $createdDate -End (Get-Date)).TotalDays -lt $script:LookbackDays) {
+                                                $isRecentlyCreated = $true
+                                            }
+                                        } catch {}
+                                    }
+                                    
+                                    if ($appModified) {
+                                        try {
+                                            $modifiedDate = [DateTime]$appModified
+                                            if ((New-TimeSpan -Start $modifiedDate -End (Get-Date)).TotalDays -lt $script:LookbackDays) {
+                                                $isRecentlyModified = $true
+                                            }
+                                        } catch {}
+                                    }
+                                    
+                                    if ($isRecentlyCreated) {
+                                        Write-Log -Message "      ALERT: App was created recently ($appCreated)." -Type "ALERT" -IsAlert -SpecificLogFile $GeneralReportFile
+                                    }
+                                    
+                                    if ($isRecentlyModified) {
+                                        Write-Log -Message "      ALERT: App was modified recently ($appModified)." -Type "ALERT" -IsAlert -SpecificLogFile $GeneralReportFile
+                                    }
+                                    
+                                    if ($isRecentlyCreated -or $isRecentlyModified) {
+                                        $recentSpfxApps.Add([PSCustomObject]@{
+                                            Title = $appTitle
+                                            Created = $appCreated
+                                            Modified = $appModified
+                                            IsRecentlyCreated = $isRecentlyCreated
+                                            IsRecentlyModified = $isRecentlyModified
+                                        })
+                                    }
+                                }
+                                
+                                if ($recentSpfxApps.Count -gt 0) {
+                                    Write-Log -Message "  ALERT: Found $($recentSpfxApps.Count) recently created or modified SPFx apps:" -Type "ALERT" -IsAlert -SpecificLogFile $GeneralReportFile
+                                    foreach ($app in $recentSpfxApps) {
+                                        $createdTag = if ($app.IsRecentlyCreated) { " [RECENTLY CREATED]" } else { "" }
+                                        $modifiedTag = if ($app.IsRecentlyModified) { " [RECENTLY MODIFIED]" } else { "" }
+                                        Write-Log -Message "    - App: $($app.Title)$createdTag$modifiedTag" -Type "ALERT" -IsAlert -SpecificLogFile $GeneralReportFile
+                                    }
+                                    Write-Log -Message "  NOTE: These SPFx solutions should be reviewed for potential security risks. Download and examine the .sppkg files for suspicious code or remote endpoints." -Type "WARN" -SpecificLogFile $GeneralReportFile
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        } catch {
+            Write-Log -Message "  Error checking SharePoint Framework Extensions: $($_.Exception.Message)" -Type "ERROR" -SpecificLogFile $GeneralReportFile
+        }
+        
+        Write-Log -Message "Completed Custom Integration Endpoints check." -SpecificLogFile $GeneralReportFile
+        Write-Log -Message "NOTE: This check identified visible integration endpoints. Additional endpoints may exist that are not directly visible in the admin interfaces. For a complete analysis, review each service's specific administration tools and audit logs." -Type "INFO" -SpecificLogFile $GeneralReportFile
+        
+    } catch {
+        Write-Log -Message "Error checking Custom Integration Endpoints: $($_.Exception.Message)" -Type "ERROR" -SpecificLogFile $GeneralReportFile
+    }
 
     # --- 40. Data Loss Prevention Policy Changes (Tenant-wide) ---
-    Write-Log -Message "Checking Data Loss Prevention Policy Changes (M365 services DLP)..." -Type "SUBSECTION" -SpecificLogFile $GeneralReportFile
-    Write-Log -Message "TODO: Implement M365 Data Loss Prevention Policy checks (Requires Security & Compliance PowerShell)." -Type "WARN" -SpecificLogFile $GeneralReportFile
+    Write-Log -Message "Checking Data Loss Prevention Policy Changes..." -Type "SUBSECTION" -SpecificLogFile $GeneralReportFile
+    try {
+        # Flag for whether we have any DLP info to analyze
+        $dlpInfoFound = $false
+        
+        # --- 1. Check Security & Compliance PowerShell module availability
+        Write-Log -Message "Checking DLP policies from Security & Compliance Center..." -SpecificLogFile $GeneralReportFile
+        
+        if (-not (Get-Module -ListAvailable -Name ExchangeOnlineManagement)) {
+            Write-Log -Message "ExchangeOnlineManagement module not found. This is required for DLP policy checks from Security & Compliance Center." -Type "WARN" -SpecificLogFile $GeneralReportFile
+        } else {
+            try {
+                # Check if connected to Security & Compliance Center
+                $sccConnected = $false
+                $sccSession = Get-PSSession | Where-Object {$_.ConfigurationName -eq 'Microsoft.Exchange' -and $_.ComputerName -like '*.compliance.protection.outlook.com'}
+                
+                if ($sccSession -and $sccSession.State -eq 'Opened') {
+                    $sccConnected = $true
+                    Write-Log -Message "Already connected to Security & Compliance Center." -SpecificLogFile $GeneralReportFile
+                } else {
+                    Write-Log -Message "Connecting to Security & Compliance Center..." -SpecificLogFile $GeneralReportFile
+                    try {
+                        Connect-IPPSSession -ErrorAction Stop
+                        $sccConnected = $true
+                        Write-Log -Message "Successfully connected to Security & Compliance Center." -SpecificLogFile $GeneralReportFile
+                    } catch {
+                        Write-Log -Message "Could not connect to Security & Compliance Center: $($_.Exception.Message)" -Type "WARN" -SpecificLogFile $GeneralReportFile
+                    }
+                }
+                
+                if ($sccConnected) {
+                    # Get DLP policies
+                    try {
+                        $dlpPolicies = Get-DlpCompliancePolicy -ErrorAction Stop
+                        
+                        if ($dlpPolicies -and $dlpPolicies.Count -gt 0) {
+                            $dlpInfoFound = $true
+                            Write-Log -Message "Found $($dlpPolicies.Count) DLP policies in Security & Compliance Center." -SpecificLogFile $GeneralReportFile
+                            
+                            # Check each policy
+                            foreach ($policy in $dlpPolicies) {
+                                Write-Log -Message "DLP Policy: $($policy.Name)" -SpecificLogFile $GeneralReportFile
+                                Write-Log -Message "  Mode: $($policy.Mode)" -SpecificLogFile $GeneralReportFile
+                                Write-Log -Message "  Created: $($policy.WhenCreated), Last Modified: $($policy.WhenChanged)" -SpecificLogFile $GeneralReportFile
+                                
+                                # Check for recently created or modified policies
+                                $isRecentlyCreated = $false
+                                $isRecentlyModified = $false
+                                
+                                if ((New-TimeSpan -Start $policy.WhenCreated -End (Get-Date)).TotalDays -lt $script:LookbackDays) {
+                                    $isRecentlyCreated = $true
+                                    Write-Log -Message "  ALERT: Policy was created recently ($($policy.WhenCreated))." -Type "ALERT" -IsAlert -SpecificLogFile $GeneralReportFile
+                                }
+                                
+                                if ((New-TimeSpan -Start $policy.WhenChanged -End (Get-Date)).TotalDays -lt $script:LookbackDays) {
+                                    $isRecentlyModified = $true
+                                    Write-Log -Message "  ALERT: Policy was modified recently ($($policy.WhenChanged))." -Type "ALERT" -IsAlert -SpecificLogFile $GeneralReportFile
+                                }
+                                
+                                # Check if policy is disabled or in TestMode
+                                if ($policy.Mode -eq "Disable") {
+                                    Write-Log -Message "  ALERT: Policy is currently DISABLED." -Type "ALERT" -IsAlert -SpecificLogFile $GeneralReportFile
+                                } elseif ($policy.Mode -eq "TestWithoutNotifications" -or $policy.Mode -eq "TestWithNotifications") {
+                                    Write-Log -Message "  WARN: Policy is in test mode ($($policy.Mode)). Not enforcing any actions." -Type "WARN" -SpecificLogFile $GeneralReportFile
+                                }
+                                
+                                # Check location status
+                                if ($policy.ExchangeLocation -eq "All") {
+                                    Write-Log -Message "  Exchange: All mailboxes" -SpecificLogFile $GeneralReportFile
+                                } else {
+                                    Write-Log -Message "  Exchange: Limited locations or disabled" -SpecificLogFile $GeneralReportFile
+                                }
+                                
+                                if ($policy.SharePointLocation -eq "All") {
+                                    Write-Log -Message "  SharePoint: All sites" -SpecificLogFile $GeneralReportFile
+                                } else {
+                                    Write-Log -Message "  SharePoint: Limited locations or disabled" -SpecificLogFile $GeneralReportFile
+                                }
+                                
+                                if ($policy.OneDriveLocation -eq "All") {
+                                    Write-Log -Message "  OneDrive: All locations" -SpecificLogFile $GeneralReportFile
+                                } else {
+                                    Write-Log -Message "  OneDrive: Limited locations or disabled" -SpecificLogFile $GeneralReportFile
+                                }
+                                
+                                if ($policy.TeamsLocation -eq "All") {
+                                    Write-Log -Message "  Teams: All teams" -SpecificLogFile $GeneralReportFile
+                                } else {
+                                    Write-Log -Message "  Teams: Limited locations or disabled" -SpecificLogFile $GeneralReportFile
+                                }
+                                
+                                # Get rules for this policy to see actions
+                                try {
+                                    $rules = Get-DlpComplianceRule -Policy $policy.Name -ErrorAction Stop
+                                    
+                                    if ($rules -and $rules.Count -gt 0) {
+                                        Write-Log -Message "  Policy has $($rules.Count) rule(s):" -SpecificLogFile $GeneralReportFile
+                                        
+                                        foreach ($rule in $rules) {
+                                            Write-Log -Message "    Rule: $($rule.Name)" -SpecificLogFile $GeneralReportFile
+                                            
+                                            # Check if rule was modified recently
+                                            if ((New-TimeSpan -Start $rule.WhenChanged -End (Get-Date)).TotalDays -lt $script:LookbackDays) {
+                                                Write-Log -Message "    ALERT: Rule was modified recently ($($rule.WhenChanged))." -Type "ALERT" -IsAlert -SpecificLogFile $GeneralReportFile
+                                            }
+                                            
+                                            # Check blocked actions
+                                            if ($rule.BlockAccess -eq $true) {
+                                                Write-Log -Message "    Actions: Blocks access" -SpecificLogFile $GeneralReportFile
+                                            } else {
+                                                Write-Log -Message "    Actions: Does not block access (notification or audit only)" -SpecificLogFile $GeneralReportFile
+                                            }
+                                            
+                                            # Check sensitive info types
+                                            if ($rule.ContentContainsSensitiveInformation) {
+                                                $sensitiveTypes = $rule.ContentContainsSensitiveInformation | Select-Object -ExpandProperty Name | Sort-Object -Unique
+                                                Write-Log -Message "    Sensitive Info Types: $($sensitiveTypes -join ', ')" -SpecificLogFile $GeneralReportFile
+                                            } else {
+                                                Write-Log -Message "    No specific sensitive info types defined." -SpecificLogFile $GeneralReportFile
+                                            }
+                                        }
+                                    } else {
+                                        Write-Log -Message "  WARN: Policy has no associated rules. It will not have any effect." -Type "WARN" -SpecificLogFile $GeneralReportFile
+                                    }
+                                } catch {
+                                    Write-Log -Message "  Error getting rules for policy '$($policy.Name)': $($_.Exception.Message)" -Type "ERROR" -SpecificLogFile $GeneralReportFile
+                                }
+                            }
+                        } else {
+                            Write-Log -Message "No DLP policies found in Security & Compliance Center." -Type "WARN" -SpecificLogFile $GeneralReportFile
+                        }
+                    } catch {
+                        Write-Log -Message "Error retrieving DLP policies from Security & Compliance Center: $($_.Exception.Message)" -Type "ERROR" -SpecificLogFile $GeneralReportFile
+                    }
+                    
+                    # Disconnect from Security & Compliance Center if we connected in this function
+                    if (-not $sccSession) {
+                        Write-Log -Message "Disconnecting from Security & Compliance Center..." -SpecificLogFile $GeneralReportFile
+                        Get-PSSession | Where-Object {$_.ConfigurationName -eq 'Microsoft.Exchange' -and $_.ComputerName -like '*.compliance.protection.outlook.com'} | Remove-PSSession -Confirm:$false
+                    }
+                }
+            } catch {
+                Write-Log -Message "Error in Security & Compliance DLP check: $($_.Exception.Message)" -Type "ERROR" -SpecificLogFile $GeneralReportFile
+            }
+        }
+        
+        # --- 2. Check Graph API for DLP policy changes in audit logs
+        if ($GraphConnected) {
+            Write-Log -Message "Checking audit logs for DLP policy changes..." -SpecificLogFile $GeneralReportFile
+            
+            # Ensure we have the required permission
+            $context = Get-MgContext
+            $hasRequiredPermission = $false
+            if ($context.Scopes) {
+                if ($context.Scopes -contains "AuditLog.Read.All" -or 
+                    $context.Scopes -contains "SecurityEvents.Read.All") {
+                    $hasRequiredPermission = $true
+                }
+            }
+            
+            if (-not $hasRequiredPermission) {
+                Write-Log -Message "Connected to Graph API but missing required permissions (AuditLog.Read.All or SecurityEvents.Read.All). Cannot check audit logs for DLP changes." -Type "WARN" -SpecificLogFile $GeneralReportFile
+            } else {
+                try {
+                    # Define the time period to look back
+                    $startTime = (Get-Date).AddDays(-$script:LookbackDays).ToString("yyyy-MM-ddTHH:mm:ssZ")
+                    $endTime = (Get-Date).ToString("yyyy-MM-ddTHH:mm:ssZ")
+                    
+                    # Define operations related to DLP that we want to audit
+                    $dlpOperations = @(
+                        "DlpRuleMatch",
+                        "Create DLP policy",
+                        "Update DLP policy",
+                        "Remove DLP policy",
+                        "Create DLP rule",
+                        "Update DLP rule",
+                        "Remove DLP rule",
+                        "DLP status changed" 
+                    )
+                    
+                    # Create filter for the specific operations we're interested in
+                    $operationFilter = $dlpOperations | ForEach-Object { "activityDisplayName eq '$_'" }
+                    $filter = "activityDateTime ge $startTime and ($($operationFilter -join ' or '))"
+                    
+                    # Query audit logs with the filter
+                    Write-Log -Message "Querying audit logs for DLP policy changes since $startTime..." -SpecificLogFile $GeneralReportFile
+                    $auditLogs = Get-MgAuditLogDirectoryAudit -Filter $filter -All -ErrorAction SilentlyContinue
+                    
+                    if ($auditLogs -and $auditLogs.Count -gt 0) {
+                        $dlpInfoFound = $true
+                        Write-Log -Message "Found $($auditLogs.Count) DLP-related events in the audit logs. Analyzing..." -SpecificLogFile $GeneralReportFile
+                        
+                        # Group audit events by policy for clarity
+                        $policyEvents = @{}
+                        
+                        foreach ($log in $auditLogs) {
+                            $timestamp = $log.ActivityDateTime
+                            $actor = $log.InitiatedBy.User.UserPrincipalName ?? $log.InitiatedBy.User.DisplayName ?? $log.InitiatedBy.App.DisplayName ?? "Unknown"
+                            $activity = $log.ActivityDisplayName
+                            $result = $log.Result
+                            
+                            # Extract target name (policy or rule name)
+                            $targetName = $null
+                            if ($log.TargetResources -and $log.TargetResources.Count -gt 0) {
+                                $targetName = $log.TargetResources[0].DisplayName
+                            }
+                            
+                            if (-not $targetName -and $activity -eq "DlpRuleMatch") {
+                                # For DlpRuleMatch, the name might be in properties
+                                $modifiedProps = $log.TargetResources[0].ModifiedProperties
+                                foreach ($prop in $modifiedProps) {
+                                    if ($prop.DisplayName -eq "PolicyName" -or $prop.DisplayName -eq "PolicyDetails") {
+                                        $targetName = $prop.NewValue -replace '"', ''
+                                        break
+                                    }
+                                }
+                            }
+                            
+                            if (-not $targetName) {
+                                $targetName = "Unknown Policy/Rule"
+                            }
+                            
+                            # Add to policy events dictionary
+                            if (-not $policyEvents.ContainsKey($targetName)) {
+                                $policyEvents[$targetName] = New-Object System.Collections.Generic.List[PSObject]
+                            }
+                            
+                            $policyEvents[$targetName].Add([PSCustomObject]@{
+                                Timestamp = $timestamp
+                                Actor = $actor
+                                Activity = $activity
+                                Result = $result
+                                Details = $log
+                            })
+                        }
+                        
+                        # List events by policy
+                        foreach ($policyName in $policyEvents.Keys) {
+                            $events = $policyEvents[$policyName]
+                            Write-Log -Message "Policy/Rule: $policyName" -SpecificLogFile $GeneralReportFile
+                            Write-Log -Message "  Found $($events.Count) events:" -SpecificLogFile $GeneralReportFile
+                            
+                            # Sort events by timestamp
+                            $sortedEvents = $events | Sort-Object -Property Timestamp
+                            
+                            foreach ($event in $sortedEvents) {
+                                Write-Log -Message "  - $($event.Timestamp): $($event.Activity) by $($event.Actor) - Result: $($event.Result)" -SpecificLogFile $GeneralReportFile
+                                
+                                # Alert on policy creation, deletion, and changes
+                                if ($event.Activity -eq "Create DLP policy" -or $event.Activity -eq "Create DLP rule") {
+                                    Write-Log -Message "    ALERT: New DLP policy/rule created." -Type "ALERT" -IsAlert -SpecificLogFile $GeneralReportFile
+                                } elseif ($event.Activity -eq "Remove DLP policy" -or $event.Activity -eq "Remove DLP rule") {
+                                    Write-Log -Message "    ALERT: DLP policy/rule was deleted." -Type "ALERT" -IsAlert -SpecificLogFile $GeneralReportFile
+                                } elseif ($event.Activity -eq "DLP status changed" -or $event.Activity -eq "Update DLP policy" -or $event.Activity -eq "Update DLP rule") {
+                                    # Check for specific changes in the modified properties
+                                    $modifiedProps = $event.Details.TargetResources[0].ModifiedProperties
+                                    $dlpDisabled = $false
+                                    $policyMode = $null
+                                    
+                                    foreach ($prop in $modifiedProps) {
+                                        $propName = $prop.DisplayName
+                                        $oldValue = $prop.OldValue
+                                        $newValue = $prop.NewValue
+                                        
+                                        if ($propName -eq "Enabled" -and $oldValue -eq "True" -and $newValue -eq "False") {
+                                            $dlpDisabled = $true
+                                        } elseif ($propName -eq "Mode" -or $propName -eq "PolicyMode") {
+                                            $policyMode = $newValue
+                                        }
+                                    }
+                                    
+                                    if ($dlpDisabled) {
+                                        Write-Log -Message "    CRITICAL ALERT: DLP policy/rule was DISABLED." -Type "ALERT" -IsAlert -SpecificLogFile $GeneralReportFile
+                                    } elseif ($policyMode -and $policyMode -match "Test|Disable") {
+                                        Write-Log -Message "    ALERT: DLP policy mode changed to '$policyMode'. Policy may not be fully enforcing actions." -Type "ALERT" -IsAlert -SpecificLogFile $GeneralReportFile
+                                    } else {
+                                        Write-Log -Message "    ALERT: DLP policy/rule was updated. Review changes." -Type "ALERT" -IsAlert -SpecificLogFile $GeneralReportFile
+                                    }
+                                }
+                            }
+                        }
+                        
+                        # Look for potential tampering patterns
+                        Write-Log -Message "Analyzing for potential DLP tampering patterns..." -SpecificLogFile $GeneralReportFile
+                        
+                        # Group by actor to see if specific users are making many DLP changes
+                        $actorCounts = @{}
+                        foreach ($log in $auditLogs) {
+                            $actor = $log.InitiatedBy.User.UserPrincipalName ?? $log.InitiatedBy.User.DisplayName ?? $log.InitiatedBy.App.DisplayName ?? "Unknown"
+                            if (-not $actorCounts.ContainsKey($actor)) {
+                                $actorCounts[$actor] = 0
+                            }
+                            $actorCounts[$actor]++
+                        }
+                        
+                        # Flag actors with many changes
+                        $suspiciousActors = $actorCounts.GetEnumerator() | Where-Object { $_.Value -gt 3 } | Sort-Object -Property Value -Descending
+                        if ($suspiciousActors.Count -gt 0) {
+                            Write-Log -Message "  ALERT: The following users/apps have made multiple DLP policy changes:" -Type "ALERT" -IsAlert -SpecificLogFile $GeneralReportFile
+                            foreach ($actor in $suspiciousActors) {
+                                Write-Log -Message "    - $($actor.Key): $($actor.Value) changes" -Type "ALERT" -IsAlert -SpecificLogFile $GeneralReportFile
+                            }
+                        }
+                        
+                        # Look for disabling then re-enabling (tampering pattern)
+                        $disableThenEnablePattern = $false
+                        foreach ($policyName in $policyEvents.Keys) {
+                            $events = $policyEvents[$policyName] | Sort-Object -Property Timestamp
+                            
+                            # Detect disable followed by enable within short time
+                            for ($i = 0; $i -lt $events.Count - 1; $i++) {
+                                $currentEvent = $events[$i]
+                                $nextEvent = $events[$i + 1]
+                                
+                                # Check if current event disables and next event enables
+                                $currentDisables = $false
+                                $nextEnables = $false
+                                
+                                if ($currentEvent.Activity -match "Update" -or $currentEvent.Activity -match "status changed") {
+                                    $modifiedProps = $currentEvent.Details.TargetResources[0].ModifiedProperties
+                                    foreach ($prop in $modifiedProps) {
+                                        if (($prop.DisplayName -eq "Enabled" -and $prop.OldValue -eq "True" -and $prop.NewValue -eq "False") -or
+                                            ($prop.DisplayName -eq "Mode" -and $prop.NewValue -match "Disable")) {
+                                            $currentDisables = $true
+                                            break
+                                        }
+                                    }
+                                }
+                                
+                                if ($nextEvent.Activity -match "Update" -or $nextEvent.Activity -match "status changed") {
+                                    $modifiedProps = $nextEvent.Details.TargetResources[0].ModifiedProperties
+                                    foreach ($prop in $modifiedProps) {
+                                        if (($prop.DisplayName -eq "Enabled" -and $prop.OldValue -eq "False" -and $prop.NewValue -eq "True") -or
+                                            ($prop.DisplayName -eq "Mode" -and $prop.OldValue -match "Disable" -and $prop.NewValue -match "Enable")) {
+                                            $nextEnables = $true
+                                            break
+                                        }
+                                    }
+                                }
+                                
+                                # If pattern detected, flag it
+                                if ($currentDisables -and $nextEnables) {
+                                    $timeBetween = New-TimeSpan -Start $currentEvent.Timestamp -End $nextEvent.Timestamp
+                                    
+                                    if ($timeBetween.TotalHours -lt 24) {
+                                        $disableThenEnablePattern = $true
+                                        Write-Log -Message "  CRITICAL ALERT: Detected potential tampering pattern for policy '$policyName': Disabled at $($currentEvent.Timestamp) by $($currentEvent.Actor) and then re-enabled at $($nextEvent.Timestamp) by $($nextEvent.Actor). Time between: $($timeBetween.TotalMinutes) minutes." -Type "ALERT" -IsAlert -SpecificLogFile $GeneralReportFile
+                                    }
+                                }
+                            }
+                        }
+                        
+                        if ($disableThenEnablePattern) {
+                            Write-Log -Message "  This pattern of temporarily disabling DLP policies could indicate an attacker trying to exfiltrate data while evading DLP controls." -Type "ALERT" -IsAlert -SpecificLogFile $GeneralReportFile
+                        }
+                    } else {
+                        Write-Log -Message "No DLP policy change events found in the audit logs for the specified period." -Type "INFO" -SpecificLogFile $GeneralReportFile
+                    }
+                } catch {
+                    Write-Log -Message "Error checking audit logs for DLP changes: $($_.Exception.Message)" -Type "ERROR" -SpecificLogFile $GeneralReportFile
+                }
+            }
+        } else {
+            Write-Log -Message "Graph API not connected. Cannot check audit logs for DLP changes." -Type "WARN" -SpecificLogFile $GeneralReportFile
+        }
+        
+        # --- 3. Check Power Platform DLP policies (if connected to Power Platform)
+        if ($PpAdminConnected) {
+            Write-Log -Message "Checking Power Platform DLP policies (supplement to earlier Power Platform checks)..." -SpecificLogFile $GeneralReportFile
+            
+            try {
+                $ppDlpPolicies = Get-AdminDlpPolicy -ErrorAction SilentlyContinue
+                
+                if ($ppDlpPolicies -and $ppDlpPolicies.Count -gt 0) {
+                    $dlpInfoFound = $true
+                    Write-Log -Message "Found $($ppDlpPolicies.Count) Power Platform DLP policies." -SpecificLogFile $GeneralReportFile
+                    
+                    # We already did a detailed analysis in section 33, so we'll focus on recent changes here
+                    foreach ($policy in $ppDlpPolicies) {
+                        Write-Log -Message "Power Platform DLP Policy: $($policy.DisplayName) (ID: $($policy.PolicyName))" -SpecificLogFile $GeneralReportFile
+                        
+                        # Check for recent creation or modification
+                        if ($policy.createdTimestamp) {
+                            $createdDate = $policy.createdTimestamp
+                            Write-Log -Message "  Created: $createdDate" -SpecificLogFile $GeneralReportFile
+                            
+                            if ((New-TimeSpan -Start $createdDate -End (Get-Date)).TotalDays -lt $script:LookbackDays) {
+                                Write-Log -Message "  ALERT: Policy was created recently ($createdDate)." -Type "ALERT" -IsAlert -SpecificLogFile $GeneralReportFile
+                            }
+                        }
+                        
+                        if ($policy.lastModifiedTimestamp) {
+                            $modifiedDate = $policy.lastModifiedTimestamp
+                            Write-Log -Message "  Last Modified: $modifiedDate" -SpecificLogFile $GeneralReportFile
+                            
+                            if ((New-TimeSpan -Start $modifiedDate -End (Get-Date)).TotalDays -lt $script:LookbackDays) {
+                                Write-Log -Message "  ALERT: Policy was modified recently ($modifiedDate)." -Type "ALERT" -IsAlert -SpecificLogFile $GeneralReportFile
+                            }
+                        }
+                    }
+                } else {
+                    Write-Log -Message "No Power Platform DLP policies found." -Type "INFO" -SpecificLogFile $GeneralReportFile
+                }
+            } catch {
+                Write-Log -Message "Error checking Power Platform DLP policies: $($_.Exception.Message)" -Type "ERROR" -SpecificLogFile $GeneralReportFile
+            }
+        }
+        
+        # Check if we found any DLP info
+        if (-not $dlpInfoFound) {
+            Write-Log -Message "No DLP policy information found from any source. This could indicate a lack of DLP policies or limitations in access to DLP information." -Type "WARN" -SpecificLogFile $GeneralReportFile
+            Write-Log -Message "RECOMMENDATION: Deploy appropriate DLP policies to protect sensitive data." -Type "WARN" -SpecificLogFile $GeneralReportFile
+        }
+        
+        Write-Log -Message "Completed Data Loss Prevention Policy Changes check." -SpecificLogFile $GeneralReportFile
+        
+    } catch {
+        Write-Log -Message "Error checking Data Loss Prevention Policy Changes: $($_.Exception.Message)" -Type "ERROR" -SpecificLogFile $GeneralReportFile
+    }
 
     # --- 41. Audit Log Settings & Export ---
     Write-Log -Message "Checking Audit Log Settings & Export..." -Type "SUBSECTION" -SpecificLogFile $GeneralReportFile
-    Write-Log -Message "TODO: Implement Audit Log Settings & Export checks." -Type "WARN" -SpecificLogFile $GeneralReportFile
+    try {
+        # Track if we were able to get any audit settings
+        $auditSettingsFound = $false
+        
+        # --- 1. Check Exchange Online Management module for unified audit log settings
+        Write-Log -Message "Checking Unified Audit Log settings..." -SpecificLogFile $GeneralReportFile
+        
+        if ($ExoConnected) {
+            try {
+                # Check if unified audit logging is enabled
+                $adminAuditLogConfig = Get-AdminAuditLogConfig -ErrorAction SilentlyContinue
+                
+                if ($adminAuditLogConfig) {
+                    $auditSettingsFound = $true
+                    Write-Log -Message "Admin Audit Log Configuration:" -SpecificLogFile $GeneralReportFile
+                    Write-Log -Message "  UnifiedAuditLogIngestionEnabled: $($adminAuditLogConfig.UnifiedAuditLogIngestionEnabled)" -SpecificLogFile $GeneralReportFile
+                    
+                    if ($adminAuditLogConfig.UnifiedAuditLogIngestionEnabled -ne $true) {
+                        Write-Log -Message "  CRITICAL ALERT: Unified Audit Log ingestion is DISABLED. This prevents the recording of most audit events." -Type "ALERT" -IsAlert -SpecificLogFile $GeneralReportFile
+                    }
+                } else {
+                    Write-Log -Message "Could not retrieve Admin Audit Log Configuration." -Type "WARN" -SpecificLogFile $GeneralReportFile
+                }
+                
+                # Check audit log search settings
+                try {
+                    $orgConfig = Get-OrganizationConfig -ErrorAction SilentlyContinue
+                    
+                    if ($orgConfig) {
+                        $auditSettingsFound = $true
+                        Write-Log -Message "Organization Audit Settings:" -SpecificLogFile $GeneralReportFile
+                        Write-Log -Message "  AuditDisabled: $($orgConfig.AuditDisabled)" -SpecificLogFile $GeneralReportFile
+                        Write-Log -Message "  DefaultAuditSet: $($orgConfig.DefaultAuditSet -join ', ')" -SpecificLogFile $GeneralReportFile
+                        Write-Log -Message "  AuditLogAgeLimit: $($orgConfig.AuditLogAgeLimit)" -SpecificLogFile $GeneralReportFile
+                        
+                        if ($orgConfig.AuditDisabled -eq $true) {
+                            Write-Log -Message "  CRITICAL ALERT: Organization-wide auditing is DISABLED." -Type "ALERT" -IsAlert -SpecificLogFile $GeneralReportFile
+                        }
+                        
+                        if ($orgConfig.AuditLogAgeLimit -lt 90) {
+                            Write-Log -Message "  ALERT: Audit log retention period is less than 90 days ($($orgConfig.AuditLogAgeLimit)). This may be insufficient for security investigations." -Type "ALERT" -IsAlert -SpecificLogFile $GeneralReportFile
+                        }
+                    } else {
+                        Write-Log -Message "Could not retrieve Organization Configuration." -Type "WARN" -SpecificLogFile $GeneralReportFile
+                    }
+                } catch {
+                    Write-Log -Message "Error checking Organization Audit Settings: $($_.Exception.Message)" -Type "ERROR" -SpecificLogFile $GeneralReportFile
+                }
+                
+                # Check mailbox audit configuration 
+                try {
+                    $mailboxAuditConfig = Get-OrganizationConfig -ErrorAction SilentlyContinue | Select-Object -Property AuditDisabled, *Audit*
+                    
+                    if ($mailboxAuditConfig) {
+                        Write-Log -Message "Mailbox Audit Configuration:" -SpecificLogFile $GeneralReportFile
+                        
+                        # Check if mailbox auditing is enabled by default
+                        if ($mailboxAuditConfig.AuditDisabled -eq $true) {
+                            Write-Log -Message "  ALERT: Default mailbox auditing is DISABLED." -Type "ALERT" -IsAlert -SpecificLogFile $GeneralReportFile
+                        } else {
+                            Write-Log -Message "  Default mailbox auditing is enabled." -SpecificLogFile $GeneralReportFile
+                        }
+                        
+                        # Get default mailbox audit flags
+                        $adminActions = $mailboxAuditConfig.DefaultAuditAdminActions -join ', '
+                        $delegateActions = $mailboxAuditConfig.DefaultAuditDelegateActions -join ', '
+                        $ownerActions = $mailboxAuditConfig.DefaultAuditOwnerActions -join ', '
+                        
+                        Write-Log -Message "  Default Admin Actions: $adminActions" -SpecificLogFile $GeneralReportFile
+                        Write-Log -Message "  Default Delegate Actions: $delegateActions" -SpecificLogFile $GeneralReportFile
+                        Write-Log -Message "  Default Owner Actions: $ownerActions" -SpecificLogFile $GeneralReportFile
+                        
+                        # Check for missing critical audit actions
+                        $criticalAdminActions = @("Copy", "Create", "FolderBind", "HardDelete", "MessageBind", "Move", "MoveToDeletedItems", "SendAs", "SendOnBehalf", "SoftDelete", "Update")
+                        $criticalDelegateActions = @("Create", "FolderBind", "HardDelete", "MessageBind", "Move", "MoveToDeletedItems", "SendAs", "SendOnBehalf", "SoftDelete", "Update")
+                        $criticalOwnerActions = @("HardDelete", "MailboxLogin", "MoveToDeletedItems", "SoftDelete", "Update")
+                        
+                        $missingAdminActions = $criticalAdminActions | Where-Object { $mailboxAuditConfig.DefaultAuditAdminActions -notcontains $_ }
+                        $missingDelegateActions = $criticalDelegateActions | Where-Object { $mailboxAuditConfig.DefaultAuditDelegateActions -notcontains $_ }
+                        $missingOwnerActions = $criticalOwnerActions | Where-Object { $mailboxAuditConfig.DefaultAuditOwnerActions -notcontains $_ }
+                        
+                        if ($missingAdminActions.Count -gt 0) {
+                            Write-Log -Message "  ALERT: Missing critical Admin audit actions: $($missingAdminActions -join ', ')" -Type "ALERT" -IsAlert -SpecificLogFile $GeneralReportFile
+                        }
+                        
+                        if ($missingDelegateActions.Count -gt 0) {
+                            Write-Log -Message "  ALERT: Missing critical Delegate audit actions: $($missingDelegateActions -join ', ')" -Type "ALERT" -IsAlert -SpecificLogFile $GeneralReportFile
+                        }
+                        
+                        if ($missingOwnerActions.Count -gt 0) {
+                            Write-Log -Message "  ALERT: Missing critical Owner audit actions: $($missingOwnerActions -join ', ')" -Type "ALERT" -IsAlert -SpecificLogFile $GeneralReportFile
+                        }
+                        
+                        # Check individual mailboxes with auditing disabled
+                        Write-Log -Message "Checking individual mailboxes with audit logging disabled..." -SpecificLogFile $GeneralReportFile
+                        $mailboxes = Get-Mailbox -ResultSize 1000 -Filter { AuditEnabled -eq $false } -ErrorAction SilentlyContinue
+                        
+                        if ($mailboxes -and $mailboxes.Count -gt 0) {
+                            Write-Log -Message "  ALERT: Found $($mailboxes.Count) mailboxes with auditing explicitly disabled:" -Type "ALERT" -IsAlert -SpecificLogFile $GeneralReportFile
+                            
+                            foreach ($mailbox in $mailboxes) {
+                                Write-Log -Message "    - $($mailbox.UserPrincipalName)" -Type "ALERT" -IsAlert -SpecificLogFile $GeneralReportFile
+                            }
+                        } else {
+                            Write-Log -Message "  No individual mailboxes found with auditing explicitly disabled." -SpecificLogFile $GeneralReportFile
+                        }
+                    } else {
+                        Write-Log -Message "Could not retrieve Mailbox Audit Configuration." -Type "WARN" -SpecificLogFile $GeneralReportFile
+                    }
+                } catch {
+                    Write-Log -Message "Error checking Mailbox Audit Configuration: $($_.Exception.Message)" -Type "ERROR" -SpecificLogFile $GeneralReportFile
+                }
+            } catch {
+                Write-Log -Message "Error checking Exchange Online Audit Settings: $($_.Exception.Message)" -Type "ERROR" -SpecificLogFile $GeneralReportFile
+            }
+        } else {
+            Write-Log -Message "Not connected to Exchange Online. Cannot check unified audit log settings." -Type "WARN" -SpecificLogFile $GeneralReportFile
+        }
+        
+        # --- 2. Check Security & Compliance PowerShell for audit retention policies
+        Write-Log -Message "Checking audit retention policies in Security & Compliance Center..." -SpecificLogFile $GeneralReportFile
+        
+        if (-not (Get-Module -ListAvailable -Name ExchangeOnlineManagement)) {
+            Write-Log -Message "ExchangeOnlineManagement module not found. This is required for audit retention policy checks." -Type "WARN" -SpecificLogFile $GeneralReportFile
+        } else {
+            try {
+                # Check if connected to Security & Compliance Center
+                $sccConnected = $false
+                $sccSession = Get-PSSession | Where-Object {$_.ConfigurationName -eq 'Microsoft.Exchange' -and $_.ComputerName -like '*.compliance.protection.outlook.com'}
+                
+                if ($sccSession -and $sccSession.State -eq 'Opened') {
+                    $sccConnected = $true
+                    Write-Log -Message "Already connected to Security & Compliance Center." -SpecificLogFile $GeneralReportFile
+                } else {
+                    Write-Log -Message "Connecting to Security & Compliance Center..." -SpecificLogFile $GeneralReportFile
+                    try {
+                        Connect-IPPSSession -ErrorAction Stop
+                        $sccConnected = $true
+                        Write-Log -Message "Successfully connected to Security & Compliance Center." -SpecificLogFile $GeneralReportFile
+                    } catch {
+                        Write-Log -Message "Could not connect to Security & Compliance Center: $($_.Exception.Message)" -Type "WARN" -SpecificLogFile $GeneralReportFile
+                    }
+                }
+                
+                if ($sccConnected) {
+                    # Check retention policies for audit logs
+                    try {
+                        # Get audit configuration settings
+                        $auditConfig = Get-AdminAuditLogConfig -ErrorAction SilentlyContinue
+                        
+                        if ($auditConfig) {
+                            $auditSettingsFound = $true
+                            Write-Log -Message "Audit Configuration:" -SpecificLogFile $GeneralReportFile
+                            
+                            # Check if Advanced Audit is enabled (E5 feature)
+                            if (Get-Command Get-AdvancedAuditPolicy -ErrorAction SilentlyContinue) {
+                                try {
+                                    $advAuditPolicy = Get-AdvancedAuditPolicy -ErrorAction SilentlyContinue
+                                    if ($advAuditPolicy) {
+                                        Write-Log -Message "  Advanced Audit Policy:" -SpecificLogFile $GeneralReportFile
+                                        Write-Log -Message "    Enabled: $($advAuditPolicy.Enabled)" -SpecificLogFile $GeneralReportFile
+                                        Write-Log -Message "    Retention Period: $($advAuditPolicy.GeneralRetention)" -SpecificLogFile $GeneralReportFile
+                                        Write-Log -Message "    HighValueTenantRetention: $($advAuditPolicy.HighValueTenantRetention)" -SpecificLogFile $GeneralReportFile
+                                        
+                                        if ($advAuditPolicy.Enabled -ne $true) {
+                                            Write-Log -Message "    ALERT: Advanced Audit is not enabled." -Type "ALERT" -IsAlert -SpecificLogFile $GeneralReportFile
+                                        }
+                                        
+                                        if ($advAuditPolicy.GeneralRetention -lt 90) {
+                                            Write-Log -Message "    ALERT: Advanced Audit general retention is less than 90 days ($($advAuditPolicy.GeneralRetention))." -Type "ALERT" -IsAlert -SpecificLogFile $GeneralReportFile
+                                        }
+                                    }
+                                } catch {
+                                    Write-Log -Message "    Error retrieving Advanced Audit Policy: $($_.Exception.Message)" -Type "ERROR" -SpecificLogFile $GeneralReportFile
+                                }
+                            } else {
+                                Write-Log -Message "  Advanced Audit not available (requires E5 license or add-on)." -SpecificLogFile $GeneralReportFile
+                            }
+                            
+                            # Check retention policies that might include audit data
+                            try {
+                                $retentionPolicies = Get-RetentionPolicy -ErrorAction SilentlyContinue
+                                
+                                if ($retentionPolicies) {
+                                    $auditRelatedPolicies = $retentionPolicies | Where-Object { 
+                                        $_.Name -like "*Audit*" -or 
+                                        $_.Name -like "*Log*" -or 
+                                        $_.Name -like "*Compliance*" 
+                                    }
+                                    
+                                    if ($auditRelatedPolicies) {
+                                        Write-Log -Message "  Found $($auditRelatedPolicies.Count) retention policies that may affect audit data:" -SpecificLogFile $GeneralReportFile
+                                        
+                                        foreach ($policy in $auditRelatedPolicies) {
+                                            Write-Log -Message "    Policy: $($policy.Name)" -SpecificLogFile $GeneralReportFile
+                                            Write-Log -Message "      Enabled: $($policy.Enabled)" -SpecificLogFile $GeneralReportFile
+                                            
+                                            # Get retention policy tags associated with this policy
+                                            $tags = @($policy.RetentionPolicyTagLinks)
+                                            Write-Log -Message "      Associated Tags: $($tags -join ', ')" -SpecificLogFile $GeneralReportFile
+                                            
+                                            if (-not $policy.Enabled) {
+                                                Write-Log -Message "      ALERT: Retention policy '$($policy.Name)' is disabled." -Type "ALERT" -IsAlert -SpecificLogFile $GeneralReportFile
+                                            }
+                                        }
+                                    } else {
+                                        Write-Log -Message "  No audit-related retention policies found." -SpecificLogFile $GeneralReportFile
+                                    }
+                                } else {
+                                    Write-Log -Message "  Could not retrieve retention policies." -Type "WARN" -SpecificLogFile $GeneralReportFile
+                                }
+                            } catch {
+                                Write-Log -Message "  Error checking retention policies: $($_.Exception.Message)" -Type "ERROR" -SpecificLogFile $GeneralReportFile
+                            }
+                        } else {
+                            Write-Log -Message "Could not retrieve Admin Audit Log Configuration from Security & Compliance Center." -Type "WARN" -SpecificLogFile $GeneralReportFile
+                        }
+                    } catch {
+                        Write-Log -Message "Error checking audit configuration in Security & Compliance Center: $($_.Exception.Message)" -Type "ERROR" -SpecificLogFile $GeneralReportFile
+                    }
+                    
+                    # Disconnect from Security & Compliance Center if we connected in this function
+                    if (-not $sccSession) {
+                        Write-Log -Message "Disconnecting from Security & Compliance Center..." -SpecificLogFile $GeneralReportFile
+                        Get-PSSession | Where-Object {$_.ConfigurationName -eq 'Microsoft.Exchange' -and $_.ComputerName -like '*.compliance.protection.outlook.com'} | Remove-PSSession -Confirm:$false
+                    }
+                }
+            } catch {
+                Write-Log -Message "Error in Security & Compliance audit settings check: $($_.Exception.Message)" -Type "ERROR" -SpecificLogFile $GeneralReportFile
+            }
+        }
+        
+        # --- 3. Check for audit log exports using Graph API
+        if ($GraphConnected) {
+            Write-Log -Message "Checking for configured audit log exports using Graph API..." -SpecificLogFile $GeneralReportFile
+            
+            # Ensure we have the required permission
+            $context = Get-MgContext
+            $hasRequiredPermission = $false
+            if ($context.Scopes) {
+                if ($context.Scopes -contains "AuditLog.Read.All" -or 
+                    $context.Scopes -contains "ThreatHunting.Read.All" -or
+                    $context.Scopes -contains "SecurityEvents.Read.All") {
+                    $hasRequiredPermission = $true
+                }
+            }
+            
+            if (-not $hasRequiredPermission) {
+                Write-Log -Message "Connected to Graph API but missing required permissions (AuditLog.Read.All, ThreatHunting.Read.All, or SecurityEvents.Read.All). Cannot check audit log exports." -Type "WARN" -SpecificLogFile $GeneralReportFile
+            } else {
+                try {
+                    # Check for Log Analytics workspace connections
+                    Write-Log -Message "Checking for Sentinel/Log Analytics workspace connections..." -SpecificLogFile $GeneralReportFile
+                    
+                    # API path for data connectors depends on whether Sentinel is licensed/configured
+                    $dataConnectorsUri = "https://graph.microsoft.com/v1.0/security/dataConnectors"
+                    try {
+                        $dataConnectors = Invoke-MgGraphRequest -Method GET -Uri $dataConnectorsUri -ErrorAction SilentlyContinue
+                        
+                        if ($dataConnectors -and $dataConnectors.value) {
+                            $auditSettingsFound = $true
+                            $auditConnectors = $dataConnectors.value | Where-Object { $_.dataTypes.logTypes -contains "AuditLogs" -or $_.dataTypes.alertTypes -contains "Audit" }
+                            
+                            if ($auditConnectors) {
+                                Write-Log -Message "  Found $($auditConnectors.Count) data connectors for audit logs:" -SpecificLogFile $GeneralReportFile
+                                
+                                foreach ($connector in $auditConnectors) {
+                                    Write-Log -Message "    Connector: $($connector.displayName) (ID: $($connector.id))" -SpecificLogFile $GeneralReportFile
+                                    Write-Log -Message "      Connector Type: $($connector.connectorType)" -SpecificLogFile $GeneralReportFile
+                                    Write-Log -Message "      Status: $($connector.state.connectionStatus)" -SpecificLogFile $GeneralReportFile
+                                    Write-Log -Message "      Last Connected: $($connector.state.lastConnectionStatusUpdatedDateTime)" -SpecificLogFile $GeneralReportFile
+                                    
+                                    # Check for connection issues
+                                    if ($connector.state.connectionStatus -ne "Connected") {
+                                        Write-Log -Message "      ALERT: Audit log connector is not connected. Status: $($connector.state.connectionStatus)" -Type "ALERT" -IsAlert -SpecificLogFile $GeneralReportFile
+                                    }
+                                    
+                                    # Check if recently modified
+                                    if ($connector.lastModifiedDateTime) {
+                                        $lastModifiedDate = [DateTime]$connector.lastModifiedDateTime
+                                        if ((New-TimeSpan -Start $lastModifiedDate -End (Get-Date)).TotalDays -lt $script:LookbackDays) {
+                                            Write-Log -Message "      ALERT: Connector was modified recently ($($connector.lastModifiedDateTime))." -Type "ALERT" -IsAlert -SpecificLogFile $GeneralReportFile
+                                        }
+                                    }
+                                }
+                            } else {
+                                Write-Log -Message "  No audit log data connectors found." -Type "WARN" -SpecificLogFile $GeneralReportFile
+                            }
+                        } else {
+                            Write-Log -Message "  No data connectors found or unable to access data connectors API." -Type "WARN" -SpecificLogFile $GeneralReportFile
+                        }
+                    } catch {
+                        Write-Log -Message "  Error checking data connectors: $($_.Exception.Message)" -Type "ERROR" -SpecificLogFile $GeneralReportFile
+                    }
+                    
+                    # Check for audit log changes in Graph audit logs
+                    Write-Log -Message "Checking for changes to audit settings in audit logs..." -SpecificLogFile $GeneralReportFile
+                    try {
+                        # Define the time period to look back
+                        $startTime = (Get-Date).AddDays(-$script:LookbackDays).ToString("yyyy-MM-ddTHH:mm:ssZ")
+                        $endTime = (Get-Date).ToString("yyyy-MM-ddTHH:mm:ssZ")
+                        
+                        # Define operations related to audit settings
+                        $auditOperations = @(
+                            "Update organization",
+                            "Update policy",
+                            "Set administration audit log configuration",
+                            "Create connector",
+                            "Update connector",
+                            "Remove connector",
+                            "Set audit configuration",
+                            "Set mailbox audit configuration"
+                        )
+                        
+                        # Create filter for the specific operations we're interested in
+                        $operationFilter = $auditOperations | ForEach-Object { "activityDisplayName eq '$_'" }
+                        $filter = "activityDateTime ge $startTime and ($($operationFilter -join ' or '))"
+                        
+                        # Query audit logs with the filter
+                        $auditLogs = Get-MgAuditLogDirectoryAudit -Filter $filter -All -ErrorAction SilentlyContinue
+                        
+                        if ($auditLogs -and $auditLogs.Count -gt 0) {
+                            $auditSettingsFound = $true
+                            Write-Log -Message "  Found $($auditLogs.Count) events related to audit configuration changes:" -SpecificLogFile $GeneralReportFile
+                            
+                            foreach ($log in $auditLogs) {
+                                $timestamp = $log.ActivityDateTime
+                                $actor = $log.InitiatedBy.User.UserPrincipalName ?? $log.InitiatedBy.User.DisplayName ?? $log.InitiatedBy.App.DisplayName ?? "Unknown"
+                                $activity = $log.ActivityDisplayName
+                                $result = $log.Result
+                                
+                                Write-Log -Message "    $timestamp: $activity by $actor - Result: $result" -SpecificLogFile $GeneralReportFile
+                                
+                                # Check for audit disabling activities
+                                $auditDisabled = $false
+                                if ($log.TargetResources -and $log.TargetResources.Count -gt 0) {
+                                    $modifiedProps = $log.TargetResources[0].ModifiedProperties
+                                    foreach ($prop in $modifiedProps) {
+                                        $propName = $prop.DisplayName
+                                        $oldValue = $prop.OldValue
+                                        $newValue = $prop.NewValue
+                                        
+                                        if (($propName -eq "AuditEnabled" -or $propName -eq "AuditDisabled" -or $propName -eq "UnifiedAuditLogIngestionEnabled") -and
+                                            (($oldValue -eq "True" -and $newValue -eq "False") -or ($oldValue -eq "False" -and $newValue -eq "True"))) {
+                                            $auditDisabled = ($propName -eq "AuditDisabled" -and $newValue -eq "True") -or ($propName -eq "AuditEnabled" -and $newValue -eq "False") -or ($propName -eq "UnifiedAuditLogIngestionEnabled" -and $newValue -eq "False")
+                                            
+                                            Write-Log -Message "      Modified Property: $propName, Old Value: $oldValue, New Value: $newValue" -SpecificLogFile $GeneralReportFile
+                                        }
+                                    }
+                                }
+                                
+                                if ($auditDisabled) {
+                                    Write-Log -Message "      CRITICAL ALERT: Audit logging was DISABLED by $actor on $timestamp." -Type "ALERT" -IsAlert -SpecificLogFile $GeneralReportFile
+                                } else {
+                                    Write-Log -Message "      ALERT: Audit configuration was changed by $actor on $timestamp." -Type "ALERT" -IsAlert -SpecificLogFile $GeneralReportFile
+                                }
+                            }
+                        } else {
+                            Write-Log -Message "  No audit configuration changes found in audit logs for the specified period." -Type "INFO" -SpecificLogFile $GeneralReportFile
+                        }
+                    } catch {
+                        Write-Log -Message "  Error checking audit logs for audit configuration changes: $($_.Exception.Message)" -Type "ERROR" -SpecificLogFile $GeneralReportFile
+                    }
+                } catch {
+                    Write-Log -Message "Error checking audit log exports: $($_.Exception.Message)" -Type "ERROR" -SpecificLogFile $GeneralReportFile
+                }
+            }
+        } else {
+            Write-Log -Message "Graph API not connected. Cannot check audit log exports or recent changes to audit settings." -Type "WARN" -SpecificLogFile $GeneralReportFile
+        }
+        
+        # Check if any audit settings were found
+        if (-not $auditSettingsFound) {
+            Write-Log -Message "No audit settings found from any source. This could indicate a lack of proper audit configuration or limitations in access to audit information." -Type "WARN" -SpecificLogFile $GeneralReportFile
+            Write-Log -Message "RECOMMENDATION: Enable unified audit logging and configure appropriate retention and export settings." -Type "WARN" -SpecificLogFile $GeneralReportFile
+        }
+        
+        Write-Log -Message "Completed Audit Log Settings & Export check." -SpecificLogFile $GeneralReportFile
+        
+    } catch {
+        Write-Log -Message "Error checking Audit Log Settings & Export: $($_.Exception.Message)" -Type "ERROR" -SpecificLogFile $GeneralReportFile
+    }
 
     # --- 42. Microsoft Sentinel/SIEM Integration Status ---
-    Write-Log -Message "Checking Microsoft Sentinel/SIEM Integration Status (Requires Az module & context)..." -Type "SUBSECTION" -SpecificLogFile $GeneralReportFile
-    Write-Log -Message "TODO: Implement Microsoft Sentinel/SIEM Integration checks. Requires Az PowerShell module." -Type "WARN" -SpecificLogFile $GeneralReportFile
+    Write-Log -Message "Checking Microsoft Sentinel/SIEM Integration Status..." -Type "SUBSECTION" -SpecificLogFile $GeneralReportFile
+    try {
+        # Check if Az module is available
+        if (-not (Get-Module -ListAvailable -Name Az.SecurityInsights)) {
+            Write-Log -Message "Az.SecurityInsights module not found. Install using: Install-Module -Name Az.SecurityInsights -Repository PSGallery -Force" -Type "WARN" -SpecificLogFile $GeneralReportFile
+            Write-Log -Message "Additionally, Az.OperationalInsights and Az.ResourceGraph may be needed for complete SIEM checks." -Type "WARN" -SpecificLogFile $GeneralReportFile
+            Write-Log -Message "Skipping Microsoft Sentinel/SIEM Integration checks due to missing Az.SecurityInsights module." -Type "WARN" -SpecificLogFile $GeneralReportFile
+            return
+        }
+
+        # Check if already connected to Azure
+        $azContext = Get-AzContext -ErrorAction SilentlyContinue
+        if (-not $azContext) {
+            Write-Log -Message "Not connected to Azure. Please use Connect-AzAccount before running this script for Sentinel-specific checks." -Type "WARN" -SpecificLogFile $GeneralReportFile
+            Write-Log -Message "Skipping Microsoft Sentinel/SIEM Integration checks due to missing Azure connection." -Type "WARN" -SpecificLogFile $GeneralReportFile
+            return
+        }
+
+        Write-Log -Message "Connected to Azure subscription: $($azContext.Subscription.Name) ($($azContext.Subscription.Id))" -SpecificLogFile $GeneralReportFile
+        
+        # --- 1. Check for Log Analytics workspaces with Sentinel enabled
+        Write-Log -Message "Checking for Log Analytics workspaces with Microsoft Sentinel enabled..." -SpecificLogFile $GeneralReportFile
+        
+        try {
+            # Get all Log Analytics workspaces in the subscription
+            $workspaces = Get-AzOperationalInsightsWorkspace -ErrorAction SilentlyContinue
+            
+            if (-not $workspaces -or $workspaces.Count -eq 0) {
+                Write-Log -Message "No Log Analytics workspaces found in subscription $($azContext.Subscription.Name)." -Type "WARN" -SpecificLogFile $GeneralReportFile
+                Write-Log -Message "Microsoft Sentinel requires a Log Analytics workspace to operate." -Type "WARN" -SpecificLogFile $GeneralReportFile
+                return
+            }
+            
+            Write-Log -Message "Found $($workspaces.Count) Log Analytics workspaces in subscription $($azContext.Subscription.Name)." -SpecificLogFile $GeneralReportFile
+            
+            $sentinelWorkspaces = @()
+            
+            foreach ($workspace in $workspaces) {
+                # Check if Microsoft Sentinel solution is installed on this workspace
+                $isSentinelEnabled = $false
+                try {
+                    # Use Get-AzMonitorLogAnalyticsSolution to check for Sentinel solution
+                    $sentinelSolution = Get-AzMonitorLogAnalyticsSolution -ResourceGroupName $workspace.ResourceGroupName -ErrorAction SilentlyContinue | 
+                        Where-Object { $_.Name -eq "SecurityInsights($($workspace.Name))" }
+                    
+                    if ($sentinelSolution) {
+                        $isSentinelEnabled = $true
+                        $sentinelWorkspaces += $workspace
+                        Write-Log -Message "Microsoft Sentinel is enabled on workspace: $($workspace.Name) (Resource Group: $($workspace.ResourceGroupName))" -SpecificLogFile $GeneralReportFile
+                    }
+                } catch {
+                    Write-Log -Message "Error checking if Sentinel is enabled on workspace $($workspace.Name): $($_.Exception.Message)" -Type "ERROR" -SpecificLogFile $GeneralReportFile
+                }
+                
+                if (-not $isSentinelEnabled) {
+                    Write-Log -Message "Workspace $($workspace.Name) (Resource Group: $($workspace.ResourceGroupName)) does not have Microsoft Sentinel enabled." -SpecificLogFile $GeneralReportFile
+                }
+            }
+            
+            if ($sentinelWorkspaces.Count -eq 0) {
+                Write-Log -Message "ALERT: Microsoft Sentinel is not enabled on any workspace in subscription $($azContext.Subscription.Name)." -Type "ALERT" -IsAlert -SpecificLogFile $GeneralReportFile
+                Write-Log -Message "Without Microsoft Sentinel, advanced security monitoring and threat detection capabilities are limited." -Type "ALERT" -IsAlert -SpecificLogFile $GeneralReportFile
+                return
+            }
+            
+            # --- 2. For each Sentinel-enabled workspace, check data connectors
+            foreach ($workspace in $sentinelWorkspaces) {
+                Write-Log -Message "Analyzing Microsoft Sentinel workspace: $($workspace.Name)" -SpecificLogFile $GeneralReportFile
+                $workspaceRG = $workspace.ResourceGroupName
+                $workspaceName = $workspace.Name
+                
+                # Check data connectors
+                Write-Log -Message "Checking data connectors for workspace $workspaceName..." -SpecificLogFile $GeneralReportFile
+                
+                try {
+                    $dataConnectors = Get-AzSentinelDataConnector -ResourceGroupName $workspaceRG -WorkspaceName $workspaceName -ErrorAction SilentlyContinue
+                    
+                    if ($dataConnectors -and $dataConnectors.Count -gt 0) {
+                        Write-Log -Message "Found $($dataConnectors.Count) data connectors in workspace $workspaceName." -SpecificLogFile $GeneralReportFile
+                        
+                        # Group connectors by type for better reporting
+                        $connectorsByType = @{}
+                        foreach ($connector in $dataConnectors) {
+                            $connectorType = if ($connector.Kind) { $connector.Kind } else { "Unknown" }
+                            if (-not $connectorsByType.ContainsKey($connectorType)) {
+                                $connectorsByType[$connectorType] = New-Object System.Collections.Generic.List[PSObject]
+                            }
+                            $connectorsByType[$connectorType].Add($connector)
+                        }
+                        
+                        # Report on each connector type
+                        foreach ($type in $connectorsByType.Keys) {
+                            $typeConnectors = $connectorsByType[$type]
+                            Write-Log -Message "  Connector Type: $type (Count: $($typeConnectors.Count))" -SpecificLogFile $GeneralReportFile
+                            
+                            foreach ($connector in $typeConnectors) {
+                                $connectorName = $connector.Name
+                                
+                                # Get status based on connector type
+                                $status = "Unknown"
+                                $lastData = "Unknown"
+                                
+                                # Different connector types have different properties
+                                if ($connector.Kind -eq "AzureActiveDirectory") {
+                                    $status = $connector.DataTypes.Alerts.State
+                                    $lastData = $connector.DataTypes.Alerts.LastDataReceivedQuery
+                                } elseif ($connector.Kind -eq "Office365") {
+                                    $status = $connector.DataTypes.Exchange.State
+                                    $lastData = $connector.DataTypes.Exchange.LastDataReceivedQuery
+                                } elseif ($connector.Kind -eq "MicrosoftThreatProtection") {
+                                    $status = $connector.DataTypes.Incidents.State
+                                    $lastData = $connector.DataTypes.Incidents.LastDataReceivedQuery
+                                } elseif ($connector.Kind -eq "AzureAdvancedThreatProtection") {
+                                    $status = $connector.DataTypes.Alerts.State
+                                    $lastData = $connector.DataTypes.Alerts.LastDataReceivedQuery
+                                } elseif ($connector.Kind -eq "MicrosoftDefenderAdvancedThreatProtection") {
+                                    $status = $connector.DataTypes.Alerts.State
+                                    $lastData = $connector.DataTypes.Alerts.LastDataReceivedQuery
+                                }
+                                # Add more connector types as needed
+                                
+                                Write-Log -Message "    Connector: $connectorName, Status: $status" -SpecificLogFile $GeneralReportFile
+                                if ($status -ne "Enabled" -and $status -ne "Connected") {
+                                    Write-Log -Message "    ALERT: Connector $connectorName is not enabled/connected. Status: $status" -Type "ALERT" -IsAlert -SpecificLogFile $GeneralReportFile
+                                }
+                                
+                                # Check for recent data ingestion if we can get that info
+                                if ($lastData -and $lastData -ne "Unknown") {
+                                    # This would be a KQL query string, typically complex to execute here
+                                    Write-Log -Message "    Last Data Received Query available but execution requires direct LA access." -SpecificLogFile $GeneralReportFile
+                                }
+                            }
+                        }
+                        
+                        # Check for critical missing connectors
+                        $criticalConnectors = @("AzureActiveDirectory", "Office365", "AzureAdvancedThreatProtection", "MicrosoftDefenderAdvancedThreatProtection", "MicrosoftCloudAppSecurity")
+                        $missingCritical = $criticalConnectors | Where-Object { -not $connectorsByType.ContainsKey($_) }
+                        
+                        if ($missingCritical.Count -gt 0) {
+                            Write-Log -Message "  ALERT: Missing critical data connectors: $($missingCritical -join ', ')" -Type "ALERT" -IsAlert -SpecificLogFile $GeneralReportFile
+                            Write-Log -Message "  These connectors are important for comprehensive security monitoring in Microsoft 365." -Type "ALERT" -IsAlert -SpecificLogFile $GeneralReportFile
+                        }
+                        
+                        # Check for any recently modified connectors
+                        $recentlyModifiedConnectors = $dataConnectors | Where-Object { 
+                            if ($_.TimeGenerated) {
+                                (New-TimeSpan -Start $_.TimeGenerated -End (Get-Date)).TotalDays -lt $script:LookbackDays
+                            } elseif ($_.LastModifiedOn) {
+                                (New-TimeSpan -Start $_.LastModifiedOn -End (Get-Date)).TotalDays -lt $script:LookbackDays
+                            } else {
+                                $false
+                            }
+                        }
+                        
+                        if ($recentlyModifiedConnectors -and $recentlyModifiedConnectors.Count -gt 0) {
+                            Write-Log -Message "  ALERT: $($recentlyModifiedConnectors.Count) connectors were recently modified:" -Type "ALERT" -IsAlert -SpecificLogFile $GeneralReportFile
+                            foreach ($connector in $recentlyModifiedConnectors) {
+                                $modifiedDate = $connector.TimeGenerated ?? $connector.LastModifiedOn
+                                Write-Log -Message "    - $($connector.Name) (Kind: $($connector.Kind)) on $modifiedDate" -Type "ALERT" -IsAlert -SpecificLogFile $GeneralReportFile
+                            }
+                        }
+                    } else {
+                        Write-Log -Message "  ALERT: No data connectors found in workspace $workspaceName. Microsoft Sentinel will not receive security data." -Type "ALERT" -IsAlert -SpecificLogFile $GeneralReportFile
+                    }
+                } catch {
+                    Write-Log -Message "  Error checking data connectors for workspace $workspaceName: $($_.Exception.Message)" -Type "ERROR" -SpecificLogFile $GeneralReportFile
+                }
+                
+                # --- 3. Check analytics rules
+                Write-Log -Message "Checking analytics rules for workspace $workspaceName..." -SpecificLogFile $GeneralReportFile
+                
+                try {
+                    $analyticsRules = Get-AzSentinelAlertRule -ResourceGroupName $workspaceRG -WorkspaceName $workspaceName -ErrorAction SilentlyContinue
+                    
+                    if ($analyticsRules -and $analyticsRules.Count -gt 0) {
+                        Write-Log -Message "Found $($analyticsRules.Count) analytics rules in workspace $workspaceName." -SpecificLogFile $GeneralReportFile
+                        
+                        # Group rules by status for better reporting
+                        $enabledRules = $analyticsRules | Where-Object { $_.Enabled -eq $true }
+                        $disabledRules = $analyticsRules | Where-Object { $_.Enabled -ne $true }
+                        
+                        Write-Log -Message "  Enabled Rules: $($enabledRules.Count)" -SpecificLogFile $GeneralReportFile
+                        Write-Log -Message "  Disabled Rules: $($disabledRules.Count)" -SpecificLogFile $GeneralReportFile
+                        
+                        if ($disabledRules.Count -gt 0) {
+                            # Calculate percentage of disabled rules
+                            $disabledPercentage = [math]::Round(($disabledRules.Count / $analyticsRules.Count) * 100, 2)
+                            
+                            if ($disabledPercentage -gt 50) {
+                                Write-Log -Message "  CRITICAL ALERT: $disabledPercentage% of analytics rules are disabled. This severely impacts threat detection capabilities." -Type "ALERT" -IsAlert -SpecificLogFile $GeneralReportFile
+                            } elseif ($disabledPercentage -gt 20) {
+                                Write-Log -Message "  ALERT: $disabledPercentage% of analytics rules are disabled. Review these rules to ensure proper threat detection." -Type "ALERT" -IsAlert -SpecificLogFile $GeneralReportFile
+                            }
+                            
+                            # Look for recently disabled rules
+                            $recentlyDisabledRules = $disabledRules | Where-Object { 
+                                if ($_.LastModifiedDateTime) {
+                                    (New-TimeSpan -Start $_.LastModifiedDateTime -End (Get-Date)).TotalDays -lt $script:LookbackDays
+                                } elseif ($_.LastModifiedOn) {
+                                    (New-TimeSpan -Start $_.LastModifiedOn -End (Get-Date)).TotalDays -lt $script:LookbackDays
+                                } else {
+                                    $false
+                                }
+                            }
+                            
+                            if ($recentlyDisabledRules -and $recentlyDisabledRules.Count -gt 0) {
+                                Write-Log -Message "  ALERT: $($recentlyDisabledRules.Count) rules were recently disabled:" -Type "ALERT" -IsAlert -SpecificLogFile $GeneralReportFile
+                                foreach ($rule in $recentlyDisabledRules) {
+                                    $modifiedDate = $rule.LastModifiedDateTime ?? $rule.LastModifiedOn
+                                    Write-Log -Message "    - $($rule.DisplayName) (Type: $($rule.Kind)) on $modifiedDate" -Type "ALERT" -IsAlert -SpecificLogFile $GeneralReportFile
+                                }
+                            }
+                        }
+                        
+                        # Look for critical rule types to ensure coverage
+                        $criticalTactics = @("PrivilegeEscalation", "DefenseEvasion", "Persistence", "InitialAccess", "Exfiltration", "CommandAndControl")
+                        
+                        # If rules have MITRE tactics, check coverage
+                        $tacticCoverage = @{}
+                        foreach ($tactic in $criticalTactics) {
+                            $tacticCoverage[$tactic] = @{
+                                TotalRules = 0
+                                EnabledRules = 0
+                            }
+                        }
+                        
+                        foreach ($rule in $analyticsRules) {
+                            if ($rule.Tactics) {
+                                foreach ($tactic in $rule.Tactics) {
+                                    if ($criticalTactics -contains $tactic) {
+                                        $tacticCoverage[$tactic].TotalRules++
+                                        if ($rule.Enabled -eq $true) {
+                                            $tacticCoverage[$tactic].EnabledRules++
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        
+                        Write-Log -Message "  Critical MITRE Tactics Coverage:" -SpecificLogFile $GeneralReportFile
+                        foreach ($tactic in $criticalTactics) {
+                            $coverage = $tacticCoverage[$tactic]
+                            Write-Log -Message "    $tactic: $($coverage.EnabledRules) enabled out of $($coverage.TotalRules) total rules" -SpecificLogFile $GeneralReportFile
+                            
+                            if ($coverage.TotalRules -eq 0) {
+                                Write-Log -Message "    ALERT: No rules found for critical tactic: $tactic" -Type "ALERT" -IsAlert -SpecificLogFile $GeneralReportFile
+                            } elseif ($coverage.EnabledRules -eq 0) {
+                                Write-Log -Message "    ALERT: All rules for critical tactic '$tactic' are disabled" -Type "ALERT" -IsAlert -SpecificLogFile $GeneralReportFile
+                            }
+                        }
+                    } else {
+                        Write-Log -Message "  CRITICAL ALERT: No analytics rules found in workspace $workspaceName. Microsoft Sentinel will not detect any threats." -Type "ALERT" -IsAlert -SpecificLogFile $GeneralReportFile
+                    }
+                } catch {
+                    Write-Log -Message "  Error checking analytics rules for workspace $workspaceName: $($_.Exception.Message)" -Type "ERROR" -SpecificLogFile $GeneralReportFile
+                }
+                
+                # --- 4. Check incident settings
+                Write-Log -Message "Checking incident settings for workspace $workspaceName..." -SpecificLogFile $GeneralReportFile
+                
+                try {
+                    $automationRules = Get-AzSentinelAutomationRule -ResourceGroupName $workspaceRG -WorkspaceName $workspaceName -ErrorAction SilentlyContinue
+                    
+                    if ($automationRules -and $automationRules.Count -gt 0) {
+                        Write-Log -Message "Found $($automationRules.Count) automation rules in workspace $workspaceName." -SpecificLogFile $GeneralReportFile
+                        
+                        # Check for suspicious automation rules that might suppress/close incidents
+                        $suspiciousRules = $automationRules | Where-Object { 
+                            ($_.Actions.IncidentStatus -eq "Closed") -or 
+                            ($_.Actions.AlertStatus -eq "Closed")
+                        }
+                        
+                        if ($suspiciousRules -and $suspiciousRules.Count -gt 0) {
+                            Write-Log -Message "  ALERT: Found $($suspiciousRules.Count) automation rules that automatically close incidents or alerts:" -Type "ALERT" -IsAlert -SpecificLogFile $GeneralReportFile
+                            foreach ($rule in $suspiciousRules) {
+                                Write-Log -Message "    - $($rule.DisplayName)" -Type "ALERT" -IsAlert -SpecificLogFile $GeneralReportFile
+                                Write-Log -Message "      Incident Status: $($rule.Actions.IncidentStatus)" -Type "ALERT" -IsAlert -SpecificLogFile $GeneralReportFile
+                                Write-Log -Message "      Alert Status: $($rule.Actions.AlertStatus)" -Type "ALERT" -IsAlert -SpecificLogFile $GeneralReportFile
+                                
+                                # If recently created, that's extra suspicious
+                                if ($rule.CreatedDateTime -and (New-TimeSpan -Start $rule.CreatedDateTime -End (Get-Date)).TotalDays -lt $script:LookbackDays) {
+                                    Write-Log -Message "      CRITICAL ALERT: This rule was created recently ($($rule.CreatedDateTime))." -Type "ALERT" -IsAlert -SpecificLogFile $GeneralReportFile
+                                }
+                            }
+                        }
+                    } else {
+                        Write-Log -Message "  No automation rules found in workspace $workspaceName." -SpecificLogFile $GeneralReportFile
+                    }
+                } catch {
+                    Write-Log -Message "  Error checking automation rules for workspace $workspaceName: $($_.Exception.Message)" -Type "ERROR" -SpecificLogFile $GeneralReportFile
+                }
+                
+                # --- 5. Check watchlists
+                Write-Log -Message "Checking watchlists for workspace $workspaceName..." -SpecificLogFile $GeneralReportFile
+                
+                try {
+                    $watchlists = Get-AzSentinelWatchlist -ResourceGroupName $workspaceRG -WorkspaceName $workspaceName -ErrorAction SilentlyContinue
+                    
+                    if ($watchlists -and $watchlists.Count -gt 0) {
+                        Write-Log -Message "Found $($watchlists.Count) watchlists in workspace $workspaceName." -SpecificLogFile $GeneralReportFile
+                        
+                        foreach ($watchlist in $watchlists) {
+                            Write-Log -Message "  Watchlist: $($watchlist.DisplayName) (Alias: $($watchlist.Alias))" -SpecificLogFile $GeneralReportFile
+                            Write-Log -Message "    Items Count: $($watchlist.ItemsCount)" -SpecificLogFile $GeneralReportFile
+                            
+                            # Check for recently modified watchlists
+                            if ($watchlist.Updated -and (New-TimeSpan -Start $watchlist.Updated -End (Get-Date)).TotalDays -lt $script:LookbackDays) {
+                                Write-Log -Message "    ALERT: Watchlist was updated recently ($($watchlist.Updated))." -Type "ALERT" -IsAlert -SpecificLogFile $GeneralReportFile
+                            }
+                        }
+                    } else {
+                        Write-Log -Message "  No watchlists found in workspace $workspaceName." -SpecificLogFile $GeneralReportFile
+                    }
+                } catch {
+                    Write-Log -Message "  Error checking watchlists for workspace $workspaceName: $($_.Exception.Message)" -Type "ERROR" -SpecificLogFile $GeneralReportFile
+                }
+                
+                # --- 6. Check scheduled queries (saved searches) in Log Analytics
+                Write-Log -Message "Checking scheduled queries in workspace $workspaceName..." -SpecificLogFile $GeneralReportFile
+                
+                try {
+                    $savedSearches = Get-AzOperationalInsightsSavedSearch -ResourceGroupName $workspaceRG -WorkspaceName $workspaceName -ErrorAction SilentlyContinue
+                    
+                    if ($savedSearches -and $savedSearches.Count -gt 0) {
+                        Write-Log -Message "Found $($savedSearches.Count) saved searches/scheduled queries in workspace $workspaceName." -SpecificLogFile $GeneralReportFile
+                        
+                        # Look for potentially suspicious queries
+                        $suspiciousQueries = $savedSearches | Where-Object { 
+                            $_.Query -match "delete|remove|drop|truncate|update" -or
+                            $_.Query -match "disable|stop|turn off"
+                        }
+                        
+                        if ($suspiciousQueries -and $suspiciousQueries.Count -gt 0) {
+                            Write-Log -Message "  ALERT: Found $($suspiciousQueries.Count) potentially suspicious saved queries:" -Type "ALERT" -IsAlert -SpecificLogFile $GeneralReportFile
+                            foreach ($query in $suspiciousQueries) {
+                                Write-Log -Message "    - $($query.Name)" -Type "ALERT" -IsAlert -SpecificLogFile $GeneralReportFile
+                                Write-Log -Message "      Query: $($query.Query)" -Type "ALERT" -IsAlert -SpecificLogFile $GeneralReportFile
+                            }
+                        }
+                    } else {
+                        Write-Log -Message "  No saved searches/scheduled queries found in workspace $workspaceName." -SpecificLogFile $GeneralReportFile
+                    }
+                } catch {
+                    Write-Log -Message "  Error checking saved searches for workspace $workspaceName: $($_.Exception.Message)" -Type "ERROR" -SpecificLogFile $GeneralReportFile
+                }
+            }
+            
+            # --- 7. Check for external SIEM integration (if not using Sentinel)
+            if ($sentinelWorkspaces.Count -eq 0) {
+                Write-Log -Message "Checking for external SIEM integration since Microsoft Sentinel is not enabled..." -SpecificLogFile $GeneralReportFile
+                
+                # This is difficult to check without knowing the specific external SIEM
+                # We can check for common integration mechanisms
+                
+                # Check for Event Hub namespaces (common integration point for external SIEMs)
+                try {
+                    $eventHubNamespaces = Get-AzEventHubNamespace -ErrorAction SilentlyContinue
+                    
+                    if ($eventHubNamespaces -and $eventHubNamespaces.Count -gt 0) {
+                        Write-Log -Message "Found $($eventHubNamespaces.Count) Event Hub namespaces that could be used for SIEM integration." -SpecificLogFile $GeneralReportFile
+                        
+                        foreach ($namespace in $eventHubNamespaces) {
+                            Write-Log -Message "  Event Hub Namespace: $($namespace.Name) (Resource Group: $($namespace.ResourceGroupName))" -SpecificLogFile $GeneralReportFile
+                            
+                            # Check for Event Hubs in the namespace
+                            try {
+                                $eventHubs = Get-AzEventHub -ResourceGroupName $namespace.ResourceGroupName -Namespace $namespace.Name -ErrorAction SilentlyContinue
+                                
+                                if ($eventHubs -and $eventHubs.Count -gt 0) {
+                                    Write-Log -Message "    Found $($eventHubs.Count) Event Hubs in namespace $($namespace.Name)." -SpecificLogFile $GeneralReportFile
+                                    
+                                    # Look for Event Hubs with names suggesting security data
+                                    $securityEventHubs = $eventHubs | Where-Object { 
+                                        $_.Name -match "security|audit|log|siem|sentinel|defender|azure|activity" 
+                                    }
+                                    
+                                    if ($securityEventHubs -and $securityEventHubs.Count -gt 0) {
+                                        Write-Log -Message "    Potential security-related Event Hubs: $($securityEventHubs.Count)" -SpecificLogFile $GeneralReportFile
+                                        foreach ($hub in $securityEventHubs) {
+                                            Write-Log -Message "      - $($hub.Name)" -SpecificLogFile $GeneralReportFile
+                                        }
+                                    }
+                                } else {
+                                    Write-Log -Message "    No Event Hubs found in namespace $($namespace.Name)." -SpecificLogFile $GeneralReportFile
+                                }
+                            } catch {
+                                Write-Log -Message "    Error checking Event Hubs in namespace $($namespace.Name): $($_.Exception.Message)" -Type "ERROR" -SpecificLogFile $GeneralReportFile
+                            }
+                        }
+                    } else {
+                        Write-Log -Message "No Event Hub namespaces found for potential SIEM integration." -SpecificLogFile $GeneralReportFile
+                    }
+                } catch {
+                    Write-Log -Message "Error checking Event Hub namespaces: $($_.Exception.Message)" -Type "ERROR" -SpecificLogFile $GeneralReportFile
+                }
+                
+                # Check for storage accounts with diagnostic settings (another common integration mechanism)
+                try {
+                    $storageAccounts = Get-AzStorageAccount -ErrorAction SilentlyContinue
+                    
+                    if ($storageAccounts -and $storageAccounts.Count -gt 0) {
+                        $securityStorageAccounts = $storageAccounts | Where-Object { 
+                            $_.StorageAccountName -match "security|audit|log|siem" 
+                        }
+                        
+                        if ($securityStorageAccounts -and $securityStorageAccounts.Count -gt 0) {
+                            Write-Log -Message "Found $($securityStorageAccounts.Count) storage accounts with names suggesting security/audit use." -SpecificLogFile $GeneralReportFile
+                            foreach ($storage in $securityStorageAccounts) {
+                                Write-Log -Message "  Storage Account: $($storage.StorageAccountName) (Resource Group: $($storage.ResourceGroupName))" -SpecificLogFile $GeneralReportFile
+                            }
+                        } else {
+                            Write-Log -Message "No storage accounts with security/audit-related names found." -SpecificLogFile $GeneralReportFile
+                        }
+                    } else {
+                        Write-Log -Message "No storage accounts found." -SpecificLogFile $GeneralReportFile
+                    }
+                } catch {
+                    Write-Log -Message "Error checking storage accounts: $($_.Exception.Message)" -Type "ERROR" -SpecificLogFile $GeneralReportFile
+                }
+                
+                # Check for Azure Monitor diagnostic settings
+                try {
+                    # This is difficult to check globally - we'd need to check each resource
+                    Write-Log -Message "NOTE: Comprehensive checking of diagnostic settings requires examining each resource individually." -Type "INFO" -SpecificLogFile $GeneralReportFile
+                    Write-Log -Message "RECOMMENDATION: If Microsoft Sentinel is not in use, verify that a proper SIEM integration exists via Event Hubs, Storage Accounts, or API connections." -Type "WARN" -SpecificLogFile $GeneralReportFile
+                } catch {
+                    Write-Log -Message "Error checking diagnostic settings: $($_.Exception.Message)" -Type "ERROR" -SpecificLogFile $GeneralReportFile
+                }
+            }
+        } catch {
+            Write-Log -Message "Error checking for Log Analytics workspaces: $($_.Exception.Message)" -Type "ERROR" -SpecificLogFile $GeneralReportFile
+        }
+        
+        Write-Log -Message "Completed Microsoft Sentinel/SIEM Integration Status check." -SpecificLogFile $GeneralReportFile
+        
+    } catch {
+        Write-Log -Message "Error checking Microsoft Sentinel/SIEM Integration Status: $($_.Exception.Message)" -Type "ERROR" -SpecificLogFile $GeneralReportFile
+    }
 
     # --- 43. Azure Key Vault Access Policies & Secrets ---
-    Write-Log -Message "Checking Azure Key Vault Access Policies (If used by M365 apps - Requires Az module)..." -Type "SUBSECTION" -SpecificLogFile $GeneralReportFile
-    Write-Log -Message "TODO: Implement Azure Key Vault checks. Requires Az PowerShell module." -Type "WARN" -SpecificLogFile $GeneralReportFile
+    Write-Log -Message "Checking Azure Key Vault Access Policies & Secrets..." -Type "SUBSECTION" -SpecificLogFile $GeneralReportFile
+    try {
+        # Check if Az.KeyVault module is available
+        if (-not (Get-Module -ListAvailable -Name Az.KeyVault)) {
+            Write-Log -Message "Az.KeyVault module not found. Install using: Install-Module -Name Az.KeyVault -Repository PSGallery -Force" -Type "WARN" -SpecificLogFile $GeneralReportFile
+            Write-Log -Message "Skipping Azure Key Vault checks due to missing Az.KeyVault module." -Type "WARN" -SpecificLogFile $GeneralReportFile
+            return
+        }
+
+        # Check if already connected to Azure
+        $azContext = Get-AzContext -ErrorAction SilentlyContinue
+        if (-not $azContext) {
+            Write-Log -Message "Not connected to Azure. Please use Connect-AzAccount before running this script for Key Vault-specific checks." -Type "WARN" -SpecificLogFile $GeneralReportFile
+            Write-Log -Message "Skipping Azure Key Vault checks due to missing Azure connection." -Type "WARN" -SpecificLogFile $GeneralReportFile
+            return
+        }
+
+        Write-Log -Message "Connected to Azure subscription: $($azContext.Subscription.Name) ($($azContext.Subscription.Id))" -SpecificLogFile $GeneralReportFile
+        
+        # --- 1. Get all Key Vaults in the subscription
+        Write-Log -Message "Checking for Azure Key Vaults in subscription..." -SpecificLogFile $GeneralReportFile
+        
+        $keyVaults = Get-AzKeyVault -ErrorAction SilentlyContinue
+        
+        if (-not $keyVaults -or $keyVaults.Count -eq 0) {
+            Write-Log -Message "No Key Vaults found in subscription $($azContext.Subscription.Name)." -Type "INFO" -SpecificLogFile $GeneralReportFile
+            return
+        }
+        
+        Write-Log -Message "Found $($keyVaults.Count) Key Vaults in subscription $($azContext.Subscription.Name)." -SpecificLogFile $GeneralReportFile
+        
+        # --- 2. Define M365-related service principal patterns to look for
+        $m365RelatedAppIds = @(
+            # Microsoft Graph
+            "00000003-0000-0000-c000-000000000000",
+            # Office 365 Exchange Online 
+            "00000002-0000-0ff1-ce00-000000000000",
+            # Office 365 SharePoint Online
+            "00000003-0000-0ff1-ce00-000000000000",
+            # Office 365 Management API
+            "c5393580-f805-4401-95e8-94b7a6ef2fc2",
+            # Power BI Service
+            "00000009-0000-0000-c000-000000000000",
+            # Azure AD
+            "00000002-0000-0000-c000-000000000000",
+            # Dynamics CRM
+            "00000007-0000-0000-c000-000000000000",
+            # PowerApps
+            "86c22ba4-1113-47d4-b5fc-4efbfaf4db47",
+            # Intune
+            "a3b7ee43-a32a-4593-a9b7-a84077d0539e"
+        )
+        
+        $m365RelatedAppNamePatterns = @(
+            "Microsoft 365", 
+            "Office 365", 
+            "Exchange Online", 
+            "SharePoint Online", 
+            "Teams", 
+            "Power Apps", 
+            "Power Automate", 
+            "Power BI", 
+            "Dynamics 365", 
+            "Intune", 
+            "Azure AD", 
+            "Microsoft Entra"
+        )
+        
+        # --- 3. Check each Key Vault
+        foreach ($vault in $keyVaults) {
+            $vaultName = $vault.VaultName
+            $resourceGroupName = $vault.ResourceGroupName
+            
+            Write-Log -Message "Analyzing Key Vault: $vaultName (Resource Group: $resourceGroupName)" -SpecificLogFile $GeneralReportFile
+            
+            # Get detailed vault info
+            $vaultInfo = Get-AzKeyVault -VaultName $vaultName -ResourceGroupName $resourceGroupName -ErrorAction SilentlyContinue
+            
+            if ($vaultInfo) {
+                # Check Key Vault protection settings
+                Write-Log -Message "  Key Vault Protection Settings:" -SpecificLogFile $GeneralReportFile
+                Write-Log -Message "    Soft Delete Enabled: $($vaultInfo.EnableSoftDelete)" -SpecificLogFile $GeneralReportFile
+                Write-Log -Message "    Purge Protection Enabled: $($vaultInfo.EnablePurgeProtection)" -SpecificLogFile $GeneralReportFile
+                
+                if (-not $vaultInfo.EnableSoftDelete) {
+                    Write-Log -Message "    ALERT: Soft Delete is not enabled for Key Vault '$vaultName'. This means deleted secrets cannot be recovered." -Type "ALERT" -IsAlert -SpecificLogFile $GeneralReportFile
+                }
+                
+                if (-not $vaultInfo.EnablePurgeProtection) {
+                    Write-Log -Message "    WARN: Purge Protection is not enabled for Key Vault '$vaultName'. This means soft-deleted secrets can be permanently deleted within the retention period." -Type "WARN" -SpecificLogFile $GeneralReportFile
+                }
+                
+                # Check if vault is network restricted or public
+                if ($vaultInfo.NetworkAcls -and $vaultInfo.NetworkAcls.DefaultAction -eq "Deny") {
+                    Write-Log -Message "    Network Access: Restricted (Default Action: Deny)" -SpecificLogFile $GeneralReportFile
+                } else {
+                    Write-Log -Message "    ALERT: Network Access: Public (Default Action: Allow) - Key Vault is accessible from the internet" -Type "ALERT" -IsAlert -SpecificLogFile $GeneralReportFile
+                }
+                
+                # --- 4. Check Access Policies
+                Write-Log -Message "  Checking Access Policies..." -SpecificLogFile $GeneralReportFile
+                
+                $accessPolicies = $vaultInfo.AccessPolicies
+                
+                if ($accessPolicies -and $accessPolicies.Count -gt 0) {
+                    Write-Log -Message "  Found $($accessPolicies.Count) access policies in Key Vault '$vaultName'." -SpecificLogFile $GeneralReportFile
+                    
+                    foreach ($policy in $accessPolicies) {
+                        $objectId = $policy.ObjectId
+                        $tenantId = $policy.TenantId
+                        $applicationId = $policy.ApplicationId
+                        
+                        # Try to get identity information
+                        $identityInfo = $null
+                        $identityType = "Unknown"
+                        $displayName = "Unknown"
+                        $appId = $null
+                        
+                        # Try to resolve the identity (user, service principal, or app)
+                        try {
+                            # First try as service principal
+                            $spInfo = Get-AzADServicePrincipal -ObjectId $objectId -ErrorAction SilentlyContinue
+                            if ($spInfo) {
+                                $identityInfo = $spInfo
+                                $identityType = "Service Principal"
+                                $displayName = $spInfo.DisplayName
+                                $appId = $spInfo.ApplicationId
+                            } else {
+                                # Try as user
+                                $userInfo = Get-AzADUser -ObjectId $objectId -ErrorAction SilentlyContinue
+                                if ($userInfo) {
+                                    $identityInfo = $userInfo
+                                    $identityType = "User"
+                                    $displayName = $userInfo.DisplayName
+                                } else {
+                                    # Try as AD group
+                                    $groupInfo = Get-AzADGroup -ObjectId $objectId -ErrorAction SilentlyContinue
+                                    if ($groupInfo) {
+                                        $identityInfo = $groupInfo
+                                        $identityType = "Group"
+                                        $displayName = $groupInfo.DisplayName
+                                    }
+                                }
+                            }
+                        } catch {
+                            Write-Log -Message "    Error resolving identity for ObjectId $objectId: $($_.Exception.Message)" -Type "ERROR" -SpecificLogFile $GeneralReportFile
+                        }
+                        
+                        # Log policy information
+                        Write-Log -Message "    Policy for $identityType '$displayName' (ObjectId: $objectId):" -SpecificLogFile $GeneralReportFile
+                        
+                        # Check permissions in the policy
+                        $secretPerms = $policy.PermissionsToSecrets -join ', '
+                        $keyPerms = $policy.PermissionsToKeys -join ', '
+                        $certPerms = $policy.PermissionsToCertificates -join ', '
+                        $storagePerms = $policy.PermissionsToStorage -join ', '
+                        
+                        Write-Log -Message "      Secret Permissions: $secretPerms" -SpecificLogFile $GeneralReportFile
+                        Write-Log -Message "      Key Permissions: $keyPerms" -SpecificLogFile $GeneralReportFile
+                        Write-Log -Message "      Certificate Permissions: $certPerms" -SpecificLogFile $GeneralReportFile
+                        Write-Log -Message "      Storage Permissions: $storagePerms" -SpecificLogFile $GeneralReportFile
+                        
+                        # Check for high-risk permissions
+                        $highRiskPermissions = @("All", "Purge", "Delete", "Backup", "Restore")
+                        $hasHighRiskPerms = $false
+                        $highRiskPermsFound = @()
+                        
+                        $allPermissions = @($policy.PermissionsToSecrets) + @($policy.PermissionsToKeys) + @($policy.PermissionsToCertificates) + @($policy.PermissionsToStorage)
+                        foreach ($perm in $allPermissions) {
+                            if ($highRiskPermissions -contains $perm) {
+                                $hasHighRiskPerms = $true
+                                $highRiskPermsFound += $perm
+                            }
+                        }
+                        
+                        if ($hasHighRiskPerms) {
+                            Write-Log -Message "      ALERT: Identity has high-risk permissions: $($highRiskPermsFound -join ', ')" -Type "ALERT" -IsAlert -SpecificLogFile $GeneralReportFile
+                        }
+                        
+                        # Check if this is an M365-related service principal
+                        $isM365Related = $false
+                        if ($identityType -eq "Service Principal" -and $appId) {
+                            if ($m365RelatedAppIds -contains $appId) {
+                                $isM365Related = $true
+                                Write-Log -Message "      INFO: This is a known Microsoft 365 service principal." -Type "INFO" -SpecificLogFile $GeneralReportFile
+                            } else {
+                                foreach ($pattern in $m365RelatedAppNamePatterns) {
+                                    if ($displayName -like "*$pattern*") {
+                                        $isM365Related = $true
+                                        Write-Log -Message "      INFO: This appears to be a Microsoft 365 related service principal based on name pattern." -Type "INFO" -SpecificLogFile $GeneralReportFile
+                                        break
+                                    }
+                                }
+                            }
+                        }
+                        
+                        # Check for external tenant IDs (potential cross-tenant access)
+                        if ($tenantId -ne $azContext.Tenant.Id) {
+                            Write-Log -Message "      CRITICAL ALERT: Policy is for an external tenant ID: $tenantId (current tenant: $($azContext.Tenant.Id))" -Type "ALERT" -IsAlert -SpecificLogFile $GeneralReportFile
+                        }
+                    }
+                    
+                    # Check for potential excessive access
+                    $adminCount = $accessPolicies.Count
+                    $allAccessCount = ($accessPolicies | Where-Object { $_.PermissionsToSecrets -contains "All" }).Count
+                    
+                    if ($adminCount -gt 5) {
+                        Write-Log -Message "  ALERT: Key Vault '$vaultName' has $adminCount access policies. Review if all are necessary." -Type "ALERT" -IsAlert -SpecificLogFile $GeneralReportFile
+                    }
+                    
+                    if ($allAccessCount -gt 2) {
+                        Write-Log -Message "  ALERT: Key Vault '$vaultName' has $allAccessCount policies with 'All' permission to secrets. This is excessive." -Type "ALERT" -IsAlert -SpecificLogFile $GeneralReportFile
+                    }
+                } else {
+                    Write-Log -Message "  No access policies found in Key Vault '$vaultName' or error retrieving them." -Type "WARN" -SpecificLogFile $GeneralReportFile
+                }
+                
+                # --- 5. Check Secrets
+                Write-Log -Message "  Checking Secrets..." -SpecificLogFile $GeneralReportFile
+                
+                try {
+                    # Attempt to get secrets (will only succeed if caller has permissions)
+                    $secrets = Get-AzKeyVaultSecret -VaultName $vaultName -ErrorAction SilentlyContinue
+                    
+                    if ($secrets -and $secrets.Count -gt 0) {
+                        Write-Log -Message "  Found $($secrets.Count) secrets in Key Vault '$vaultName'." -SpecificLogFile $GeneralReportFile
+                        
+                        # Look for secrets with no expiration
+                        $noExpirySecrets = $secrets | Where-Object { $null -eq $_.Expires }
+                        if ($noExpirySecrets -and $noExpirySecrets.Count -gt 0) {
+                            Write-Log -Message "  ALERT: Found $($noExpirySecrets.Count) secrets with no expiration date:" -Type "ALERT" -IsAlert -SpecificLogFile $GeneralReportFile
+                            foreach ($secret in $noExpirySecrets) {
+                                Write-Log -Message "    - $($secret.Name)" -Type "ALERT" -IsAlert -SpecificLogFile $GeneralReportFile
+                            }
+                        }
+                        
+                        # Look for expired secrets still enabled
+                        $expiredSecrets = $secrets | Where-Object { $null -ne $_.Expires -and $_.Expires -lt (Get-Date) -and $_.Enabled -eq $true }
+                        if ($expiredSecrets -and $expiredSecrets.Count -gt 0) {
+                            Write-Log -Message "  ALERT: Found $($expiredSecrets.Count) expired secrets that are still enabled:" -Type "ALERT" -IsAlert -SpecificLogFile $GeneralReportFile
+                            foreach ($secret in $expiredSecrets) {
+                                Write-Log -Message "    - $($secret.Name) (Expired: $($secret.Expires))" -Type "ALERT" -IsAlert -SpecificLogFile $GeneralReportFile
+                            }
+                        }
+                        
+                        # Look for recently modified secrets
+                        $recentSecrets = $secrets | Where-Object { $null -ne $_.Updated -and (New-TimeSpan -Start $_.Updated -End (Get-Date)).TotalDays -lt $script:LookbackDays }
+                        if ($recentSecrets -and $recentSecrets.Count -gt 0) {
+                            Write-Log -Message "  ALERT: Found $($recentSecrets.Count) recently modified secrets:" -Type "ALERT" -IsAlert -SpecificLogFile $GeneralReportFile
+                            foreach ($secret in $recentSecrets) {
+                                Write-Log -Message "    - $($secret.Name) (Last Updated: $($secret.Updated))" -Type "ALERT" -IsAlert -SpecificLogFile $GeneralReportFile
+                            }
+                        }
+                        
+                        # Look for M365-related secrets
+                        $m365Secrets = $secrets | Where-Object { 
+                            $secretName = $_.Name.ToLower()
+                            $secretName -like "*client*secret*" -or 
+                            $secretName -like "*app*secret*" -or 
+                            $secretName -like "*tenant*" -or 
+                            $secretName -like "*office*" -or 
+                            $secretName -like "*m365*" -or 
+                            $secretName -like "*microsoft365*" -or 
+                            $secretName -like "*sharepoint*" -or 
+                            $secretName -like "*exchange*" -or 
+                            $secretName -like "*graph*" -or 
+                            $secretName -like "*teams*" -or 
+                            $secretName -like "*power*" -or 
+                            $secretName -like "*dynamics*" -or 
+                            $secretName -like "*intune*" -or 
+                            $secretName -like "*azure*ad*" -or 
+                            $secretName -like "*entra*" 
+                        }
+                        
+                        if ($m365Secrets -and $m365Secrets.Count -gt 0) {
+                            Write-Log -Message "  Found $($m365Secrets.Count) secrets that appear to be related to Microsoft 365 services:" -SpecificLogFile $GeneralReportFile
+                            foreach ($secret in $m365Secrets) {
+                                Write-Log -Message "    - $($secret.Name) (Enabled: $($secret.Enabled), Expires: $($secret.Expires))" -SpecificLogFile $GeneralReportFile
+                                
+                                # Additional alert for recently changed M365 secrets
+                                if ($null -ne $secret.Updated -and (New-TimeSpan -Start $secret.Updated -End (Get-Date)).TotalDays -lt $script:LookbackDays) {
+                                    Write-Log -Message "    ALERT: Microsoft 365 related secret '$($secret.Name)' was recently modified ($($secret.Updated))." -Type "ALERT" -IsAlert -SpecificLogFile $GeneralReportFile
+                                }
+                            }
+                        }
+                    } else {
+                        Write-Log -Message "  No secrets found in Key Vault '$vaultName' or insufficient permissions to view them." -Type "INFO" -SpecificLogFile $GeneralReportFile
+                    }
+                } catch {
+                    Write-Log -Message "  Error checking secrets in Key Vault '$vaultName': $($_.Exception.Message)" -Type "ERROR" -SpecificLogFile $GeneralReportFile
+                    Write-Log -Message "  This may be due to insufficient permissions to list secrets." -Type "INFO" -SpecificLogFile $GeneralReportFile
+                }
+                
+                # --- 6. Check Key Vault Diagnostic Settings
+                Write-Log -Message "  Checking Diagnostic Settings..." -SpecificLogFile $GeneralReportFile
+                
+                try {
+                    $diagnosticSettings = Get-AzDiagnosticSetting -ResourceId $vaultInfo.ResourceId -ErrorAction SilentlyContinue
+                    
+                    if ($diagnosticSettings -and $diagnosticSettings.Count -gt 0) {
+                        Write-Log -Message "  Found $($diagnosticSettings.Count) diagnostic settings for Key Vault '$vaultName'." -SpecificLogFile $GeneralReportFile
+                        
+                        $auditLogsEnabled = $false
+                        
+                        foreach ($setting in $diagnosticSettings) {
+                            Write-Log -Message "    Diagnostic Setting: $($setting.Name)" -SpecificLogFile $GeneralReportFile
+                            
+                            # Check if audit logs are being collected
+                            $auditLogSetting = $setting.Logs | Where-Object { $_.Category -eq "AuditEvent" }
+                            if ($auditLogSetting -and $auditLogSetting.Enabled) {
+                                $auditLogsEnabled = $true
+                                
+                                # Check where logs are being sent
+                                if ($setting.WorkspaceId) {
+                                    $workspace = Get-AzOperationalInsightsWorkspace -ResourceId $setting.WorkspaceId -ErrorAction SilentlyContinue
+                                    Write-Log -Message "      Audit logs are sent to Log Analytics workspace: $($workspace.Name)" -SpecificLogFile $GeneralReportFile
+                                }
+                                if ($setting.StorageAccountId) {
+                                    $storageAccount = Get-AzStorageAccount -ResourceId $setting.StorageAccountId -ErrorAction SilentlyContinue
+                                    Write-Log -Message "      Audit logs are sent to Storage Account: $($storageAccount.StorageAccountName)" -SpecificLogFile $GeneralReportFile
+                                }
+                                if ($setting.EventHubAuthorizationRuleId) {
+                                    Write-Log -Message "      Audit logs are sent to Event Hub: $($setting.EventHubName)" -SpecificLogFile $GeneralReportFile
+                                }
+                            } else {
+                                Write-Log -Message "      Audit logs are NOT enabled in this diagnostic setting." -Type "WARN" -SpecificLogFile $GeneralReportFile
+                            }
+                        }
+                        
+                        if (-not $auditLogsEnabled) {
+                            Write-Log -Message "  ALERT: Audit logging is not enabled for Key Vault '$vaultName'. This prevents tracking of access to secrets." -Type "ALERT" -IsAlert -SpecificLogFile $GeneralReportFile
+                        }
+                    } else {
+                        Write-Log -Message "  ALERT: No diagnostic settings found for Key Vault '$vaultName'. Audit logging is not configured." -Type "ALERT" -IsAlert -SpecificLogFile $GeneralReportFile
+                    }
+                } catch {
+                    Write-Log -Message "  Error checking diagnostic settings for Key Vault '$vaultName': $($_.Exception.Message)" -Type "ERROR" -SpecificLogFile $GeneralReportFile
+                }
+                
+                # --- 7. Check Key Vault Firewall Rules
+                Write-Log -Message "  Checking Firewall Rules..." -SpecificLogFile $GeneralReportFile
+                
+                if ($vaultInfo.NetworkAcls -and $vaultInfo.NetworkAcls.DefaultAction -eq "Deny") {
+                    $allowedIps = $vaultInfo.NetworkAcls.IpAddressRanges
+                    $allowedVnets = $vaultInfo.NetworkAcls.VirtualNetworkResourceIds
+                    
+                    Write-Log -Message "    Key Vault has network restrictions:" -SpecificLogFile $GeneralReportFile
+                    Write-Log -Message "      Default Action: $($vaultInfo.NetworkAcls.DefaultAction)" -SpecificLogFile $GeneralReportFile
+                    Write-Log -Message "      Bypass: $($vaultInfo.NetworkAcls.Bypass)" -SpecificLogFile $GeneralReportFile
+                    Write-Log -Message "      Allowed IP Ranges: $($allowedIps -join ', ')" -SpecificLogFile $GeneralReportFile
+                    Write-Log -Message "      Allowed VNets: $($allowedVnets.Count)" -SpecificLogFile $GeneralReportFile
+                    
+                    # Check for overly permissive IP ranges
+                    $wideRanges = $allowedIps | Where-Object { $_ -like "0.0.0.0*" -or $_ -like "0.0.*" -or $_ -like "10.*" }
+                    if ($wideRanges -and $wideRanges.Count -gt 0) {
+                        Write-Log -Message "      ALERT: Key Vault has overly permissive IP ranges: $($wideRanges -join ', ')" -Type "ALERT" -IsAlert -SpecificLogFile $GeneralReportFile
+                    }
+                    
+                    if ($vaultInfo.NetworkAcls.Bypass -eq "AzureServices" -or $vaultInfo.NetworkAcls.Bypass -like "*AzureServices*") {
+                        Write-Log -Message "      WARN: Key Vault allows bypass for all Azure Services. Consider restricting to specific services." -Type "WARN" -SpecificLogFile $GeneralReportFile
+                    }
+                }
+            } else {
+                Write-Log -Message "  Error retrieving detailed information for Key Vault '$vaultName'." -Type "ERROR" -SpecificLogFile $GeneralReportFile
+            }
+        }
+        
+        Write-Log -Message "Completed Azure Key Vault Access Policies & Secrets check." -SpecificLogFile $GeneralReportFile
+        
+    } catch {
+        Write-Log -Message "Error checking Azure Key Vault Access Policies & Secrets: $($_.Exception.Message)" -Type "ERROR" -SpecificLogFile $GeneralReportFile
+    }
 
     # --- 44. Managed Tenant Delegations (Lighthouse) ---
-    Write-Log -Message "Checking Managed Tenant Delegations (Lighthouse - Informational for MSPs)..." -Type "SUBSECTION" -SpecificLogFile $GeneralReportFile
-    Write-Log -Message "TODO: Implement Managed Tenant Delegation (Lighthouse) checks. Requires Az PowerShell module." -Type "WARN" -SpecificLogFile $GeneralReportFile
+    Write-Log -Message "Checking Managed Tenant Delegations (Lighthouse)..." -Type "SUBSECTION" -SpecificLogFile $GeneralReportFile
+    try {
+        # Check if Az.ManagedServices module is available
+        if (-not (Get-Module -ListAvailable -Name Az.ManagedServices)) {
+            Write-Log -Message "Az.ManagedServices module not found. Install using: Install-Module -Name Az.ManagedServices -Repository PSGallery -Force" -Type "WARN" -SpecificLogFile $GeneralReportFile
+            Write-Log -Message "Skipping Managed Tenant Delegations (Lighthouse) checks due to missing Az.ManagedServices module." -Type "WARN" -SpecificLogFile $GeneralReportFile
+            return
+        }
+
+        # Check if already connected to Azure
+        $azContext = Get-AzContext -ErrorAction SilentlyContinue
+        if (-not $azContext) {
+            Write-Log -Message "Not connected to Azure. Please use Connect-AzAccount before running this script for Lighthouse-specific checks." -Type "WARN" -SpecificLogFile $GeneralReportFile
+            Write-Log -Message "Skipping Managed Tenant Delegations (Lighthouse) checks due to missing Azure connection." -Type "WARN" -SpecificLogFile $GeneralReportFile
+            return
+        }
+
+        Write-Log -Message "Connected to Azure subscription: $($azContext.Subscription.Name) ($($azContext.Subscription.Id))" -SpecificLogFile $GeneralReportFile
+        
+        # --- 1. Check for delegations TO other tenants (you as customer, MSP as provider)
+        Write-Log -Message "Checking for delegations of your tenant TO external managing tenants (Lighthouse projections)..." -SpecificLogFile $GeneralReportFile
+        
+        try {
+            # Get all delegations where this tenant is the customer
+            $delegations = Get-AzManagedServicesAssignment -ErrorAction SilentlyContinue
+            
+            if (-not $delegations -or $delegations.Count -eq 0) {
+                Write-Log -Message "No Lighthouse delegations found where this tenant is being managed by external tenants." -SpecificLogFile $GeneralReportFile
+            } else {
+                Write-Log -Message "ALERT: Found $($delegations.Count) Lighthouse delegations where your tenant is being managed by external tenants:" -Type "ALERT" -IsAlert -SpecificLogFile $GeneralReportFile
+                
+                foreach ($delegation in $delegations) {
+                    $managingTenantId = $delegation.ManagedByTenantId
+                    
+                    Write-Log -Message "  Delegation Name: $($delegation.Name)" -Type "ALERT" -IsAlert -SpecificLogFile $GeneralReportFile
+                    Write-Log -Message "  Managing Tenant ID: $managingTenantId" -Type "ALERT" -IsAlert -SpecificLogFile $GeneralReportFile
+                    Write-Log -Message "  Delegation Scope: $($delegation.Id)" -Type "ALERT" -IsAlert -SpecificLogFile $GeneralReportFile
+                    Write-Log -Message "  Created: $($delegation.ProvisioningState)" -Type "ALERT" -IsAlert -SpecificLogFile $GeneralReportFile
+                    
+                    # Get the delegated authorizations (what permissions the managing tenant has)
+                    $authorizations = Get-AzManagedServicesDefinition -Name $delegation.DefinitionId -ErrorAction SilentlyContinue
+                    
+                    if ($authorizations) {
+                        Write-Log -Message "  Delegated Permissions:" -Type "ALERT" -IsAlert -SpecificLogFile $GeneralReportFile
+                        
+                        foreach ($authorization in $authorizations.Authorization) {
+                            $roleDefinition = Get-AzRoleDefinition -Id $authorization.RoleDefinitionId -ErrorAction SilentlyContinue
+                            $roleName = $roleDefinition.Name ?? $authorization.RoleDefinitionId
+                            
+                            Write-Log -Message "    - Role: $roleName" -Type "ALERT" -IsAlert -SpecificLogFile $GeneralReportFile
+                            Write-Log -Message "      Principal ID: $($authorization.PrincipalId)" -Type "ALERT" -IsAlert -SpecificLogFile $GeneralReportFile
+                            Write-Log -Message "      Principal ID Type: $($authorization.PrincipalIdDisplayName)" -Type "ALERT" -IsAlert -SpecificLogFile $GeneralReportFile
+                            
+                            # Check for highly privileged roles
+                            $criticalRoles = @(
+                                "Owner", "Contributor", "User Access Administrator", "Azure Kubernetes Service Contributor Role", 
+                                "Virtual Machine Contributor", "Storage Account Contributor", "Key Vault Administrator", 
+                                "Network Contributor", "SQL Server Contributor", "SQL Security Manager"
+                            )
+                            
+                            if ($criticalRoles -contains $roleName) {
+                                Write-Log -Message "      CRITICAL ALERT: Delegation grants highly privileged role '$roleName' to the managing tenant!" -Type "ALERT" -IsAlert -SpecificLogFile $GeneralReportFile
+                            }
+                        }
+                        
+                        # Check if the delegation was created recently
+                        if ($delegation.ProvisioningState -match "Accepted" -and $delegation.ProvisioningState -match "\d{1,2}/\d{1,2}/\d{4}") {
+                            try {
+                                $creationDateString = $delegation.ProvisioningState -replace "^.*?(\d{1,2}/\d{1,2}/\d{4}).*$", '$1'
+                                $creationDate = [DateTime]::Parse($creationDateString)
+                                
+                                if ((New-TimeSpan -Start $creationDate -End (Get-Date)).TotalDays -lt $script:LookbackDays) {
+                                    Write-Log -Message "  ALERT: This delegation was created recently ($creationDateString). Verify if this is expected." -Type "ALERT" -IsAlert -SpecificLogFile $GeneralReportFile
+                                }
+                            } catch {
+                                Write-Log -Message "  Could not parse creation date from ProvisioningState." -Type "WARN" -SpecificLogFile $GeneralReportFile
+                            }
+                        }
+                    } else {
+                        Write-Log -Message "  Could not retrieve authorization details for this delegation." -Type "WARN" -SpecificLogFile $GeneralReportFile
+                    }
+                    
+                    Write-Log -Message "  RECOMMENDATION: Verify this delegation is expected and the managing tenant is trusted." -Type "ALERT" -IsAlert -SpecificLogFile $GeneralReportFile
+                }
+            }
+        } catch {
+            Write-Log -Message "Error checking for Lighthouse delegations TO other tenants: $($_.Exception.Message)" -Type "ERROR" -SpecificLogFile $GeneralReportFile
+        }
+        
+        # --- 2. Check for delegations FROM other tenants (you as MSP, customer has delegated to you)
+        # This is less security critical but still informative
+        Write-Log -Message "Checking for delegations FROM other tenants (where you are the managing tenant)..." -SpecificLogFile $GeneralReportFile
+        
+        try {
+            # Get all delegations where this tenant is the managing tenant
+            $managedTenants = Get-AzManagedServicesRegistration -ErrorAction SilentlyContinue
+            
+            if (-not $managedTenants -or $managedTenants.Count -eq 0) {
+                Write-Log -Message "No tenants found that have delegated resources to your tenant." -SpecificLogFile $GeneralReportFile
+            } else {
+                Write-Log -Message "Found $($managedTenants.Count) tenant registrations where other tenants have delegated resources to your tenant." -SpecificLogFile $GeneralReportFile
+                
+                foreach ($registration in $managedTenants) {
+                    $customerTenantId = $registration.TenantId
+                    
+                    Write-Log -Message "  Customer Tenant ID: $customerTenantId" -SpecificLogFile $GeneralReportFile
+                    Write-Log -Message "  Registration Name: $($registration.Name)" -SpecificLogFile $GeneralReportFile
+                    Write-Log -Message "  Registration State: $($registration.ProvisioningState)" -SpecificLogFile $GeneralReportFile
+                    
+                    # Get the delegated resources
+                    $managedResources = Get-AzManagedServicesAssignment -TargetRegistrationId $registration.RegistrationId -ErrorAction SilentlyContinue
+                    
+                    if ($managedResources -and $managedResources.Count -gt 0) {
+                        Write-Log -Message "  Managed Resources from this tenant: $($managedResources.Count)" -SpecificLogFile $GeneralReportFile
+                        
+                        foreach ($resource in $managedResources) {
+                            Write-Log -Message "    - Resource: $($resource.Id)" -SpecificLogFile $GeneralReportFile
+                        }
+                        
+                        # Check if any registrations were created recently
+                        $recentRegistrations = $managedResources | Where-Object {
+                            if ($_.ProvisioningState -match "\d{1,2}/\d{1,2}/\d{4}") {
+                                try {
+                                    $creationDateString = $_.ProvisioningState -replace "^.*?(\d{1,2}/\d{1,2}/\d{4}).*$", '$1'
+                                    $creationDate = [DateTime]::Parse($creationDateString)
+                                    return (New-TimeSpan -Start $creationDate -End (Get-Date)).TotalDays -lt $script:LookbackDays
+                                } catch {
+                                    return $false
+                                }
+                            } else {
+                                return $false
+                            }
+                        }
+                        
+                        if ($recentRegistrations -and $recentRegistrations.Count -gt 0) {
+                            Write-Log -Message "  INFO: $($recentRegistrations.Count) delegations from this customer were created recently. Verify these are expected." -Type "INFO" -SpecificLogFile $GeneralReportFile
+                        }
+                    } else {
+                        Write-Log -Message "  No specific resource delegations found from this tenant." -SpecificLogFile $GeneralReportFile
+                    }
+                }
+            }
+        } catch {
+            Write-Log -Message "Error checking for Lighthouse delegations FROM other tenants: $($_.Exception.Message)" -Type "ERROR" -SpecificLogFile $GeneralReportFile
+        }
+        
+        # --- 3. Check for GDAP Delegations (Graph API)
+        if ($GraphConnected) {
+            Write-Log -Message "Checking for GDAP (Granular Delegated Admin Privileges) relationships..." -SpecificLogFile $GeneralReportFile
+            
+            # This is a supplemental check to the earlier Azure AD section (check #19)
+            # Here we're focusing on it from the Managed Services perspective
+            
+            try {
+                $gdapRelationships = Get-MgTenantRelationshipDelegatedAdminRelationship -All -ErrorAction SilentlyContinue
+                
+                if ($gdapRelationships -and $gdapRelationships.Count -gt 0) {
+                    Write-Log -Message "Found $($gdapRelationships.Count) GDAP relationships. This supplements the earlier detailed GDAP check." -SpecificLogFile $GeneralReportFile
+                    
+                    # Count active vs. inactive relationships
+                    $activeRelationships = $gdapRelationships | Where-Object { $_.Status -eq "active" }
+                    $inactiveRelationships = $gdapRelationships | Where-Object { $_.Status -ne "active" }
+                    
+                    Write-Log -Message "  Active GDAP Relationships: $($activeRelationships.Count)" -SpecificLogFile $GeneralReportFile
+                    Write-Log -Message "  Inactive GDAP Relationships: $($inactiveRelationships.Count)" -SpecificLogFile $GeneralReportFile
+                    
+                    # Check for recently created relationships
+                    $recentRelationships = $gdapRelationships | Where-Object {
+                        (New-TimeSpan -Start $_.CreatedDateTime -End (Get-Date)).TotalDays -lt $script:LookbackDays
+                    }
+                    
+                    if ($recentRelationships -and $recentRelationships.Count -gt 0) {
+                        Write-Log -Message "  ALERT: $($recentRelationships.Count) GDAP relationships were created recently:" -Type "ALERT" -IsAlert -SpecificLogFile $GeneralReportFile
+                        
+                        foreach ($relationship in $recentRelationships) {
+                            Write-Log -Message "    - Relationship: $($relationship.DisplayName)" -Type "ALERT" -IsAlert -SpecificLogFile $GeneralReportFile
+                            Write-Log -Message "      Partner Tenant ID: $($relationship.TenantId)" -Type "ALERT" -IsAlert -SpecificLogFile $GeneralReportFile
+                            Write-Log -Message "      Created: $($relationship.CreatedDateTime)" -Type "ALERT" -IsAlert -SpecificLogFile $GeneralReportFile
+                            Write-Log -Message "      Status: $($relationship.Status)" -Type "ALERT" -IsAlert -SpecificLogFile $GeneralReportFile
+                        }
+                    }
+                    
+                    # Check for high-privilege GDAP delegations
+                    $highPrivilegeRoles = @(
+                        "Global Administrator", "Privileged Role Administrator", "Exchange Administrator", 
+                        "SharePoint Administrator", "User Administrator", "Authentication Administrator",
+                        "Conditional Access Administrator", "Security Administrator", "Application Administrator",
+                        "Cloud Application Administrator", "Compliance Administrator", "Device Administrator"
+                    )
+                    
+                    $highPrivilegeRelationships = New-Object System.Collections.Generic.List[PSObject]
+                    
+                    foreach ($relationship in $gdapRelationships) {
+                        if ($relationship.Status -eq "active" -and $relationship.AccessDetails -and $relationship.AccessDetails.UnifiedRoles) {
+                            foreach ($role in $relationship.AccessDetails.UnifiedRoles) {
+                                # Try to resolve role name
+                                $roleDef = Get-MgDirectoryRoleDefinition -DirectoryRoleDefinitionId $role.RoleDefinitionId -ErrorAction SilentlyContinue
+                                $roleName = $roleDef.DisplayName ?? $role.RoleDefinitionId
+                                
+                                if ($highPrivilegeRoles -contains $roleName) {
+                                    $highPrivilegeRelationships.Add([PSCustomObject]@{
+                                        RelationshipName = $relationship.DisplayName
+                                        PartnerTenantId = $relationship.TenantId
+                                        RoleName = $roleName
+                                        Status = $relationship.Status
+                                        Created = $relationship.CreatedDateTime
+                                    })
+                                    break
+                                }
+                            }
+                        }
+                    }
+                    
+                    if ($highPrivilegeRelationships.Count -gt 0) {
+                        Write-Log -Message "  ALERT: Found $($highPrivilegeRelationships.Count) GDAP relationships with high-privilege roles:" -Type "ALERT" -IsAlert -SpecificLogFile $GeneralReportFile
+                        
+                        foreach ($relation in $highPrivilegeRelationships) {
+                            Write-Log -Message "    - Relationship: $($relation.RelationshipName)" -Type "ALERT" -IsAlert -SpecificLogFile $GeneralReportFile
+                            Write-Log -Message "      Partner Tenant ID: $($relation.PartnerTenantId)" -Type "ALERT" -IsAlert -SpecificLogFile $GeneralReportFile
+                            Write-Log -Message "      High-Privilege Role: $($relation.RoleName)" -Type "ALERT" -IsAlert -SpecificLogFile $GeneralReportFile
+                            Write-Log -Message "      Created: $($relation.Created)" -Type "ALERT" -IsAlert -SpecificLogFile $GeneralReportFile
+                        }
+                    }
+                } else {
+                    Write-Log -Message "No GDAP relationships found or error retrieving them." -SpecificLogFile $GeneralReportFile
+                }
+            } catch {
+                Write-Log -Message "Error checking GDAP relationships: $($_.Exception.Message)" -Type "ERROR" -SpecificLogFile $GeneralReportFile
+            }
+        } else {
+            Write-Log -Message "Graph API not connected. Skipping GDAP relationship check." -Type "WARN" -SpecificLogFile $GeneralReportFile
+        }
+        
+        # --- 4. Check for partner delegations in audit logs (if available)
+        if ($GraphConnected) {
+            Write-Log -Message "Checking audit logs for recent partner delegation activities..." -SpecificLogFile $GeneralReportFile
+            
+            # Ensure we have the required permission
+            $context = Get-MgContext
+            $hasRequiredPermission = $false
+            if ($context.Scopes) {
+                if ($context.Scopes -contains "AuditLog.Read.All" -or 
+                    $context.Scopes -contains "Directory.Read.All") {
+                    $hasRequiredPermission = $true
+                }
+            }
+            
+            if (-not $hasRequiredPermission) {
+                Write-Log -Message "Connected to Graph API but missing required permissions (AuditLog.Read.All or Directory.Read.All). Cannot check audit logs for partner delegations." -Type "WARN" -SpecificLogFile $GeneralReportFile
+            } else {
+                try {
+                    # Define the time period to look back
+                    $startTime = (Get-Date).AddDays(-$script:LookbackDays).ToString("yyyy-MM-ddTHH:mm:ssZ")
+                    $endTime = (Get-Date).ToString("yyyy-MM-ddTHH:mm:ssZ")
+                    
+                    # Define operations related to partner delegations
+                    $delegationOperations = @(
+                        "Create delegated admin relationship",
+                        "Update delegated admin relationship",
+                        "Delete delegated admin relationship",
+                        "Add service to delegated admin relationship",
+                        "Remove service from delegated admin relationship",
+                        "Add role to delegated admin relationship",
+                        "Remove role from delegated admin relationship",
+                        "Create delegated admin customer addition",
+                        "Accept delegated admin customer addition"
+                    )
+                    
+                    # Create filter for the specific operations we're interested in
+                    $operationFilter = $delegationOperations | ForEach-Object { "activityDisplayName eq '$_'" }
+                    $filter = "activityDateTime ge $startTime and ($($operationFilter -join ' or '))"
+                    
+                    # Query audit logs with the filter
+                    $auditLogs = Get-MgAuditLogDirectoryAudit -Filter $filter -All -ErrorAction SilentlyContinue
+                    
+                    if ($auditLogs -and $auditLogs.Count -gt 0) {
+                        Write-Log -Message "ALERT: Found $($auditLogs.Count) partner delegation events in the audit logs:" -Type "ALERT" -IsAlert -SpecificLogFile $GeneralReportFile
+                        
+                        foreach ($log in $auditLogs) {
+                            $timestamp = $log.ActivityDateTime
+                            $actor = $log.InitiatedBy.User.UserPrincipalName ?? $log.InitiatedBy.User.DisplayName ?? $log.InitiatedBy.App.DisplayName ?? "Unknown"
+                            $activity = $log.ActivityDisplayName
+                            $result = $log.Result
+                            
+                            Write-Log -Message "  $timestamp: $activity by $actor - Result: $result" -Type "ALERT" -IsAlert -SpecificLogFile $GeneralReportFile
+                            
+                            # Extract details about the delegated relationship if available
+                            if ($log.TargetResources -and $log.TargetResources.Count -gt 0) {
+                                foreach ($resource in $log.TargetResources) {
+                                    Write-Log -Message "    Target: $($resource.DisplayName) (Type: $($resource.Type))" -Type "ALERT" -IsAlert -SpecificLogFile $GeneralReportFile
+                                    
+                                    # Extract modified properties for more details
+                                    if ($resource.ModifiedProperties) {
+                                        foreach ($prop in $resource.ModifiedProperties) {
+                                            $propName = $prop.DisplayName
+                                            $oldValue = $prop.OldValue
+                                            $newValue = $prop.NewValue
+                                            
+                                            if ($newValue -and $newValue -ne "[]") {
+                                                Write-Log -Message "      $propName: $newValue" -Type "ALERT" -IsAlert -SpecificLogFile $GeneralReportFile
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    } else {
+                        Write-Log -Message "No partner delegation events found in audit logs for the specified period." -SpecificLogFile $GeneralReportFile
+                    }
+                } catch {
+                    Write-Log -Message "Error checking audit logs for partner delegations: $($_.Exception.Message)" -Type "ERROR" -SpecificLogFile $GeneralReportFile
+                }
+            }
+        } else {
+            Write-Log -Message "Graph API not connected. Skipping audit log check for partner delegation activities." -Type "WARN" -SpecificLogFile $GeneralReportFile
+        }
+        
+        Write-Log -Message "Completed Managed Tenant Delegations (Lighthouse) check." -SpecificLogFile $GeneralReportFile
+        
+    } catch {
+        Write-Log -Message "Error checking Managed Tenant Delegations (Lighthouse): $($_.Exception.Message)" -Type "ERROR" -SpecificLogFile $GeneralReportFile
+    }
 
     # --- 45. Exchange Online PowerShell Module Connections (Session Logging) ---
-    Write-Log -Message "Checking Exchange Online PowerShell Module Connections (via Audit Logs)..." -Type "SUBSECTION" -SpecificLogFile $GeneralReportFile
-    Write-Log -Message "TODO: Implement Exchange Online PowerShell Connection audit." -Type "WARN" -SpecificLogFile $GeneralReportFile
+    Write-Log -Message "Checking Exchange Online PowerShell Module Connections..." -Type "SUBSECTION" -SpecificLogFile $GeneralReportFile
+    try {
+        if (-not $GraphConnected) {
+            Write-Log -Message "Graph API not connected. Cannot check Exchange Online PowerShell connections." -Type "WARN" -SpecificLogFile $GeneralReportFile
+            return
+        }
+
+        # Ensure we have the required permission
+        $context = Get-MgContext
+        $hasRequiredPermission = $false
+        if ($context.Scopes) {
+            if ($context.Scopes -contains "AuditLog.Read.All" -or 
+                $context.Scopes -contains "Directory.Read.All") {
+                $hasRequiredPermission = $true
+            }
+        }
+
+        if (-not $hasRequiredPermission) {
+            Write-Log -Message "Connected to Graph API but missing required permissions (AuditLog.Read.All or Directory.Read.All). Cannot check Exchange Online PowerShell connections." -Type "WARN" -SpecificLogFile $GeneralReportFile
+            return
+        }
+        
+        # --- 1. Check audit logs for Exchange PowerShell connections
+        Write-Log -Message "Searching audit logs for Exchange Online PowerShell connections..." -SpecificLogFile $GeneralReportFile
+        
+        # Define the time period to look back
+        $startTime = (Get-Date).AddDays(-$script:LookbackDays).ToString("yyyy-MM-ddTHH:mm:ssZ")
+        $endTime = (Get-Date).ToString("yyyy-MM-ddTHH:mm:ssZ")
+        
+        # Define operations related to Exchange PowerShell
+        $exchangePSOperations = @(
+            "WindowsAzure-ActiveDirectoryActivity-Run-Shell-Command", # Most PowerShell activity in the tenant
+            "ExchangePowerShell-CmdletAccess", # Exchange Online PowerShell cmdlet access
+            "Connect-ExchangeOnline", # EXO V2 module specific
+            "New-PSSession", # Older Exchange Online PowerShell sessions
+            "User signed in to Exchange Online PowerShell" # Another name for the activity
+        )
+        
+        # Create filter for the specific operations we're interested in
+        $operationFilter = $exchangePSOperations | ForEach-Object { "activityDisplayName eq '$_' or operations/any(o: o eq '$_')" }
+        $filter = "activityDateTime ge $startTime and ($($operationFilter -join ' or '))"
+        
+        # First try checking Azure AD signin logs for PowerShell activity
+        try {
+            # Query for PowerShell sign-ins
+            $filter = "createdDateTime ge $startTime and (appDisplayName eq 'Azure Active Directory PowerShell' or appDisplayName eq 'Exchange Online PowerShell' or clientAppUsed eq 'PowerShell' or appDisplayName eq 'Powershell MSOnline' or appDisplayName eq 'Microsoft Exchange REST API Based PowerShell')"
+            $signInLogs = Get-MgAuditLogSignIn -Filter $filter -All -ErrorAction SilentlyContinue
+            
+            if ($signInLogs -and $signInLogs.Count -gt 0) {
+                Write-Log -Message "Found $($signInLogs.Count) PowerShell sign-ins to Exchange Online or related services." -SpecificLogFile $GeneralReportFile
+                
+                # Organize sign-ins by user for better analysis
+                $signInsByUser = @{}
+                foreach ($signIn in $signInLogs) {
+                    $user = $signIn.UserPrincipalName
+                    if (-not $signInsByUser.ContainsKey($user)) {
+                        $signInsByUser[$user] = New-Object System.Collections.Generic.List[PSObject]
+                    }
+                    $signInsByUser[$user].Add($signIn)
+                }
+                
+                # Process each user's sign-ins
+                foreach ($user in $signInsByUser.Keys) {
+                    $userSignIns = $signInsByUser[$user]
+                    $signInCount = $userSignIns.Count
+                    
+                    Write-Log -Message "User: $user - $signInCount PowerShell sign-ins" -SpecificLogFile $GeneralReportFile
+                    
+                    # Get distinct client apps and IP addresses
+                    $distinctApps = $userSignIns | Select-Object -ExpandProperty AppDisplayName -Unique
+                    $distinctIPs = $userSignIns | Select-Object -ExpandProperty IpAddress -Unique
+                    
+                    Write-Log -Message "  Applications: $($distinctApps -join ', ')" -SpecificLogFile $GeneralReportFile
+                    Write-Log -Message "  IP Addresses: $($distinctIPs -join ', ')" -SpecificLogFile $GeneralReportFile
+                    
+                    # Check for excessive usage
+                    if ($signInCount -gt 10) {
+                        Write-Log -Message "  ALERT: User $user has excessive PowerShell sign-ins ($signInCount) in the past $script:LookbackDays days." -Type "ALERT" -IsAlert -SpecificLogFile $GeneralReportFile
+                    }
+                    
+                    # Check for off-hours activity
+                    $offHoursSignIns = $userSignIns | Where-Object {
+                        $hour = [DateTime]::Parse($_.CreatedDateTime).Hour
+                        $hour -lt 6 -or $hour -gt 18
+                    }
+                    
+                    if ($offHoursSignIns -and $offHoursSignIns.Count -gt 0) {
+                        Write-Log -Message "  ALERT: User $user has $($offHoursSignIns.Count) PowerShell sign-ins during off-hours (before 6 AM or after 6 PM)." -Type "ALERT" -IsAlert -SpecificLogFile $GeneralReportFile
+                        
+                        foreach ($offHoursSignIn in $offHoursSignIns) {
+                            Write-Log -Message "    Time: $($offHoursSignIn.CreatedDateTime), IP: $($offHoursSignIn.IpAddress), App: $($offHoursSignIn.AppDisplayName)" -Type "ALERT" -IsAlert -SpecificLogFile $GeneralReportFile
+                        }
+                    }
+                    
+                    # Check for unusual locations
+                    $distinctLocations = $userSignIns | ForEach-Object {
+                        if ($_.Location) {
+                            "$($_.Location.City), $($_.Location.State), $($_.Location.CountryOrRegion)"
+                        } else {
+                            "Unknown Location"
+                        }
+                    } | Select-Object -Unique
+                    
+                    if ($distinctLocations.Count -gt 1) {
+                        Write-Log -Message "  ALERT: User $user has PowerShell sign-ins from multiple locations: $($distinctLocations -join '; ')" -Type "ALERT" -IsAlert -SpecificLogFile $GeneralReportFile
+                    }
+                    
+                    # Check for failed sign-ins
+                    $failedSignIns = $userSignIns | Where-Object { $_.Status.ErrorCode -ne 0 }
+                    if ($failedSignIns -and $failedSignIns.Count -gt 0) {
+                        Write-Log -Message "  ALERT: User $user has $($failedSignIns.Count) failed PowerShell sign-in attempts." -Type "ALERT" -IsAlert -SpecificLogFile $GeneralReportFile
+                        
+                        foreach ($failedSignIn in $failedSignIns) {
+                            $failureReason = $failedSignIn.Status.FailureReason ?? "Unknown reason"
+                            Write-Log -Message "    Time: $($failedSignIn.CreatedDateTime), IP: $($failedSignIn.IpAddress), Failure: $failureReason" -Type "ALERT" -IsAlert -SpecificLogFile $GeneralReportFile
+                        }
+                    }
+                    
+                    # Sample of recent sessions
+                    $recentSessions = $userSignIns | Sort-Object -Property CreatedDateTime -Descending | Select-Object -First 5
+                    Write-Log -Message "  Recent PowerShell Sessions:" -SpecificLogFile $GeneralReportFile
+                    foreach ($session in $recentSessions) {
+                        $location = if ($session.Location) { "$($session.Location.City), $($session.Location.State), $($session.Location.CountryOrRegion)" } else { "Unknown Location" }
+                        $status = if ($session.Status.ErrorCode -eq 0) { "Success" } else { "Failed: $($session.Status.FailureReason)" }
+                        
+                        Write-Log -Message "    $($session.CreatedDateTime): $($session.AppDisplayName) from $($session.IpAddress) ($location) - $status" -SpecificLogFile $GeneralReportFile
+                    }
+                }
+            } else {
+                Write-Log -Message "No PowerShell sign-ins found in the specified period." -SpecificLogFile $GeneralReportFile
+            }
+        } catch {
+            Write-Log -Message "Error querying sign-in logs for PowerShell activity: $($_.Exception.Message)" -Type "ERROR" -SpecificLogFile $GeneralReportFile
+        }
+        
+        # --- 2. Check audit logs for specific Exchange Online PowerShell cmdlet execution
+        Write-Log -Message "Checking audit logs for specific Exchange Online PowerShell cmdlet execution..." -SpecificLogFile $GeneralReportFile
+        
+        try {
+            # Try to get Exchange admin audit logs via directory audit logs
+            $filter = "activityDateTime ge $startTime and (loggedByService eq 'Exchange' or category eq 'ExchangeAdmin' or category eq 'ExchangeItemGroup')"
+            $exchangeAdminLogs = Get-MgAuditLogDirectoryAudit -Filter $filter -All -ErrorAction SilentlyContinue
+            
+            if ($exchangeAdminLogs -and $exchangeAdminLogs.Count -gt 0) {
+                Write-Log -Message "Found $($exchangeAdminLogs.Count) Exchange admin audit events." -SpecificLogFile $GeneralReportFile
+                
+                # Identify PowerShell related events
+                $powershellEvents = $exchangeAdminLogs | Where-Object {
+                    ($_.ActivityDisplayName -like "*PowerShell*") -or
+                    ($_.AdditionalDetails | Where-Object { $_.Key -eq "Client" -and $_.Value -like "*PowerShell*" }) -or
+                    ($_.AdditionalDetails | Where-Object { $_.Key -eq "CommandName" -and $_.Value -ne $null })
+                }
+                
+                if ($powershellEvents -and $powershellEvents.Count -gt 0) {
+                    Write-Log -Message "Found $($powershellEvents.Count) Exchange PowerShell command executions." -SpecificLogFile $GeneralReportFile
+                    
+                    # Group by user for better analysis
+                    $eventsByUser = @{}
+                    foreach ($event in $powershellEvents) {
+                        $user = $event.InitiatedBy.User.UserPrincipalName ?? $event.InitiatedBy.User.DisplayName ?? "Unknown"
+                        if (-not $eventsByUser.ContainsKey($user)) {
+                            $eventsByUser[$user] = New-Object System.Collections.Generic.List[PSObject]
+                        }
+                        $eventsByUser[$user].Add($event)
+                    }
+                    
+                    # Process events for each user
+                    foreach ($user in $eventsByUser.Keys) {
+                        $userEvents = $eventsByUser[$user]
+                        $eventCount = $userEvents.Count
+                        
+                        Write-Log -Message "User: $user - $eventCount Exchange PowerShell commands" -SpecificLogFile $GeneralReportFile
+                        
+                        # Extract and count distinct commands
+                        $commandCounts = @{}
+                        foreach ($event in $userEvents) {
+                            $command = $null
+                            
+                            # Try to get command details
+                            $commandDetail = $event.AdditionalDetails | Where-Object { $_.Key -eq "CommandName" }
+                            if ($commandDetail) {
+                                $command = $commandDetail.Value
+                            } else {
+                                # Try parsing from ActivityDisplayName as fallback
+                                if ($event.ActivityDisplayName -match "Cmdlet: (.+)") {
+                                    $command = $matches[1]
+                                } else {
+                                    $command = "Unknown Command"
+                                }
+                            }
+                            
+                            if (-not $commandCounts.ContainsKey($command)) {
+                                $commandCounts[$command] = 0
+                            }
+                            $commandCounts[$command]++
+                        }
+                        
+                        # List top commands
+                        $topCommands = $commandCounts.GetEnumerator() | Sort-Object -Property Value -Descending | Select-Object -First 10
+                        Write-Log -Message "  Top Commands:" -SpecificLogFile $GeneralReportFile
+                        foreach ($cmd in $topCommands) {
+                            Write-Log -Message "    $($cmd.Key): $($cmd.Value) times" -SpecificLogFile $GeneralReportFile
+                        }
+                        
+                        # Check for potentially suspicious commands
+                        $suspiciousCommands = @(
+                            "Set-Mailbox", "New-TransportRule", "Set-TransportRule", "New-InboxRule", "Set-InboxRule",
+                            "Add-MailboxPermission", "Add-RecipientPermission", "New-ManagementRoleAssignment",
+                            "Set-AdminAuditLogConfig", "Set-AuthenticationPolicy", "Set-ActiveSyncOrganizationSettings",
+                            "Export-Mailbox", "Search-Mailbox", "New-MailboxExportRequest", "Set-CASMailbox",
+                            "New-ApplicationAccessPolicy", "Set-ApplicationAccessPolicy", "New-TestCmdletPreprocessor", 
+                            "Set-ConnectionFilterPolicy", "New-TransportRuleAction", "Set-RemoteDomain"
+                        )
+                        
+                        $detectedSuspiciousCommands = $commandCounts.Keys | Where-Object { $suspiciousCommands -contains $_ }
+                        
+                        if ($detectedSuspiciousCommands -and $detectedSuspiciousCommands.Count -gt 0) {
+                            Write-Log -Message "  ALERT: User $user executed potentially suspicious commands:" -Type "ALERT" -IsAlert -SpecificLogFile $GeneralReportFile
+                            foreach ($cmd in $detectedSuspiciousCommands) {
+                                Write-Log -Message "    - $cmd ($($commandCounts[$cmd]) times)" -Type "ALERT" -IsAlert -SpecificLogFile $GeneralReportFile
+                                
+                                # For highly suspicious commands, show the individual executions
+                                if ($cmd -in @("Set-TransportRule", "New-TransportRule", "Add-MailboxPermission", "Set-AdminAuditLogConfig", "Set-AuthenticationPolicy")) {
+                                    $cmdEvents = $userEvents | Where-Object {
+                                        ($_.AdditionalDetails | Where-Object { $_.Key -eq "CommandName" -and $_.Value -eq $cmd }) -or
+                                        ($_.ActivityDisplayName -match "Cmdlet: $cmd")
+                                    }
+                                    
+                                    foreach ($cmdEvent in $cmdEvents) {
+                                        $timestamp = $cmdEvent.ActivityDateTime
+                                        $parameters = ""
+                                        
+                                        # Try to extract command parameters
+                                        $paramDetail = $cmdEvent.AdditionalDetails | Where-Object { $_.Key -eq "Parameters" }
+                                        if ($paramDetail) {
+                                            $parameters = $paramDetail.Value
+                                        }
+                                        
+                                        Write-Log -Message "      $timestamp: $cmd $parameters" -Type "ALERT" -IsAlert -SpecificLogFile $GeneralReportFile
+                                    }
+                                }
+                            }
+                        }
+                        
+                        # Check for off-hours activity
+                        $offHoursEvents = $userEvents | Where-Object {
+                            $hour = [DateTime]::Parse($_.ActivityDateTime).Hour
+                            $hour -lt 6 -or $hour -gt 18
+                        }
+                        
+                        if ($offHoursEvents -and $offHoursEvents.Count -gt 0) {
+                            Write-Log -Message "  ALERT: User $user executed $($offHoursEvents.Count) Exchange PowerShell commands during off-hours." -Type "ALERT" -IsAlert -SpecificLogFile $GeneralReportFile
+                        }
+                    }
+                } else {
+                    Write-Log -Message "No Exchange PowerShell command executions found in audit logs." -SpecificLogFile $GeneralReportFile
+                }
+            } else {
+                Write-Log -Message "No Exchange admin audit events found in the specified period or insufficient permissions." -SpecificLogFile $GeneralReportFile
+            }
+        } catch {
+            Write-Log -Message "Error querying audit logs for Exchange PowerShell commands: $($_.Exception.Message)" -Type "ERROR" -SpecificLogFile $GeneralReportFile
+        }
+        
+        # --- 3. Check for PowerShell Module installation via audit logs
+        Write-Log -Message "Checking for PowerShell module installations..." -SpecificLogFile $GeneralReportFile
+        
+        try {
+            $filter = "activityDateTime ge $startTime and (activityDisplayName eq 'Install-Module' or activityDisplayName eq 'Update-Module')"
+            $moduleInstallLogs = Get-MgAuditLogDirectoryAudit -Filter $filter -All -ErrorAction SilentlyContinue
+            
+            if ($moduleInstallLogs -and $moduleInstallLogs.Count -gt 0) {
+                Write-Log -Message "Found $($moduleInstallLogs.Count) PowerShell module installation/update events." -SpecificLogFile $GeneralReportFile
+                
+                foreach ($event in $moduleInstallLogs) {
+                    $timestamp = $event.ActivityDateTime
+                    $actor = $event.InitiatedBy.User.UserPrincipalName ?? $event.InitiatedBy.User.DisplayName ?? "Unknown"
+                    $activity = $event.ActivityDisplayName
+                    
+                    # Try to extract module name
+                    $moduleName = "Unknown Module"
+                    if ($event.TargetResources -and $event.TargetResources.Count -gt 0) {
+                        $moduleName = $event.TargetResources[0].DisplayName ?? "Unknown Module"
+                    }
+                    
+                    # Check for Exchange or Azure modules
+                    if ($moduleName -like "*Exchange*" -or $moduleName -like "*MSOnline*" -or $moduleName -like "*Azure*" -or $moduleName -like "*Graph*") {
+                        Write-Log -Message "  ALERT: $timestamp - $actor performed $activity for module: $moduleName" -Type "ALERT" -IsAlert -SpecificLogFile $GeneralReportFile
+                    } else {
+                        Write-Log -Message "  $timestamp - $actor performed $activity for module: $moduleName" -SpecificLogFile $GeneralReportFile
+                    }
+                }
+            } else {
+                Write-Log -Message "No PowerShell module installation/update events found in audit logs." -SpecificLogFile $GeneralReportFile
+            }
+        } catch {
+            Write-Log -Message "Error checking for PowerShell module installations: $($_.Exception.Message)" -Type "ERROR" -SpecificLogFile $GeneralReportFile
+        }
+        
+        # --- 4. Check Exchange Online cmdlet audit settings
+        if ($ExoConnected) {
+            Write-Log -Message "Checking Exchange Online PowerShell auditing configuration..." -SpecificLogFile $GeneralReportFile
+            
+            try {
+                $adminAuditLogConfig = Get-AdminAuditLogConfig -ErrorAction SilentlyContinue
+                
+                if ($adminAuditLogConfig) {
+                    Write-Log -Message "Exchange Admin Audit Log Configuration:" -SpecificLogFile $GeneralReportFile
+                    Write-Log -Message "  Admin Audit Log Enabled: $($adminAuditLogConfig.AdminAuditLogEnabled)" -SpecificLogFile $GeneralReportFile
+                    Write-Log -Message "  Admin Audit Log Age Limit: $($adminAuditLogConfig.AdminAuditLogAgeLimit)" -SpecificLogFile $GeneralReportFile
+                    Write-Log -Message "  Admin Audit Log Cmdlets: $($adminAuditLogConfig.AdminAuditLogCmdlets -join ', ')" -SpecificLogFile $GeneralReportFile
+                    Write-Log -Message "  Admin Audit Log Parameters: $($adminAuditLogConfig.AdminAuditLogParameters -join ', ')" -SpecificLogFile $GeneralReportFile
+                    
+                    if (-not $adminAuditLogConfig.AdminAuditLogEnabled) {
+                        Write-Log -Message "  CRITICAL ALERT: Exchange Admin Audit Logging is DISABLED. No PowerShell command execution will be logged." -Type "ALERT" -IsAlert -SpecificLogFile $GeneralReportFile
+                    }
+                    
+                    if ($adminAuditLogConfig.AdminAuditLogCmdlets -and $adminAuditLogConfig.AdminAuditLogCmdlets.Count -gt 0 -and $adminAuditLogConfig.AdminAuditLogCmdlets[0] -ne "*") {
+                        Write-Log -Message "  ALERT: Exchange Admin Audit Logging is not configured to log all cmdlets. Only specific cmdlets are being logged." -Type "ALERT" -IsAlert -SpecificLogFile $GeneralReportFile
+                    }
+                    
+                    if ($adminAuditLogConfig.AdminAuditLogParameters -and $adminAuditLogConfig.AdminAuditLogParameters.Count -gt 0 -and $adminAuditLogConfig.AdminAuditLogParameters[0] -ne "*") {
+                        Write-Log -Message "  ALERT: Exchange Admin Audit Logging is not configured to log all parameters. Only specific parameters are being logged." -Type "ALERT" -IsAlert -SpecificLogFile $GeneralReportFile
+                    }
+                    
+                    if ($adminAuditLogConfig.AdminAuditLogAgeLimit -lt 90) {
+                        Write-Log -Message "  ALERT: Exchange Admin Audit Log age limit is set to $($adminAuditLogConfig.AdminAuditLogAgeLimit) days, which is less than the recommended 90 days." -Type "ALERT" -IsAlert -SpecificLogFile $GeneralReportFile
+                    }
+                } else {
+                    Write-Log -Message "Could not retrieve Exchange Admin Audit Log configuration." -Type "WARN" -SpecificLogFile $GeneralReportFile
+                }
+            } catch {
+                Write-Log -Message "Error checking Exchange Admin Audit Log configuration: $($_.Exception.Message)" -Type "ERROR" -SpecificLogFile $GeneralReportFile
+            }
+        } else {
+            Write-Log -Message "Not connected to Exchange Online. Cannot check Exchange PowerShell auditing configuration." -Type "WARN" -SpecificLogFile $GeneralReportFile
+        }
+        
+        Write-Log -Message "Completed Exchange Online PowerShell Module Connections check." -SpecificLogFile $GeneralReportFile
+        
+    } catch {
+        Write-Log -Message "Error checking Exchange Online PowerShell Module Connections: $($_.Exception.Message)" -Type "ERROR" -SpecificLogFile $GeneralReportFile
+    }
 
     # --- 46. Dynamic Groups with Malicious Membership Rules ---
     Write-Log -Message "Checking Dynamic Groups with Malicious Membership Rules..." -Type "SUBSECTION" -SpecificLogFile $GeneralReportFile
-    Write-Log -Message "TODO: Implement Dynamic Group membership rule checks." -Type "WARN" -SpecificLogFile $GeneralReportFile
+    try {
+        if (-not $GraphConnected) {
+            Write-Log -Message "Graph API not connected. Cannot check Dynamic Groups." -Type "WARN" -SpecificLogFile $GeneralReportFile
+            return
+        }
+
+        # Ensure we have the required permission
+        $context = Get-MgContext
+        $hasRequiredPermission = $false
+        if ($context.Scopes) {
+            if ($context.Scopes -contains "Group.Read.All" -or 
+                $context.Scopes -contains "Directory.Read.All") {
+                $hasRequiredPermission = $true
+            }
+        }
+
+        if (-not $hasRequiredPermission) {
+            Write-Log -Message "Connected to Graph API but missing required permissions (Group.Read.All or Directory.Read.All). Cannot check Dynamic Groups." -Type "WARN" -SpecificLogFile $GeneralReportFile
+            return
+        }
+        
+        # --- 1. Get all dynamic groups
+        Write-Log -Message "Retrieving dynamic groups from Azure AD / Microsoft Entra ID..." -SpecificLogFile $GeneralReportFile
+        
+        try {
+            # Use membershipRule to filter for dynamic groups
+            $dynamicGroups = Get-MgGroup -Filter "membershipRule ne null and groupTypes/any(c:c eq 'DynamicMembership')" -All -Property "id,displayName,description,membershipRule,createdDateTime,renewedDateTime,securityEnabled,isAssignableToRole,mail,assignedLicenses" -ErrorAction SilentlyContinue
+            
+            if (-not $dynamicGroups -or $dynamicGroups.Count -eq 0) {
+                Write-Log -Message "No dynamic groups found." -SpecificLogFile $GeneralReportFile
+                return
+            }
+            
+            Write-Log -Message "Found $($dynamicGroups.Count) dynamic groups. Analyzing membership rules..." -SpecificLogFile $GeneralReportFile
+            
+            # --- 2. Define suspicious patterns in membership rules
+            $suspiciousPatterns = @{
+                # Basic elements that could be suspicious in certain contexts
+                "AllUsersOrDevices" = @("user.", "device.")
+                
+                # Suspicious properties to match
+                "SuspiciousProperties" = @(
+                    "userType", "onPremisesSecurityIdentifier", "onPremisesSyncEnabled", 
+                    "accountEnabled", "creationType", "dirSyncEnabled", "mail", "otherMails", 
+                    "proxyAddresses", "userPrincipalName", "displayName", "givenName", "surname",
+                    "memberOf", "assignedPlans", "assignedLicenses"
+                )
+                
+                # Suspicious operators when combined with certain properties
+                "SuspiciousOperators" = @("-eq", "-ne", "-match", "-notmatch", "-contains", "-notcontains")
+                
+                # Complex patterns that could indicate attempts to hide malicious rules
+                "ComplexPatterns" = @(
+                    # Negated contains to exclude specific users from a group that would match everyone else
+                    @{
+                        Pattern = ".*-notcontains.*"
+                        Description = "Negated contains operator - could be used to include all users except specific ones"
+                    },
+                    # Complex boolean logic to target a specific user indirectly
+                    @{
+                        Pattern = ".*-and.*-and.*-and.*"
+                        Description = "Complex chained AND conditions - could be used to target specific users indirectly"
+                    },
+                    # OR condition with multiple overlapping criteria (shotgun approach to ensure inclusion)
+                    @{
+                        Pattern = ".*-or.*-or.*-or.*"
+                        Description = "Multiple OR conditions - could cast a wide net to ensure target inclusion"
+                    },
+                    # Matching on security identifiers or GUIDs (very specific targeting)
+                    @{
+                        Pattern = ".*[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}.*"
+                        Description = "Contains GUID/UUID - potentially targeting specific objects by ID"
+                    },
+                    # Matching on email domains that might be suspicious
+                    @{
+                        Pattern = ".*(gmail|yahoo|hotmail|outlook\.com|protonmail|dea\.gov|fbi\.gov|nsa\.gov|gchq\.gov|intelligence|security).*"
+                        Description = "References to external email domains or security agencies"
+                    },
+                    # Rules that check for domain joined status
+                    @{
+                        Pattern = ".*onPremises.*"
+                        Description = "References to on-premises attributes - could be used to distinguish cloud-only vs on-prem"
+                    },
+                    # Rules that try to detect specific apps installed
+                    @{
+                        Pattern = ".*assignedPlans.*"
+                        Description = "Checks user's assigned plans or services - could target users with specific capabilities"
+                    },
+                    # Rules looking for specific roles
+                    @{
+                        Pattern = ".*memberOf.*"
+                        Description = "Checks group membership - could be used to cascade permissions"
+                    }
+                )
+            }
+            
+            # --- 3. Check each dynamic group
+            $suspiciousGroups = New-Object System.Collections.Generic.List[PSObject]
+            $recentlyModifiedGroups = New-Object System.Collections.Generic.List[PSObject]
+            
+            foreach ($group in $dynamicGroups) {
+                Write-Log -Message "Group: $($group.DisplayName) (ID: $($group.Id))" -SpecificLogFile $GeneralReportFile
+                Write-Log -Message "  Created: $($group.CreatedDateTime)" -SpecificLogFile $GeneralReportFile
+                Write-Log -Message "  Membership Rule: $($group.MembershipRule)" -SpecificLogFile $GeneralReportFile
+                Write-Log -Message "  Security Enabled: $($group.SecurityEnabled)" -SpecificLogFile $GeneralReportFile
+                Write-Log -Message "  Role Assignable: $($group.IsAssignableToRole)" -SpecificLogFile $GeneralReportFile
+                
+                # Check if group was created recently
+                $isRecentlyCreated = $false
+                if ((New-TimeSpan -Start $group.CreatedDateTime -End (Get-Date)).TotalDays -lt $script:LookbackDays) {
+                    $isRecentlyCreated = $true
+                    Write-Log -Message "  ALERT: Group was created recently ($($group.CreatedDateTime))." -Type "ALERT" -IsAlert -SpecificLogFile $GeneralReportFile
+                    $recentlyModifiedGroups.Add($group)
+                }
+                
+                # Check if the rule was modified recently (if we can get that information)
+                $isRecentlyModified = $false
+                if ($group.RenewedDateTime -and (New-TimeSpan -Start $group.RenewedDateTime -End (Get-Date)).TotalDays -lt $script:LookbackDays) {
+                    $isRecentlyModified = $true
+                    Write-Log -Message "  ALERT: Group membership rule was updated recently ($($group.RenewedDateTime))." -Type "ALERT" -IsAlert -SpecificLogFile $GeneralReportFile
+                    if (-not $recentlyModifiedGroups.Contains($group)) {
+                        $recentlyModifiedGroups.Add($group)
+                    }
+                }
+                
+                # Analyze the membership rule
+                $rule = $group.MembershipRule
+                $isSuspicious = $false
+                $suspiciousReasons = New-Object System.Collections.Generic.List[string]
+                
+                # Check for overly broad rules with minimal filtering
+                if ($rule -match "^\s*user\.") {
+                    $simpleUserRules = @(
+                        "user.objectId -ne null",
+                        "user.userType -eq 'Member'",
+                        "user.accountEnabled -eq true"
+                    )
+                    
+                    foreach ($simpleRule in $simpleUserRules) {
+                        if ($rule -eq $simpleRule) {
+                            $isSuspicious = $true
+                            $suspiciousReasons.Add("Extremely broad rule that includes all users: '$rule'")
+                        }
+                    }
+                }
+                
+                # Check each suspicious property
+                foreach ($property in $suspiciousPatterns.SuspiciousProperties) {
+                    if ($rule -match $property) {
+                        # Further check if it's combined with a suspicious operator
+                        foreach ($operator in $suspiciousPatterns.SuspiciousOperators) {
+                            if ($rule -match "$property\s*$operator") {
+                                $isSuspicious = $true
+                                $suspiciousReasons.Add("Uses suspicious property '$property' with operator '$operator'")
+                            }
+                        }
+                    }
+                }
+                
+                # Check for complex patterns
+                foreach ($pattern in $suspiciousPatterns.ComplexPatterns) {
+                    if ($rule -match $pattern.Pattern) {
+                        $isSuspicious = $true
+                        $suspiciousReasons.Add("$($pattern.Description): '$rule'")
+                    }
+                }
+                
+                # High-risk combinations
+                if ($group.SecurityEnabled -eq $true -and $group.IsAssignableToRole -eq $true -and $isSuspicious) {
+                    $suspiciousReasons.Add("CRITICAL: This is a security-enabled, role-assignable group with suspicious membership rule")
+                    Write-Log -Message "  CRITICAL ALERT: This is a security-enabled, role-assignable group with suspicious membership rule." -Type "ALERT" -IsAlert -SpecificLogFile $GeneralReportFile
+                }
+                
+                # If any suspicious criteria found, add to the suspicious groups list
+                if ($isSuspicious) {
+                    $suspiciousGroups.Add([PSCustomObject]@{
+                        Group = $group
+                        Reasons = $suspiciousReasons
+                        IsRecentlyCreated = $isRecentlyCreated
+                        IsRecentlyModified = $isRecentlyModified
+                    })
+                    
+                    foreach ($reason in $suspiciousReasons) {
+                        Write-Log -Message "  ALERT: $reason" -Type "ALERT" -IsAlert -SpecificLogFile $GeneralReportFile
+                    }
+                }
+                
+                # --- 4. For security groups, check if the group has any role assignments
+                if ($group.SecurityEnabled -eq $true) {
+                    try {
+                        # Check if the group is assigned to any directory roles
+                        if ($group.IsAssignableToRole -eq $true) {
+                            # Get role assignments for this group
+                            $groupRoles = Get-MgDirectoryRoleMember -All -ErrorAction SilentlyContinue | Where-Object {
+                                $_.Id -eq $group.Id
+                            }
+                            
+                            if ($groupRoles -and $groupRoles.Count -gt 0) {
+                                $roleNames = New-Object System.Collections.Generic.List[string]
+                                
+                                foreach ($role in $groupRoles) {
+                                    $roleDef = Get-MgDirectoryRole -DirectoryRoleId $role.Id -ErrorAction SilentlyContinue
+                                    if ($roleDef) {
+                                        $roleNames.Add($roleDef.DisplayName)
+                                    }
+                                }
+                                
+                                if ($roleNames.Count -gt 0) {
+                                    Write-Log -Message "  ALERT: Dynamic group is assigned to these directory roles: $($roleNames -join ', ')" -Type "ALERT" -IsAlert -SpecificLogFile $GeneralReportFile
+                                    
+                                    # If the group wasn't already marked as suspicious based on rule, add it now
+                                    if (-not $isSuspicious) {
+                                        $suspiciousGroups.Add([PSCustomObject]@{
+                                            Group = $group
+                                            Reasons = @("Group has privileged directory role assignments: $($roleNames -join ', ')")
+                                            IsRecentlyCreated = $isRecentlyCreated
+                                            IsRecentlyModified = $isRecentlyModified
+                                        })
+                                    }
+                                }
+                            }
+                        }
+                        
+                        # Check if group has app role assignments
+                        $appRoleAssignments = Get-MgGroupAppRoleAssignment -GroupId $group.Id -All -ErrorAction SilentlyContinue
+                        
+                        if ($appRoleAssignments -and $appRoleAssignments.Count -gt 0) {
+                            Write-Log -Message "  Group has $($appRoleAssignments.Count) application role assignments:" -SpecificLogFile $GeneralReportFile
+                            
+                            foreach ($assignment in $appRoleAssignments) {
+                                # Try to get application details
+                                try {
+                                    $resourceApp = Get-MgServicePrincipal -ServicePrincipalId $assignment.ResourceId -ErrorAction SilentlyContinue
+                                    $appName = $resourceApp.DisplayName ?? "Unknown App"
+                                    
+                                    # Try to get role details
+                                    $roleName = "Unknown Role"
+                                    if ($resourceApp -and $resourceApp.AppRoles) {
+                                        $role = $resourceApp.AppRoles | Where-Object { $_.Id -eq $assignment.AppRoleId } | Select-Object -First 1
+                                        if ($role) {
+                                            $roleName = $role.DisplayName ?? $role.Value ?? "Unknown Role"
+                                        }
+                                    }
+                                    
+                                    Write-Log -Message "    Application: $appName, Role: $roleName" -SpecificLogFile $GeneralReportFile
+                                    
+                                    # Check for sensitive applications
+                                    $sensitiveApps = @("Microsoft Graph", "Office 365 Exchange Online", "Office 365 SharePoint Online", "Azure Key Vault", "Azure Storage")
+                                    if ($sensitiveApps -contains $appName) {
+                                        Write-Log -Message "    ALERT: Dynamic group has role assignment to sensitive application: $appName (Role: $roleName)" -Type "ALERT" -IsAlert -SpecificLogFile $GeneralReportFile
+                                        
+                                        # If the group wasn't already marked as suspicious based on rule, add it now
+                                        if (-not $isSuspicious) {
+                                            $suspiciousGroups.Add([PSCustomObject]@{
+                                                Group = $group
+                                                Reasons = @("Group has role assignment to sensitive application: $appName (Role: $roleName)")
+                                                IsRecentlyCreated = $isRecentlyCreated
+                                                IsRecentlyModified = $isRecentlyModified
+                                            })
+                                        }
+                                    }
+                                } catch {
+                                    Write-Log -Message "    Error getting details for app role assignment: $($_.Exception.Message)" -Type "ERROR" -SpecificLogFile $GeneralReportFile
+                                }
+                            }
+                        }
+                        
+                        # Check if group has any team associated with it (for Teams access)
+                        try {
+                            $team = Get-MgTeam -Filter "groupId eq '$($group.Id)'" -ErrorAction SilentlyContinue
+                            if ($team) {
+                                Write-Log -Message "  Group is associated with Microsoft Teams team: $($team.DisplayName)" -SpecificLogFile $GeneralReportFile
+                            }
+                        } catch {
+                            # Ignore errors here, it's just an informational check
+                        }
+                        
+                    } catch {
+                        Write-Log -Message "  Error checking role assignments for group $($group.DisplayName): $($_.Exception.Message)" -Type "ERROR" -SpecificLogFile $GeneralReportFile
+                    }
+                }
+                
+                # --- 5. For security and mail-enabled groups, check actual membership
+                if ($group.SecurityEnabled -eq $true -or $group.Mail) {
+                    try {
+                        # Get group members count (using transitive members to catch nested groups)
+                        $memberCount = 0
+                        try {
+                            $members = Get-MgGroupTransitiveMember -GroupId $group.Id -All -ErrorAction SilentlyContinue
+                            $memberCount = ($members | Measure-Object).Count
+                        } catch {
+                            # If transitive members fails, try direct members
+                            try {
+                                $members = Get-MgGroupMember -GroupId $group.Id -All -ErrorAction SilentlyContinue
+                                $memberCount = ($members | Measure-Object).Count
+                            } catch {
+                                Write-Log -Message "  Could not retrieve member count for group." -Type "WARN" -SpecificLogFile $GeneralReportFile
+                            }
+                        }
+                        
+                        if ($memberCount -gt 0) {
+                            Write-Log -Message "  Group has $memberCount members." -SpecificLogFile $GeneralReportFile
+                            
+                            # Check for extreme membership counts (too many/few)
+                            if ($memberCount > 1000) {
+                                Write-Log -Message "  WARN: Dynamic group has a very large number of members ($memberCount). Verify if this is expected." -Type "WARN" -SpecificLogFile $GeneralReportFile
+                            } elseif ($memberCount < 3 -and $group.IsAssignableToRole -eq $true) {
+                                Write-Log -Message "  ALERT: Role-assignable dynamic group has very few members ($memberCount). This could be a targeted privilege escalation." -Type "ALERT" -IsAlert -SpecificLogFile $GeneralReportFile
+                            }
+                            
+                            # If role-assignable, check if any administrative users have been added
+                            if ($group.IsAssignableToRole -eq $true) {
+                                # Check if we can see the actual members
+                                if ($members) {
+                                    try {
+                                        # Get admin role members for comparison
+                                        $adminRoleIds = @(
+                                            "62e90394-69f5-4237-9190-012177145e10", # Global Administrator
+                                            "9b895d92-2cd3-44c7-9d02-a6ac2d5ea5c3", # Application Administrator
+                                            "158c047a-c907-4556-b7ef-446551a6b5f7", # Security Administrator
+                                            "45d8d3c5-c802-45c6-b32a-1d70b5e1e86e", # Exchange Administrator
+                                            "f2ef992c-3afb-46b9-b7cf-a126ee74c451", # Global Reader
+                                            "f28a1f50-f6e7-4571-818b-6a12f2af6b6c", # SharePoint Administrator
+                                            "29232cdf-9323-42fd-ade2-1d097af3e4de", # Exchange Recipient Administrator
+                                            "8ac3fc64-6eca-42ea-9e69-59f4c7b60eb2", # User Administrator
+                                            "fdd7a751-b60b-444a-984c-02652fe8fa1c"  # Teams Administrator
+                                        )
+                                        
+                                        $adminMembers = New-Object System.Collections.Generic.List[PSObject]
+                                        
+                                        foreach ($adminRoleId in $adminRoleIds) {
+                                            $roleMembers = Get-MgDirectoryRoleMember -DirectoryRoleId $adminRoleId -All -ErrorAction SilentlyContinue
+                                            if ($roleMembers) {
+                                                foreach ($roleMember in $roleMembers) {
+                                                    if ($members.Id -contains $roleMember.Id) {
+                                                        $adminMembers.Add($roleMember)
+                                                    }
+                                                }
+                                            }
+                                        }
+                                        
+                                        if ($adminMembers.Count -gt 0) {
+                                            Write-Log -Message "  CRITICAL ALERT: Dynamic group contains $($adminMembers.Count) members with administrative roles." -Type "ALERT" -IsAlert -SpecificLogFile $GeneralReportFile
+                                            
+                                            foreach ($admin in $adminMembers) {
+                                                # Try to get user details
+                                                try {
+                                                    $user = Get-MgUser -UserId $admin.Id -Property "DisplayName,UserPrincipalName" -ErrorAction SilentlyContinue
+                                                    if ($user) {
+                                                        Write-Log -Message "    - $($user.DisplayName) ($($user.UserPrincipalName))" -Type "ALERT" -IsAlert -SpecificLogFile $GeneralReportFile
+                                                    } else {
+                                                        Write-Log -Message "    - Unknown User (ID: $($admin.Id))" -Type "ALERT" -IsAlert -SpecificLogFile $GeneralReportFile
+                                                    }
+                                                } catch {
+                                                    Write-Log -Message "    - Unknown User (ID: $($admin.Id))" -Type "ALERT" -IsAlert -SpecificLogFile $GeneralReportFile
+                                                }
+                                            }
+                                            
+                                            if (-not $suspiciousGroups.Group.Id.Contains($group.Id)) {
+                                                $suspiciousGroups.Add([PSCustomObject]@{
+                                                    Group = $group
+                                                    Reasons = @("Group contains $($adminMembers.Count) members with administrative roles")
+                                                    IsRecentlyCreated = $isRecentlyCreated
+                                                    IsRecentlyModified = $isRecentlyModified
+                                                })
+                                            }
+                                        }
+                                    } catch {
+                                        Write-Log -Message "  Error checking admin role members: $($_.Exception.Message)" -Type "ERROR" -SpecificLogFile $GeneralReportFile
+                                    }
+                                }
+                            }
+                        }
+                    } catch {
+                        Write-Log -Message "  Error checking group membership: $($_.Exception.Message)" -Type "ERROR" -SpecificLogFile $GeneralReportFile
+                    }
+                }
+            }
+            
+            # --- 6. Summarize findings
+            Write-Log -Message "Dynamic Groups Analysis Summary:" -SpecificLogFile $GeneralReportFile
+            Write-Log -Message "  Total Dynamic Groups: $($dynamicGroups.Count)" -SpecificLogFile $GeneralReportFile
+            Write-Log -Message "  Recently Created/Modified Groups: $($recentlyModifiedGroups.Count)" -SpecificLogFile $GeneralReportFile
+            Write-Log -Message "  Suspicious Groups: $($suspiciousGroups.Count)" -SpecificLogFile $GeneralReportFile
+            
+            if ($suspiciousGroups.Count -gt 0) {
+                Write-Log -Message "Summary of Suspicious Dynamic Groups:" -Type "ALERT" -IsAlert -SpecificLogFile $GeneralReportFile
+                foreach ($suspiciousGroup in $suspiciousGroups) {
+                    $group = $suspiciousGroup.Group
+                    $reasons = $suspiciousGroup.Reasons
+                    
+                    $timeFlags = New-Object System.Collections.Generic.List[string]
+                    if ($suspiciousGroup.IsRecentlyCreated) { $timeFlags.Add("Recently Created") }
+                    if ($suspiciousGroup.IsRecentlyModified) { $timeFlags.Add("Recently Modified") }
+                    $timeInfo = if ($timeFlags.Count -gt 0) { " [" + ($timeFlags -join ", ") + "]" } else { "" }
+                    
+                    Write-Log -Message "  - '$($group.DisplayName)'$timeInfo" -Type "ALERT" -IsAlert -SpecificLogFile $GeneralReportFile
+                    Write-Log -Message "    Rule: $($group.MembershipRule)" -Type "ALERT" -IsAlert -SpecificLogFile $GeneralReportFile
+                    Write-Log -Message "    Concerns: $($reasons -join "; ")" -Type "ALERT" -IsAlert -SpecificLogFile $GeneralReportFile
+                }
+                
+                Write-Log -Message "RECOMMENDATION: Review all suspicious dynamic groups carefully, especially those that are security-enabled, role-assignable, or include administrative users." -Type "ALERT" -IsAlert -SpecificLogFile $GeneralReportFile
+            }
+            
+        } catch {
+            Write-Log -Message "Error retrieving or analyzing dynamic groups: $($_.Exception.Message)" -Type "ERROR" -SpecificLogFile $GeneralReportFile
+        }
+        
+        Write-Log -Message "Completed Dynamic Groups with Malicious Membership Rules check." -SpecificLogFile $GeneralReportFile
+        
+    } catch {
+        Write-Log -Message "Error checking Dynamic Groups with Malicious Membership Rules: $($_.Exception.Message)" -Type "ERROR" -SpecificLogFile $GeneralReportFile
+    }
 
     # --- 47. Azure Policy Assignments for M365 services ---
-    Write-Log -Message "Checking Azure Policy Assignments for M365 services (Requires Az module)..." -Type "SUBSECTION" -SpecificLogFile $GeneralReportFile
-    Write-Log -Message "TODO: Implement Azure Policy Assignment checks. Requires Az PowerShell module." -Type "WARN" -SpecificLogFile $GeneralReportFile
+    Write-Log -Message "Checking Azure Policy Assignments for M365 services..." -Type "SUBSECTION" -SpecificLogFile $GeneralReportFile
+    try {
+        # Check if Az.PolicyInsights module is available
+        if (-not (Get-Module -ListAvailable -Name Az.PolicyInsights)) {
+            Write-Log -Message "Az.PolicyInsights module not found. Install using: Install-Module -Name Az.PolicyInsights -Repository PSGallery -Force" -Type "WARN" -SpecificLogFile $GeneralReportFile
+            Write-Log -Message "Additionally, Az.Resources may be needed for complete policy checks." -Type "WARN" -SpecificLogFile $GeneralReportFile
+            Write-Log -Message "Skipping Azure Policy Assignments checks due to missing Az.PolicyInsights module." -Type "WARN" -SpecificLogFile $GeneralReportFile
+            return
+        }
+
+        # Check if already connected to Azure
+        $azContext = Get-AzContext -ErrorAction SilentlyContinue
+        if (-not $azContext) {
+            Write-Log -Message "Not connected to Azure. Please use Connect-AzAccount before running this script for Azure Policy checks." -Type "WARN" -SpecificLogFile $GeneralReportFile
+            Write-Log -Message "Skipping Azure Policy Assignments checks due to missing Azure connection." -Type "WARN" -SpecificLogFile $GeneralReportFile
+            return
+        }
+
+        Write-Log -Message "Connected to Azure subscription: $($azContext.Subscription.Name) ($($azContext.Subscription.Id))" -SpecificLogFile $GeneralReportFile
+        
+        # --- 1. Identify M365-related policy assignments
+        Write-Log -Message "Identifying Microsoft 365-related policy assignments..." -SpecificLogFile $GeneralReportFile
+        
+        # Define patterns that may indicate M365-related policies
+        $m365PolicyPatterns = @(
+            "Office 365", "Microsoft 365", "Intune", "Exchange", "SharePoint", "Teams", 
+            "OneDrive", "Defender", "Endpoint", "Information Protection", "Compliance",
+            "ATP", "Windows Update", "Windows 10", "Windows 11", "App Protection",
+            "Conditional Access", "MFA", "Multi-Factor Authentication", "Identity Protection",
+            "Password", "Credential", "Data Loss Prevention", "DLP", "Retention", "eDiscovery",
+            "Sensitivity", "Classification", "Mobile Device", "MDM", "MAM", "AAD", "Privileged Identity",
+            "Azure AD", "Entra", "Authentication", "PIM", "MIP", "BYOD", "Azure Active Directory"
+        )
+        
+        try {
+            # Get all policy assignments in the subscription
+            $allPolicyAssignments = Get-AzPolicyAssignment -ErrorAction SilentlyContinue
+            
+            if (-not $allPolicyAssignments -or $allPolicyAssignments.Count -eq 0) {
+                Write-Log -Message "No Azure Policy assignments found in the current subscription." -Type "INFO" -SpecificLogFile $GeneralReportFile
+                return
+            }
+            
+            # Filter for potentially M365-related policies based on naming patterns
+            $m365RelatedAssignments = $allPolicyAssignments | Where-Object {
+                $assignment = $_
+                $m365PolicyPatterns | Where-Object {
+                    $pattern = $_
+                    $assignment.Name -like "*$pattern*" -or
+                    $assignment.DisplayName -like "*$pattern*" -or
+                    $assignment.Description -like "*$pattern*" -or
+                    $assignment.Metadata -like "*$pattern*" -or
+                    $assignment.PolicyDefinitionId -like "*$pattern*"
+                }
+            } | Sort-Object -Property DisplayName
+            
+            if (-not $m365RelatedAssignments -or $m365RelatedAssignments.Count -eq 0) {
+                Write-Log -Message "No Microsoft 365-related Azure Policy assignments found in the current subscription based on naming patterns." -Type "INFO" -SpecificLogFile $GeneralReportFile
+                
+                # Get Microsoft Intune-specific built-in policy assignments as a fallback
+                $intunePolicyAssignments = $allPolicyAssignments | Where-Object {
+                    $_.PolicyDefinitionId -like "*/providers/Microsoft.Authorization/policyDefinitions/*" -and
+                    ($_.PolicyDefinitionId -like "*intune*" -or $_.PolicyDefinitionId -like "*device*" -or $_.PolicyDefinitionId -like "*endpoint*")
+                }
+                
+                if ($intunePolicyAssignments -and $intunePolicyAssignments.Count -gt 0) {
+                    Write-Log -Message "Found $($intunePolicyAssignments.Count) Microsoft Intune/Endpoint Manager-related policy assignments." -SpecificLogFile $GeneralReportFile
+                    $m365RelatedAssignments = $intunePolicyAssignments
+                } else {
+                    Write-Log -Message "No Microsoft Intune-related Azure Policy assignments found either." -Type "INFO" -SpecificLogFile $GeneralReportFile
+                    
+                    # Since we couldn't find any obvious M365 policies, check for custom policies that might be related
+                    Write-Log -Message "Checking if any custom policies might be related to Microsoft 365 services..." -SpecificLogFile $GeneralReportFile
+                    
+                    $customPolicyAssignments = $allPolicyAssignments | Where-Object {
+                        # Custom policies typically have subscription or management group paths
+                        $_.PolicyDefinitionId -like "*/subscriptions/*" -or
+                        $_.PolicyDefinitionId -like "*/managementGroups/*" 
+                    }
+                    
+                    if ($customPolicyAssignments -and $customPolicyAssignments.Count -gt 0) {
+                        Write-Log -Message "Found $($customPolicyAssignments.Count) custom policy assignments. Analyzing for potential M365 relevance..." -SpecificLogFile $GeneralReportFile
+                        
+                        # Get policy definitions for custom policies to analyze content
+                        foreach ($assignment in $customPolicyAssignments) {
+                            $policyDefinitionId = $assignment.PolicyDefinitionId
+                            try {
+                                $policyDefinition = Get-AzPolicyDefinition -Id $policyDefinitionId -ErrorAction SilentlyContinue
+                                
+                                if ($policyDefinition) {
+                                    $policyContent = $policyDefinition.Properties.PolicyRule | ConvertTo-Json -Depth 10
+                                    
+                                    # Check if any M365 patterns in policy content
+                                    $isM365Related = $false
+                                    foreach ($pattern in $m365PolicyPatterns) {
+                                        if ($policyContent -like "*$pattern*") {
+                                            $isM365Related = $true
+                                            break
+                                        }
+                                    }
+                                    
+                                    if ($isM365Related) {
+                                        if (-not $m365RelatedAssignments) {
+                                            $m365RelatedAssignments = @($assignment)
+                                        } else {
+                                            $m365RelatedAssignments += $assignment
+                                        }
+                                        
+                                        Write-Log -Message "  Custom policy '$($assignment.DisplayName)' appears to be related to Microsoft 365 services." -SpecificLogFile $GeneralReportFile
+                                    }
+                                }
+                            } catch {
+                                Write-Log -Message "  Error analyzing custom policy definition $policyDefinitionId: $($_.Exception.Message)" -Type "ERROR" -SpecificLogFile $GeneralReportFile
+                            }
+                        }
+                        
+                        if ($m365RelatedAssignments -and $m365RelatedAssignments.Count -gt 0) {
+                            Write-Log -Message "Found $($m365RelatedAssignments.Count) custom policies potentially related to Microsoft 365 services after content analysis." -SpecificLogFile $GeneralReportFile
+                        } else {
+                            Write-Log -Message "No custom policies appear to be related to Microsoft 365 services after content analysis." -Type "INFO" -SpecificLogFile $GeneralReportFile
+                        }
+                    } else {
+                        Write-Log -Message "No custom policy assignments found in the current subscription." -Type "INFO" -SpecificLogFile $GeneralReportFile
+                    }
+                }
+            } else {
+                Write-Log -Message "Found $($m365RelatedAssignments.Count) Microsoft 365-related Azure Policy assignments." -SpecificLogFile $GeneralReportFile
+            }
+            
+            # --- 2. Analyze M365 policy assignments
+            if ($m365RelatedAssignments -and $m365RelatedAssignments.Count -gt 0) {
+                # Categorize policies by types/services
+                $policyCategories = @{
+                    "Security" = New-Object System.Collections.Generic.List[PSObject]
+                    "Compliance" = New-Object System.Collections.Generic.List[PSObject]
+                    "Device Management" = New-Object System.Collections.Generic.List[PSObject]
+                    "Configuration" = New-Object System.Collections.Generic.List[PSObject]
+                    "Other" = New-Object System.Collections.Generic.List[PSObject]
+                }
+                
+                foreach ($assignment in $m365RelatedAssignments) {
+                    $categorized = $false
+                    
+                    # Categorize based on name/description patterns
+                    if ($assignment.DisplayName -match "(Security|Secure|Threat|Protection|Protect|Attack|Defender|Malware|Firewall|Encryption|Encrypt|Password|Credential)" -or
+                        $assignment.Description -match "(Security|Secure|Threat|Protection|Protect|Attack|Defender|Malware|Firewall|Encryption|Encrypt|Password|Credential)") {
+                        $policyCategories["Security"].Add($assignment)
+                        $categorized = $true
+                    }
+                    elseif ($assignment.DisplayName -match "(Compliance|Compliant|DLP|Data Loss|Retention|Legal|Privacy|GDPR|eDiscovery|Classification|Audit|Log)" -or
+                            $assignment.Description -match "(Compliance|Compliant|DLP|Data Loss|Retention|Legal|Privacy|GDPR|eDiscovery|Classification|Audit|Log)") {
+                        $policyCategories["Compliance"].Add($assignment)
+                        $categorized = $true
+                    }
+                    elseif ($assignment.DisplayName -match "(Device|Intune|Endpoint|Mobile|MDM|MAM|Windows|Update|Patch|BYOD|Autopilot)" -or
+                            $assignment.Description -match "(Device|Intune|Endpoint|Mobile|MDM|MAM|Windows|Update|Patch|BYOD|Autopilot)") {
+                        $policyCategories["Device Management"].Add($assignment)
+                        $categorized = $true
+                    }
+                    elseif ($assignment.DisplayName -match "(Configuration|Setting|Setup|Provision|Standard|Baseline)" -or
+                            $assignment.Description -match "(Configuration|Setting|Setup|Provision|Standard|Baseline)") {
+                        $policyCategories["Configuration"].Add($assignment)
+                        $categorized = $true
+                    }
+                    
+                    if (-not $categorized) {
+                        $policyCategories["Other"].Add($assignment)
+                    }
+                }
+                
+                # Analyze and report on each category
+                foreach ($category in $policyCategories.Keys) {
+                    $policies = $policyCategories[$category]
+                    if ($policies.Count -gt 0) {
+                        Write-Log -Message "$category Policies ($($policies.Count)):" -SpecificLogFile $GeneralReportFile
+                        
+                        foreach ($policy in $policies) {
+                            Write-Log -Message "  Name: $($policy.DisplayName)" -SpecificLogFile $GeneralReportFile
+                            Write-Log -Message "  Description: $($policy.Description)" -SpecificLogFile $GeneralReportFile
+                            Write-Log -Message "  Policy Definition ID: $($policy.PolicyDefinitionId)" -SpecificLogFile $GeneralReportFile
+                            Write-Log -Message "  Scope: $($policy.Scope)" -SpecificLogFile $GeneralReportFile
+                            
+                            # Check if recently created/modified
+                            if ($policy.Metadata -and $policy.Metadata.createdOn -and 
+                                (New-TimeSpan -Start ([DateTime]::Parse($policy.Metadata.createdOn)) -End (Get-Date)).TotalDays -lt $script:LookbackDays) {
+                                Write-Log -Message "  ALERT: Policy was created recently ($($policy.Metadata.createdOn))." -Type "ALERT" -IsAlert -SpecificLogFile $GeneralReportFile
+                            }
+                            
+                            if ($policy.Metadata -and $policy.Metadata.updatedOn -and 
+                                (New-TimeSpan -Start ([DateTime]::Parse($policy.Metadata.updatedOn)) -End (Get-Date)).TotalDays -lt $script:LookbackDays) {
+                                Write-Log -Message "  ALERT: Policy was updated recently ($($policy.Metadata.updatedOn))." -Type "ALERT" -IsAlert -SpecificLogFile $GeneralReportFile
+                            }
+                            
+                            # Get policy states and compliance
+                            try {
+                                $policyStates = Get-AzPolicyState -PolicyAssignmentName $policy.Name -ErrorAction SilentlyContinue
+                                
+                                if ($policyStates) {
+                                    $nonCompliantStates = $policyStates | Where-Object { $_.ComplianceState -eq "NonCompliant" }
+                                    $compliantStates = $policyStates | Where-Object { $_.ComplianceState -eq "Compliant" }
+                                    $totalStates = $policyStates.Count
+                                    
+                                    if ($totalStates -gt 0) {
+                                        $compliancePercentage = [math]::Round(($compliantStates.Count / $totalStates) * 100, 2)
+                                        Write-Log -Message "  Compliance: $compliancePercentage% ($($compliantStates.Count) of $totalStates resources compliant)" -SpecificLogFile $GeneralReportFile
+                                        
+                                        if ($compliancePercentage -lt 50) {
+                                            Write-Log -Message "  ALERT: Low compliance rate ($compliancePercentage%) for policy '$($policy.DisplayName)'." -Type "ALERT" -IsAlert -SpecificLogFile $GeneralReportFile
+                                        }
+                                        
+                                        # If there are non-compliant resources, list a sample
+                                        if ($nonCompliantStates.Count -gt 0) {
+                                            $sampleSize = [Math]::Min(5, $nonCompliantStates.Count)
+                                            $sampleNonCompliant = $nonCompliantStates | Select-Object -First $sampleSize
+                                            
+                                            Write-Log -Message "  Sample of Non-Compliant Resources:" -SpecificLogFile $GeneralReportFile
+                                            foreach ($state in $sampleNonCompliant) {
+                                                Write-Log -Message "    - $($state.ResourceId)" -SpecificLogFile $GeneralReportFile
+                                            }
+                                        }
+                                    } else {
+                                        Write-Log -Message "  No compliance states found for this policy." -SpecificLogFile $GeneralReportFile
+                                    }
+                                } else {
+                                    Write-Log -Message "  Could not retrieve policy states." -SpecificLogFile $GeneralReportFile
+                                }
+                            } catch {
+                                Write-Log -Message "  Error retrieving policy states: $($_.Exception.Message)" -Type "ERROR" -SpecificLogFile $GeneralReportFile
+                            }
+                            
+                            # Check for exemptions on this policy
+                            try {
+                                $exemptions = Get-AzPolicyExemption -PolicyAssignmentName $policy.Name -ErrorAction SilentlyContinue
+                                
+                                if ($exemptions -and $exemptions.Count -gt 0) {
+                                    Write-Log -Message "  ALERT: Policy has $($exemptions.Count) exemptions:" -Type "ALERT" -IsAlert -SpecificLogFile $GeneralReportFile
+                                    
+                                    foreach ($exemption in $exemptions) {
+                                        Write-Log -Message "    - Exemption: $($exemption.Name), Scope: $($exemption.Scope)" -Type "ALERT" -IsAlert -SpecificLogFile $GeneralReportFile
+                                        Write-Log -Message "      Category: $($exemption.ExemptionCategory), Expires: $($exemption.ExpiresOn)" -Type "ALERT" -IsAlert -SpecificLogFile $GeneralReportFile
+                                        
+                                        # Check if recently created
+                                        if ($exemption.CreatedOn -and (New-TimeSpan -Start $exemption.CreatedOn -End (Get-Date)).TotalDays -lt $script:LookbackDays) {
+                                            Write-Log -Message "      ALERT: Exemption was created recently ($($exemption.CreatedOn))." -Type "ALERT" -IsAlert -SpecificLogFile $GeneralReportFile
+                                        }
+                                        
+                                        # Warn about permanent exemptions
+                                        if (-not $exemption.ExpiresOn) {
+                                            Write-Log -Message "      ALERT: Exemption has no expiration date (permanent exemption)." -Type "ALERT" -IsAlert -SpecificLogFile $GeneralReportFile
+                                        }
+                                    }
+                                }
+                            } catch {
+                                Write-Log -Message "  Error retrieving policy exemptions: $($_.Exception.Message)" -Type "ERROR" -SpecificLogFile $GeneralReportFile
+                            }
+                            
+                            Write-Log -Message "" -SpecificLogFile $GeneralReportFile
+                        }
+                    }
+                }
+                
+                # --- 3. Check for specific M365 security policy gaps
+                Write-Log -Message "Checking for critical Microsoft 365 security policy gaps..." -SpecificLogFile $GeneralReportFile
+                
+                # Define critical security policies that should exist
+                $criticalSecurityPolicies = @(
+                    @{
+                        Name = "MFA Requirement"
+                        Patterns = @("MFA", "Multi-Factor Authentication", "Conditional Access", "Two-Factor", "2FA")
+                        Found = $false
+                    },
+                    @{
+                        Name = "Device Compliance"
+                        Patterns = @("Device Compliance", "Compliant Device", "Intune Compliance", "Endpoint Compliance")
+                        Found = $false
+                    },
+                    @{
+                        Name = "Data Protection/DLP"
+                        Patterns = @("DLP", "Data Loss Prevention", "Information Protection", "Data Protection", "Sensitivity")
+                        Found = $false
+                    },
+                    @{
+                        Name = "Endpoint Protection"
+                        Patterns = @("Endpoint Protection", "Defender", "Antivirus", "Anti-malware", "EDR", "Windows Defender")
+                        Found = $false
+                    },
+                    @{
+                        Name = "Update Management"
+                        Patterns = @("Update Management", "Windows Update", "Security Update", "Patch Management")
+                        Found = $false
+                    },
+                    @{
+                        Name = "Identity Protection"
+                        Patterns = @("Identity Protection", "Privileged Identity", "PIM", "User Risk", "Sign-in Risk")
+                        Found = $false
+                    }
+                )
+                
+                # Check each policy against our critical list
+                foreach ($assignment in $m365RelatedAssignments) {
+                    foreach ($criticalPolicy in $criticalSecurityPolicies) {
+                        if (-not $criticalPolicy.Found) {
+                            foreach ($pattern in $criticalPolicy.Patterns) {
+                                if ($assignment.DisplayName -like "*$pattern*" -or 
+                                    $assignment.Description -like "*$pattern*" -or
+                                    $assignment.PolicyDefinitionId -like "*$pattern*") {
+                                    $criticalPolicy.Found = $true
+                                    break
+                                }
+                            }
+                        }
+                    }
+                }
+                
+                # Report missing critical policies
+                $missingPolicies = $criticalSecurityPolicies | Where-Object { -not $_.Found }
+                if ($missingPolicies -and $missingPolicies.Count -gt 0) {
+                    Write-Log -Message "ALERT: Missing critical security policies for Microsoft 365:" -Type "ALERT" -IsAlert -SpecificLogFile $GeneralReportFile
+                    foreach ($missing in $missingPolicies) {
+                        Write-Log -Message "  - $($missing.Name)" -Type "ALERT" -IsAlert -SpecificLogFile $GeneralReportFile
+                    }
+                    Write-Log -Message "Consider implementing Azure Policies for these security areas to improve Microsoft 365 security posture." -Type "ALERT" -IsAlert -SpecificLogFile $GeneralReportFile
+                } else {
+                    Write-Log -Message "All critical Microsoft 365 security policy types appear to be covered." -SpecificLogFile $GeneralReportFile
+                }
+                
+                # --- 4. Check for recent policy state changes (compliance changes)
+                Write-Log -Message "Checking for recent Azure Policy state changes affecting Microsoft 365..." -SpecificLogFile $GeneralReportFile
+                
+                try {
+                    $startTime = (Get-Date).AddDays(-$script:LookbackDays)
+                    $endTime = Get-Date
+                    
+                    $recentStateChanges = Get-AzPolicyStateSummary -From $startTime -To $endTime -ErrorAction SilentlyContinue
+                    
+                    if ($recentStateChanges) {
+                        # Check if any of our M365 policies have state changes
+                        $m365PolicyIds = $m365RelatedAssignments | ForEach-Object { $_.PolicyAssignmentId }
+                        
+                        $relevantChanges = $recentStateChanges | Where-Object { 
+                            $change = $_
+                            $m365PolicyIds | Where-Object { $change.PolicyAssignmentId -eq $_ }
+                        }
+                        
+                        if ($relevantChanges -and $relevantChanges.Count -gt 0) {
+                            Write-Log -Message "Found $($relevantChanges.Count) recent policy state changes for Microsoft 365 policies:" -SpecificLogFile $GeneralReportFile
+                            
+                            foreach ($change in $relevantChanges) {
+                                $policyAssignment = $m365RelatedAssignments | Where-Object { $_.PolicyAssignmentId -eq $change.PolicyAssignmentId } | Select-Object -First 1
+                                $policyName = $policyAssignment.DisplayName ?? $policyAssignment.Name ?? "Unknown Policy"
+                                
+                                Write-Log -Message "  Policy: $policyName" -SpecificLogFile $GeneralReportFile
+                                Write-Log -Message "  Timestamp: $($change.Timestamp)" -SpecificLogFile $GeneralReportFile
+                                Write-Log -Message "  Non-Compliant Resources: $($change.NonCompliantResources)" -SpecificLogFile $GeneralReportFile
+                                Write-Log -Message "  Compliant Resources: $($change.CompliantResources)" -SpecificLogFile $GeneralReportFile
+                                
+                                # Check for significant compliance drop
+                                if ($change.PreviousNonCompliantResources -ne $null -and $change.NonCompliantResources -ne $null) {
+                                    $complianceChange = $change.NonCompliantResources - $change.PreviousNonCompliantResources
+                                    
+                                    if ($complianceChange -gt 5) {
+                                        Write-Log -Message "  ALERT: Significant increase in non-compliant resources ($complianceChange) for policy '$policyName'." -Type "ALERT" -IsAlert -SpecificLogFile $GeneralReportFile
+                                    }
+                                }
+                                
+                                Write-Log -Message "" -SpecificLogFile $GeneralReportFile
+                            }
+                        } else {
+                            Write-Log -Message "No recent state changes found for Microsoft 365-related policies." -SpecificLogFile $GeneralReportFile
+                        }
+                    } else {
+                        Write-Log -Message "No policy state changes found in the specified time period." -SpecificLogFile $GeneralReportFile
+                    }
+                } catch {
+                    Write-Log -Message "Error checking recent policy state changes: $($_.Exception.Message)" -Type "ERROR" -SpecificLogFile $GeneralReportFile
+                }
+            }
+        } catch {
+            Write-Log -Message "Error retrieving Azure Policy assignments: $($_.Exception.Message)" -Type "ERROR" -SpecificLogFile $GeneralReportFile
+        }
+        
+        Write-Log -Message "Completed Azure Policy Assignments for M365 services check." -SpecificLogFile $GeneralReportFile
+        
+    } catch {
+        Write-Log -Message "Error checking Azure Policy Assignments for M365 services: $($_.Exception.Message)" -Type "ERROR" -SpecificLogFile $GeneralReportFile
+    }
 
     Write-Log -Message "Finished General Azure & Cross-Service Checks." -Type "SECTION"
 }
