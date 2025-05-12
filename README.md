@@ -1,4 +1,4 @@
-# Microsoft 365 Post-Admin-Compromise Forensics Framework
+# Microsoft M365 Post-Admin-Compromise Forensics Framework
 
 Author: Dragos Ruiu - May 11 2025
 
