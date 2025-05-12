@@ -1,8 +1,8 @@
-# Microsoft 365 Forensics Framework
+# Microsoft 365 Post-Admin-Compromise Forensics Framework
 
 ## Overview
 
-This PowerShell code represents a comprehensive forensic analysis framework designed specifically for Microsoft 365 environments. It's primarily focused on detecting potential attacker persistence mechanisms following an admin-level compromise. The framework consists of multiple specialized modules that analyze various M365 services, identify suspicious configurations, and generate detailed reports.
+This PowerShell code represents an analysis framework designed specifically for Microsoft 365 environments. It's primarily focused on detecting potential attacker persistence mechanisms following an admin-level compromise. The framework consists of multiple specialized modules that analyze various M365 services, identify suspicious configurations, and generate detailed reports.
 
 ## Purpose
 
