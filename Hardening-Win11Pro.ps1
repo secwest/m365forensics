@@ -71,7 +71,7 @@ if (-not $inPs7 -and $isAdmin) {
 }
 
 # ========================================================================================
-# MAIN HARDENING SECTION - PowerShell 7 Compatible
+# MAIN HARDENING SECTION - PowerShell 5.1 Compatible
 # ========================================================================================
 Write-Host @"
 ╔════════════════════════════════════════════════════════════════╗
@@ -98,17 +98,10 @@ $LgpoExtractDir = "$env:TEMP\LGPO_Extract"
 $recoveryPath = "C:\RecoveryKeys"
 
 # -- Set up logging -----------------------------------------------------------
-$logDir = 'C:\HardeningLogs'
-if (-not (Test-Path $logDir)) {
-    New-Item $logDir -ItemType Directory -Force | Out-Null
-}
-
-$timestamp = Get-Date -Format "yyyyMMdd-HHmmss"
-$logFile = Join-Path $logDir "HardeningLog-$timestamp.txt"
-$transcriptFile = Join-Path $logDir "Transcript-$timestamp.txt"
-
-# Start transcript
-Start-Transcript -Path $transcriptFile -Force | Out-Null
+# Log file will be created in the current directory
+$logDir = $null  # Will be set later
+$logFile = $null # Will be set later
+$transcriptFile = $null # Will be set later
 
 # -- Helper functions ---------------------------------------------------------
 function Log {
@@ -137,7 +130,9 @@ function Log {
     }
     
     # Also log to file
-    $logMessage | Out-File -FilePath $logFile -Append -Encoding utf8
+    if ($logFile) {
+        $logMessage | Out-File -FilePath $logFile -Append -Encoding utf8
+    }
 }
 
 function RegSet {
@@ -176,32 +171,6 @@ function IsZip {
     }
 }
 
-function DownloadWithRetry {
-    param($url, $output, $maxRetries=3)
-    
-    $retryCount = 0
-    $success = $false
-    
-    while (-not $success -and $retryCount -lt $maxRetries) {
-        try {
-            Log "Downloading $output (attempt $($retryCount+1)/$maxRetries)..."
-            Invoke-WebRequest -Uri $url -OutFile $output -UseBasicParsing -ErrorAction Stop
-            $success = $true
-        }
-        catch {
-            $retryCount++
-            $errMsg = $_.Exception.Message
-            if ($retryCount -ge $maxRetries) {
-                Log "Failed to download after $maxRetries attempts: $errMsg" "ERROR"
-                return $false
-            }
-            Log "Download attempt $retryCount failed, retrying in 5 seconds..." "WARN"
-            Start-Sleep -Seconds 5
-        }
-    }
-    return $true
-}
-
 function CheckTpm {
     try {
         $tpm = Get-Tpm -ErrorAction Stop
@@ -235,307 +204,834 @@ function CheckTpm {
     }
 }
 
-function VerifyHardening {
-    Log "Verifying hardening settings..." "INFO"
+function CheckHardeningStatus {
+    param([string]$phase = "Current")
     
-    # Check BitLocker
+    $statusHeader = @"
+╔════════════════════════════════════════════════════════════════╗
+║               $phase HARDENING STATUS CHECK                
+║                                                                ║
+╚════════════════════════════════════════════════════════════════╝
+"@
+    
+    Write-Host $statusHeader -ForegroundColor Cyan
+    Log "$phase hardening status check..." "INFO"
+    
+    # Status container for results
+    $status = @{}
+    
+    # 1. BitLocker Status
     try {
         $blv = Get-BitLockerVolume -MountPoint C: -ErrorAction Stop
-        if ($blv.ProtectionStatus -eq 'ProtectionOn') {
-            Log "BitLocker enabled on C: drive" "SUCCESS"
+        $status.BitLocker = @{
+            Status = $blv.ProtectionStatus
+            Enabled = ($blv.ProtectionStatus -eq 'ProtectionOn')
+            Encryption = $blv.EncryptionMethod
+            Details = "Volume $($blv.MountPoint) protection: $($blv.ProtectionStatus), Encryption: $($blv.EncryptionMethod)"
         }
-        else {
-            Log "BitLocker not enabled on C: drive" "WARN"
+        
+        # Use if-else instead of ternary
+        $logType = "WARN"
+        if ($status.BitLocker.Enabled) {
+            $logType = "SUCCESS"
         }
-    }
-    catch {
-        $errMsg = $_.Exception.Message
-        Log "Could not verify BitLocker status: $errMsg" "WARN"
+        Log "BitLocker: $($status.BitLocker.Details)" $logType
+    } catch {
+        $status.BitLocker = @{ Status = "Error"; Enabled = $false; Details = "Error checking BitLocker: $_" }
+        Log "BitLocker: $($status.BitLocker.Details)" "ERROR"
     }
     
-    # Check TPM
+    # 2. TPM Status
     try {
         $tpm = Get-Tpm -ErrorAction Stop
-        if ($tpm.TpmReady) {
-            Log "TPM is ready" "SUCCESS"
+        $status.TPM = @{
+            Present = $tpm.TpmPresent
+            Ready = $tpm.TpmReady
+            Enabled = ($tpm.TpmPresent -and $tpm.TpmReady)
+            Details = "Present: $($tpm.TpmPresent), Ready: $($tpm.TpmReady), Activated: $($tpm.TpmActivated)"
         }
-        else {
-            Log "TPM not ready" "WARN"
+        
+        # Use if-else instead of ternary
+        $logType = "WARN"
+        if ($status.TPM.Enabled) {
+            $logType = "SUCCESS"
         }
-    }
-    catch {
-        $errMsg = $_.Exception.Message
-        Log "Could not verify TPM status: $errMsg" "WARN"
+        Log "TPM: $($status.TPM.Details)" $logType
+    } catch {
+        $status.TPM = @{ Present = $false; Ready = $false; Enabled = $false; Details = "Error checking TPM: $_" }
+        Log "TPM: $($status.TPM.Details)" "ERROR"
     }
     
-    # Check Device Guard
+    # 3. DeviceGuard/VBS Status
     try {
         $dg = Get-CimInstance Win32_DeviceGuard -ErrorAction Stop
-        if ($dg.VirtualizationBasedSecurityStatus -eq 1) {
-            Log "Virtualization-based security is running" "SUCCESS"
+        $vbsStatus = $dg.VirtualizationBasedSecurityStatus
+        $hvciStatus = $dg.HypervisorEnforcedCodeIntegrityStatus
+        
+        $status.DeviceGuard = @{
+            VBSEnabled = ($vbsStatus -eq 1 -or $vbsStatus -eq 2)
+            HVCIEnabled = ($hvciStatus -eq 1 -or $hvciStatus -eq 2)
+            Details = "VBS: $(if($vbsStatus -eq 0){'Not enabled'}elseif($vbsStatus -eq 1){'Enabled & running'}elseif($vbsStatus -eq 2){'Enabled but not running'}else{'Unknown'}), " +
+                      "HVCI: $(if($hvciStatus -eq 0){'Not enabled'}elseif($hvciStatus -eq 1){'Enabled & running'}elseif($hvciStatus -eq 2){'Enabled but not running'}else{'Unknown'})"
         }
-        else {
-            Log "Virtualization-based security is not running" "WARN"
+        
+        # Use if-else instead of ternary
+        $logType = "WARN"
+        if ($status.DeviceGuard.VBSEnabled -or $status.DeviceGuard.HVCIEnabled) {
+            $logType = "SUCCESS"
         }
-    }
-    catch {
-        $errMsg = $_.Exception.Message
-        Log "Could not verify Device Guard status: $errMsg" "WARN"
+        Log "Device Guard: $($status.DeviceGuard.Details)" $logType
+    } catch {
+        $status.DeviceGuard = @{ VBSEnabled = $false; HVCIEnabled = $false; Details = "Error checking Device Guard: $_" }
+        Log "Device Guard: $($status.DeviceGuard.Details)" "ERROR"
     }
     
-    # Check Defender
+    # 4. Credential Guard Status
+    try {
+        $lsaCfgValue = (Get-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Control\Lsa" -Name "LsaCfgFlags" -ErrorAction SilentlyContinue).LsaCfgFlags
+        
+        $status.CredGuard = @{
+            Enabled = ($lsaCfgValue -eq 1 -or $lsaCfgValue -eq 2)
+            Details = "Credential Guard: $(if($lsaCfgValue -eq 0){'Disabled'}elseif($lsaCfgValue -eq 1){'Enabled with UEFI lock'}elseif($lsaCfgValue -eq 2){'Enabled without UEFI lock'}else{'Not configured'})"
+        }
+        
+        # Use if-else instead of ternary
+        $logType = "WARN"
+        if ($status.CredGuard.Enabled) {
+            $logType = "SUCCESS"
+        }
+        Log "Credential Guard: $($status.CredGuard.Details)" $logType
+    } catch {
+        $status.CredGuard = @{ Enabled = $false; Details = "Error checking Credential Guard: $_" }
+        Log "Credential Guard: $($status.CredGuard.Details)" "ERROR"
+    }
+    
+    # 5. Windows Defender Status
     try {
         $mp = Get-MpComputerStatus -ErrorAction Stop
-        if ($mp.RealTimeProtectionEnabled) {
-            Log "Defender real-time protection enabled" "SUCCESS"
+        $status.Defender = @{
+            RTEnabled = $mp.RealTimeProtectionEnabled
+            ASREnabled = $mp.AttackSurfaceReductionRulesStatus -eq 1
+            NetworkProtection = $mp.IsTamperProtected
+            CloudBlockLevel = $mp.CloudBlockLevel
+            PUAProtection = $mp.PUAProtection
+            CFAEnabled = $mp.ControlledFolderAccessStatus -eq 1
+            Details = "Real-time: $($mp.RealTimeProtectionEnabled), " +
+                      "Cloud block: $($mp.CloudBlockLevel), " +
+                      "Network protection: $($mp.IsTamperProtected), " +
+                      "PUA protection: $($mp.PUAProtection)"
         }
-        else {
-            Log "Defender real-time protection disabled" "WARN"
+        
+        # Use if-else instead of ternary
+        $logType = "WARN"
+        if ($status.Defender.RTEnabled) {
+            $logType = "SUCCESS"
         }
-    }
-    catch {
-        $errMsg = $_.Exception.Message
-        Log "Could not verify Defender status: $errMsg" "WARN"
+        Log "Defender: $($status.Defender.Details)" $logType
+    } catch {
+        $status.Defender = @{ RTEnabled = $false; Details = "Error checking Defender: $_" }
+        Log "Defender: $($status.Defender.Details)" "ERROR"
     }
     
-    # Check AnyDesk firewall rule
+    # 6. PowerShell Execution Policy
+    try {
+        $exPol = Get-ExecutionPolicy -Scope LocalMachine -ErrorAction Stop
+        $status.ExecutionPolicy = @{
+            Policy = $exPol
+            Restricted = ($exPol -eq "Restricted" -or $exPol -eq "AllSigned")
+            Details = "Execution Policy: $exPol"
+        }
+        
+        # Use if-else instead of ternary
+        $logType = "WARN"
+        if ($status.ExecutionPolicy.Restricted) {
+            $logType = "SUCCESS"
+        }
+        Log "PowerShell: $($status.ExecutionPolicy.Details)" $logType
+    } catch {
+        $status.ExecutionPolicy = @{ Policy = "Unknown"; Restricted = $false; Details = "Error checking execution policy: $_" }
+        Log "PowerShell: $($status.ExecutionPolicy.Details)" "ERROR"
+    }
+    
+    # 7. SMB1 Status
+    try {
+        $smb1Feature = Get-WindowsOptionalFeature -Online -FeatureName SMB1Protocol -ErrorAction SilentlyContinue
+        $smb1ServerConfig = Get-SmbServerConfiguration -ErrorAction SilentlyContinue
+        
+        $status.SMB1 = @{
+            FeatureDisabled = ($smb1Feature.State -ne "Enabled")
+            ServerDisabled = (-not $smb1ServerConfig.EnableSMB1Protocol)
+            Disabled = ($smb1Feature.State -ne "Enabled" -and -not $smb1ServerConfig.EnableSMB1Protocol)
+            Details = "Feature: $(if($smb1Feature.State -ne 'Enabled'){'Disabled'}else{'Enabled'}), " +
+                      "Server config: $(if(-not $smb1ServerConfig.EnableSMB1Protocol){'Disabled'}else{'Enabled'})"
+        }
+        
+        # Use if-else instead of ternary
+        $logType = "WARN"
+        if ($status.SMB1.Disabled) {
+            $logType = "SUCCESS"
+        }
+        Log "SMB1: $($status.SMB1.Details)" $logType
+    } catch {
+        $status.SMB1 = @{ Disabled = $false; Details = "Error checking SMB1: $_" }
+        Log "SMB1: $($status.SMB1.Details)" "ERROR"
+    }
+    
+    # 8. TLS Configuration
+    try {
+        $sch = 'HKLM:\SYSTEM\CurrentControlSet\Control\SecurityProviders\SCHANNEL\Protocols'
+        $tls10Enabled = (Get-ItemProperty -Path "$sch\TLS 1.0\Server" -Name "Enabled" -ErrorAction SilentlyContinue).Enabled -ne 0
+        $tls11Enabled = (Get-ItemProperty -Path "$sch\TLS 1.1\Server" -Name "Enabled" -ErrorAction SilentlyContinue).Enabled -ne 0
+        $tls12Enabled = (Get-ItemProperty -Path "$sch\TLS 1.2\Server" -Name "Enabled" -ErrorAction SilentlyContinue).Enabled -ne 0
+        
+        $status.TLS = @{
+            TLS10Disabled = -not $tls10Enabled
+            TLS11Disabled = -not $tls11Enabled
+            TLS12Enabled = $tls12Enabled
+            Secure = (-not $tls10Enabled) -and (-not $tls11Enabled) -and $tls12Enabled
+            Details = "TLS 1.0: $(if($tls10Enabled){'Enabled'}else{'Disabled'}), " +
+                      "TLS 1.1: $(if($tls11Enabled){'Enabled'}else{'Disabled'}), " +
+                      "TLS 1.2: $(if($tls12Enabled){'Enabled'}else{'Disabled'})"
+        }
+        
+        # Use if-else instead of ternary
+        $logType = "WARN"
+        if ($status.TLS.Secure) {
+            $logType = "SUCCESS"
+        }
+        Log "TLS: $($status.TLS.Details)" $logType
+    } catch {
+        $status.TLS = @{ Secure = $false; Details = "Error checking TLS configuration: $_" }
+        Log "TLS: $($status.TLS.Details)" "ERROR"
+    }
+    
+    # 9. AnyDesk Firewall Rule
     try {
         $fw = Get-NetFirewallRule -DisplayName "Hardening - AnyDesk TCP 7070" -ErrorAction SilentlyContinue
-        if ($fw) {
-            Log "AnyDesk firewall rule exists" "SUCCESS"
+        $status.AnyDesk = @{
+            RuleExists = $null -ne $fw
+            Details = "Firewall rule: $(if($null -ne $fw){'Exists'}else{'Not found'})"
         }
-        else {
-            Log "AnyDesk firewall rule missing" "WARN"
+        
+        # Use if-else instead of ternary
+        $logType = "INFO"
+        if ($status.AnyDesk.RuleExists) {
+            $logType = "SUCCESS"
         }
+        Log "AnyDesk: $($status.AnyDesk.Details)" $logType
+    } catch {
+        $status.AnyDesk = @{ RuleExists = $false; Details = "Error checking AnyDesk firewall rule: $_" }
+        Log "AnyDesk: $($status.AnyDesk.Details)" "ERROR"
     }
-    catch {
-        $errMsg = $_.Exception.Message
-        Log "Could not verify firewall rules: $errMsg" "WARN"
+    
+    # Final Summary
+    $totalChecks = 9
+    $passedChecks = 0
+    if ($status.BitLocker.Enabled) { $passedChecks++ }
+    if ($status.TPM.Enabled) { $passedChecks++ }
+    if ($status.DeviceGuard.VBSEnabled) { $passedChecks++ }
+    if ($status.CredGuard.Enabled) { $passedChecks++ }
+    if ($status.Defender.RTEnabled) { $passedChecks++ }
+    if ($status.ExecutionPolicy.Restricted) { $passedChecks++ }
+    if ($status.SMB1.Disabled) { $passedChecks++ }
+    if ($status.TLS.Secure) { $passedChecks++ }
+    if ($status.AnyDesk.RuleExists) { $passedChecks++ }
+    
+    $statusText = "MULTIPLE CHECKS FAILED"
+    if ($passedChecks -eq $totalChecks) {
+        $statusText = "ALL CHECKS PASSED"
+    } elseif ($passedChecks -ge 6) {
+        $statusText = "MOST CHECKS PASSED"
     }
+    
+    $summaryColor = "Red"
+    if ($passedChecks -eq $totalChecks) {
+        $summaryColor = "Green"
+    } elseif ($passedChecks -ge 6) {
+        $summaryColor = "Yellow"
+    }
+    
+    $summaryText = @"
+╔════════════════════════════════════════════════════════════════╗
+║               HARDENING STATUS SUMMARY                         ║
+║                                                                ║
+║  Checks passed: $passedChecks of $totalChecks                            
+║  Status: $statusText
+║                                                                ║
+╚════════════════════════════════════════════════════════════════╝
+"@
+    
+    Write-Host $summaryText -ForegroundColor $summaryColor
+    Log "Status check complete - $passedChecks of $totalChecks checks passed" "INFO"
+    
+    return $status
 }
 
-# -- Main hardening section ---------------------------------------------------
+function DownloadWithRetry {
+    param($url, $output, $maxRetries=3)
+    
+    $retryCount = 0
+    $success = $false
+    
+    while (-not $success -and $retryCount -lt $maxRetries) {
+        try {
+            Log "Downloading $output (attempt $($retryCount+1)/$maxRetries)..."
+            Invoke-WebRequest -Uri $url -OutFile $output -UseBasicParsing -ErrorAction Stop
+            $success = $true
+        }
+        catch {
+            $retryCount++
+            $errMsg = $_.Exception.Message
+            if ($retryCount -ge $maxRetries) {
+                Log "Failed to download after $maxRetries attempts: $errMsg" "ERROR"
+                return $false
+            }
+            Log "Download attempt $retryCount failed, retrying in 5 seconds..." "WARN"
+            Start-Sleep -Seconds 5
+        }
+    }
+    return $true
+}
+
+# -- main ---------------------------------------------------------------------
 try {
     Log "Starting Windows 11 Pro hardening" "INFO"
     Log "PowerShell version: $($PSVersionTable.PSVersion.ToString())" "INFO"
-    Log "Transcript: $transcriptFile" "INFO"
+    
+    # Create logs in current directory
+    $logDir = (Get-Location).Path
+    Log "Saving logs to current directory: $logDir" "INFO"
+    
+    $timestamp = Get-Date -Format "yyyyMMdd-HHmmss"
+    $logFile = Join-Path $logDir "HardeningLog-$timestamp.txt"
+    $transcriptFile = Join-Path $logDir "Transcript-$timestamp.txt"
+    
+    # Start transcript
+    Start-Transcript -Path $transcriptFile -Force | Out-Null
+    
     Log "Log file: $logFile" "INFO"
-
-    # Create recovery key directory
-    if (-not (Test-Path $recoveryPath)) {
-        New-Item $recoveryPath -ItemType Directory -Force | Out-Null
-        Log "Created BitLocker recovery key directory" "SUCCESS"
+    Log "Transcript: $transcriptFile" "INFO"
+    
+    Write-Host @"
+╔════════════════════════════════════════════════════════════════╗
+║                 LOGS LOCATION                                  ║
+║                                                                ║
+║  Console Log: $logFile                                         
+║  Transcript: $transcriptFile                                   
+║                                                                ║
+╚════════════════════════════════════════════════════════════════╝
+"@ -ForegroundColor Magenta
+    
+    # Check system status before hardening
+    $beforeStatus = CheckHardeningStatus -phase "BEFORE"
+    
+    # Ask user if they want to continue
+    $continue = $true
+    $response = Read-Host "Do you want to proceed with hardening? (Y/N)"
+    if ($response -ne "Y" -and $response -ne "y") {
+        Log "User chose not to proceed with hardening" "INFO"
+        $continue = $false
     }
+    
+    if ($continue) {
+        # Create recovery key directory
+        if (-not (Test-Path $recoveryPath)) {
+            New-Item $recoveryPath -ItemType Directory -Force | Out-Null
+            Log "Created BitLocker recovery key directory" "SUCCESS"
+        }
 
-    # -- Download and verify files --
-    $skip = $false
-    foreach ($d in @(
-        @{n='Baseline'; u=$BaselineUrl; o=$BaselineZip; s=$BaselineSha},
-        @{n='LGPO'; u=$LgpoUrl; o=$LgpoZip; s=$LgpoSha}
-    )) {
-        if (-not (DownloadWithRetry -url $d.u -output $d.o)) {
-            $skip = $true
-            break
-        }
-        
-        if (-not (IsZip $d.o)) {
-            Log "$($d.n) is not a valid ZIP file" "WARN"
-            $skip = $true
-            break
-        }
-        
-        $hash = (Get-FileHash $d.o -Algorithm SHA256).Hash.ToUpper()
-        if ($hash -ne $d.s) {
-            Log "$($d.n) SHA-256 mismatch" "WARN"
-            Log "Expected: $($d.s)" "WARN"
-            Log "Actual:   $hash" "WARN"
-            $skip = $true
-            break
-        }
-        
-        Log "$($d.n) downloaded and verified" "SUCCESS"
-    }
-
-    # -- Extract files and apply baseline --
-    if (-not $skip) {
-        # Create extraction directories
-        if (-not (Test-Path $ExtractDir)) {
-            New-Item $ExtractDir -ItemType Directory -Force | Out-Null
-        } else {
-            Remove-Item -Path $ExtractDir\* -Recurse -Force -ErrorAction SilentlyContinue
-        }
-        
-        if (-not (Test-Path $LgpoExtractDir)) {
-            New-Item $LgpoExtractDir -ItemType Directory -Force | Out-Null
-        } else {
-            Remove-Item -Path $LgpoExtractDir\* -Recurse -Force -ErrorAction SilentlyContinue
-        }
-        
-        # Extract files
-        try {
-            Log "Extracting Baseline to $ExtractDir..." "INFO"
-            Expand-Archive $BaselineZip -DestinationPath $ExtractDir -Force -ErrorAction Stop
+        # -- Download and verify files --
+        $skip = $false
+        foreach ($d in @(
+            @{n='Baseline'; u=$BaselineUrl; o=$BaselineZip; s=$BaselineSha},
+            @{n='LGPO'; u=$LgpoUrl; o=$LgpoZip; s=$LgpoSha}
+        )) {
+            if (-not (DownloadWithRetry -url $d.u -output $d.o)) {
+                $skip = $true
+                break
+            }
             
-            Log "Extracting LGPO to $LgpoExtractDir..." "INFO"
-            Expand-Archive $LgpoZip -DestinationPath $LgpoExtractDir -Force -ErrorAction Stop
-            Log "Files extracted successfully" "SUCCESS"
+            if (-not (IsZip $d.o)) {
+                Log "$($d.n) is not a valid ZIP file" "WARN"
+                $skip = $true
+                break
+            }
+            
+            $hash = (Get-FileHash $d.o -Algorithm SHA256).Hash.ToUpper()
+            if ($hash -ne $d.s) {
+                Log "$($d.n) SHA-256 mismatch" "WARN"
+                Log "Expected: $($d.s)" "WARN"
+                Log "Actual:   $hash" "WARN"
+                $skip = $true
+                break
+            }
+            
+            Log "$($d.n) downloaded and verified" "SUCCESS"
         }
-        catch {
-            $errMsg = $_.Exception.Message
-            Log "PowerShell extraction failed, trying tar.exe fallback: $errMsg" "WARN"
+
+        # -- Extract files and apply baseline --
+        if (-not $skip) {
+            # Create extraction directories
+            if (-not (Test-Path $ExtractDir)) {
+                New-Item $ExtractDir -ItemType Directory -Force | Out-Null
+            } else {
+                Remove-Item -Path $ExtractDir\* -Recurse -Force -ErrorAction SilentlyContinue
+            }
+            
+            if (-not (Test-Path $LgpoExtractDir)) {
+                New-Item $LgpoExtractDir -ItemType Directory -Force | Out-Null
+            } else {
+                Remove-Item -Path $LgpoExtractDir\* -Recurse -Force -ErrorAction SilentlyContinue
+            }
+            
+            # Extract files
             try {
-                tar.exe -xf $BaselineZip -C $ExtractDir 
-                tar.exe -xf $LgpoZip -C $LgpoExtractDir
-                Log "Files extracted using tar.exe" "SUCCESS"
+                Log "Extracting Baseline to $ExtractDir..." "INFO"
+                Expand-Archive $BaselineZip -DestinationPath $ExtractDir -Force -ErrorAction Stop
+                
+                Log "Extracting LGPO to $LgpoExtractDir..." "INFO"
+                Expand-Archive $LgpoZip -DestinationPath $LgpoExtractDir -Force -ErrorAction Stop
+                Log "Files extracted successfully" "SUCCESS"
             }
             catch {
                 $errMsg = $_.Exception.Message
-                Log "Both extraction methods failed: $errMsg" "ERROR"
-                $skip = $true
-            }
-        }
-        
-        # Find LGPO executable
-        if (-not $skip) {
-            Log "Searching for LGPO executable..." "INFO"
-            
-            # Various search patterns for LGPO
-            $lgpoSearchResults = @(
-                # First try the exact path we now know exists in the zip
-                (Get-ChildItem -Path "$LgpoExtractDir\LGPO_30" -Filter "LGPO.exe" -File -ErrorAction SilentlyContinue),
-                # Then try these other paths as fallbacks
-                (Get-ChildItem -Path $LgpoExtractDir -Recurse -Filter "LGPO.exe" -File -ErrorAction SilentlyContinue),
-                (Get-ChildItem -Path $LgpoExtractDir -Recurse -Filter "LGPO" -File -ErrorAction SilentlyContinue | Where-Object { $_.Extension -eq "" -or $_.Extension -eq ".exe" }),
-                (Get-ChildItem -Path $ExtractDir -Recurse -Filter "LGPO.exe" -File -ErrorAction SilentlyContinue),
-                (Get-ChildItem -Path $ExtractDir -Recurse -Filter "LGPO" -File -ErrorAction SilentlyContinue | Where-Object { $_.Extension -eq "" -or $_.Extension -eq ".exe" })
-            )
-            
-            $lgpoExe = $null
-            foreach ($result in $lgpoSearchResults) {
-                if ($result.Count -gt 0) {
-                    $lgpoExe = $result[0].FullName
-                    break
+                Log "PowerShell extraction failed, trying tar.exe fallback: $errMsg" "WARN"
+                try {
+                    tar.exe -xf $BaselineZip -C $ExtractDir 
+                    tar.exe -xf $LgpoZip -C $LgpoExtractDir
+                    Log "Files extracted using tar.exe" "SUCCESS"
+                }
+                catch {
+                    $errMsg = $_.Exception.Message
+                    Log "Both extraction methods failed: $errMsg" "ERROR"
+                    $skip = $true
                 }
             }
             
-            if ($lgpoExe) {
-                Log "Found LGPO executable at: $lgpoExe" "SUCCESS"
+            # Find LGPO executable
+            if (-not $skip) {
+                Log "Searching for LGPO executable..." "INFO"
                 
-                # Output the exact command that will be run
-                Log "Will execute: & '$lgpoExe' /g <gpoDir>" "INFO"
-                
-                # Find GPO directory
-                Log "Searching for GPO directory..." "INFO"
-                $gpoSearchResults = @(
-                    (Get-ChildItem -Path $ExtractDir -Recurse -Filter "MSFT-Win11-23H2-FINAL" -Directory -ErrorAction SilentlyContinue),
-                    (Get-ChildItem -Path $ExtractDir -Recurse -Directory -ErrorAction SilentlyContinue | Where-Object { $_.Name -like "MSFT-Win11*" }),
-                    (Get-ChildItem -Path $ExtractDir -Recurse -Directory -ErrorAction SilentlyContinue | Where-Object { $_.Name -like "*Win11*" -and $_.FullName -match "GPOs" }),
-                    (Get-ChildItem -Path $ExtractDir -Recurse -Directory -ErrorAction SilentlyContinue | Where-Object { $_.FullName -match "GPOs" })
+                # Various search patterns for LGPO
+                $lgpoSearchResults = @(
+                    # First try the exact path we now know exists in the zip
+                    (Get-ChildItem -Path "$LgpoExtractDir\LGPO_30" -Filter "LGPO.exe" -File -ErrorAction SilentlyContinue),
+                    # Then try these other paths as fallbacks
+                    (Get-ChildItem -Path $LgpoExtractDir -Recurse -Filter "LGPO.exe" -File -ErrorAction SilentlyContinue),
+                    (Get-ChildItem -Path $LgpoExtractDir -Recurse -Filter "LGPO" -File -ErrorAction SilentlyContinue | Where-Object { $_.Extension -eq "" -or $_.Extension -eq ".exe" }),
+                    (Get-ChildItem -Path $ExtractDir -Recurse -Filter "LGPO.exe" -File -ErrorAction SilentlyContinue),
+                    (Get-ChildItem -Path $ExtractDir -Recurse -Filter "LGPO" -File -ErrorAction SilentlyContinue | Where-Object { $_.Extension -eq "" -or $_.Extension -eq ".exe" })
                 )
                 
-                $gpoDir = $null
-                foreach ($result in $gpoSearchResults) {
+                $lgpoExe = $null
+                foreach ($result in $lgpoSearchResults) {
                     if ($result.Count -gt 0) {
-                        $gpoDir = $result[0].FullName
+                        $lgpoExe = $result[0].FullName
                         break
                     }
                 }
                 
-                if ($gpoDir) {
-                    Log "Found GPO directory at: $gpoDir" "SUCCESS"
+                if ($lgpoExe) {
+                    Log "Found LGPO executable at: $lgpoExe" "SUCCESS"
                     
-                    # Apply baseline
-                    Log "Applying security baseline..." "INFO"
-                    Log "Command to execute: & '$lgpoExe' /g '$gpoDir'" "INFO"
-                    try {
-                        # Use Start-Process for more controlled execution
-                        $psi = New-Object System.Diagnostics.ProcessStartInfo
-                        $psi.FileName = $lgpoExe
-                        $psi.Arguments = "/g `"$gpoDir`""
-                        $psi.UseShellExecute = $false
-                        $psi.RedirectStandardOutput = $true
-                        $psi.RedirectStandardError = $true
-                        
-                        $process = [System.Diagnostics.Process]::Start($psi)
-                        $stdout = $process.StandardOutput.ReadToEnd()
-                        $stderr = $process.StandardError.ReadToEnd()
-                        $process.WaitForExit()
-                        
-                        if ($process.ExitCode -eq 0) {
-                            Log "Security baseline applied successfully" "SUCCESS"
-                        } else {
-                            Log "LGPO exited with code $($process.ExitCode)" "WARN"
-                            if ($stdout) { Log "LGPO output: $stdout" "INFO" }
-                            if ($stderr) { Log "LGPO errors: $stderr" "ERROR" }
+                    # Output the exact command that will be run
+                    Log "Will execute: & '$lgpoExe' /g <gpoDir>" "INFO"
+                    
+                    # Find GPO directory
+                    Log "Searching for GPO directory..." "INFO"
+                    $gpoSearchResults = @(
+                        (Get-ChildItem -Path $ExtractDir -Recurse -Filter "MSFT-Win11-23H2-FINAL" -Directory -ErrorAction SilentlyContinue),
+                        (Get-ChildItem -Path $ExtractDir -Recurse -Directory -ErrorAction SilentlyContinue | Where-Object { $_.Name -like "MSFT-Win11*" }),
+                        (Get-ChildItem -Path $ExtractDir -Recurse -Directory -ErrorAction SilentlyContinue | Where-Object { $_.Name -like "*Win11*" -and $_.FullName -match "GPOs" }),
+                        (Get-ChildItem -Path $ExtractDir -Recurse -Directory -ErrorAction SilentlyContinue | Where-Object { $_.FullName -match "GPOs" })
+                    )
+                    
+                    $gpoDir = $null
+                    foreach ($result in $gpoSearchResults) {
+                        if ($result.Count -gt 0) {
+                            $gpoDir = $result[0].FullName
+                            break
                         }
                     }
-                    catch {
-                        $errMsg = $_.Exception.Message
-                        Log "Failed to apply security baseline: $errMsg" "ERROR"
+                    
+                    if ($gpoDir) {
+                        Log "Found GPO directory at: $gpoDir" "SUCCESS"
+                        
+                        # Apply baseline
+                        Log "Applying security baseline..." "INFO"
+                        Log "Command to execute: & '$lgpoExe' /g '$gpoDir'" "INFO"
+                        try {
+                            # Use Start-Process for more controlled execution
+                            $psi = New-Object System.Diagnostics.ProcessStartInfo
+                            $psi.FileName = $lgpoExe
+                            $psi.Arguments = "/g `"$gpoDir`""
+                            $psi.UseShellExecute = $false
+                            $psi.RedirectStandardOutput = $true
+                            $psi.RedirectStandardError = $true
+                            
+                            $process = [System.Diagnostics.Process]::Start($psi)
+                            $stdout = $process.StandardOutput.ReadToEnd()
+                            $stderr = $process.StandardError.ReadToEnd()
+                            $process.WaitForExit()
+                            
+                            if ($process.ExitCode -eq 0) {
+                                Log "Security baseline applied successfully" "SUCCESS"
+                            } else {
+                                Log "LGPO exited with code $($process.ExitCode)" "WARN"
+                                if ($stdout) { Log "LGPO output: $stdout" "INFO" }
+                                if ($stderr) { Log "LGPO errors: $stderr" "ERROR" }
+                            }
+                        }
+                        catch {
+                            $errMsg = $_.Exception.Message
+                            Log "Failed to apply security baseline: $errMsg" "ERROR"
+                        }
+                    }
+                    else {
+                        Log "Could not find GPO directory" "ERROR"
                     }
                 }
                 else {
-                    Log "Could not find GPO directory" "ERROR"
+                    Log "Could not find LGPO executable" "ERROR"
                 }
             }
-            else {
-                Log "Could not find LGPO executable" "ERROR"
+        }
+
+        # -- Windows Update + Defender signatures --
+        Log "Setting up Windows Update..." "INFO"
+        if (-not (Get-Module PSWindowsUpdate -ListAvailable)) {
+            Log "Installing PSWindowsUpdate module..." "INFO"
+            try {
+                Install-Module PSWindowsUpdate -Force -Confirm:$false -ErrorAction Stop
+                Log "PSWindowsUpdate module installed" "SUCCESS"
+            } catch {
+                $errMsg = $_.Exception.Message
+                Log "Failed to install PSWindowsUpdate: $errMsg" "WARN"
             }
         }
-    }
 
-    # -- BitLocker --
-    Log "Checking BitLocker status..." "INFO"
-    try {
-        $blvStatus = Get-BitLockerVolume -MountPoint C: -ErrorAction Stop
-        if ($blvStatus.ProtectionStatus -ne 'ProtectionOn') {
-            Log "BitLocker not enabled on C: drive, proceeding with setup" "INFO"
+        if (Get-Module PSWindowsUpdate -ListAvailable) {
+            Import-Module PSWindowsUpdate
+            Log "Installing Windows Updates WITHOUT auto-reboot..." "INFO"
+            try {
+                Get-WindowsUpdate -AcceptAll -Install -AutoReboot:$false -ErrorAction SilentlyContinue
+                Log "Windows updates installed (if any were available)" "SUCCESS"
+            } catch {
+                $errMsg = $_.Exception.Message
+                Log "Windows Update failed: $errMsg" "WARN"
+            }
             
-            if (CheckTpm) {
-                $validPin = $false
-                while (-not $validPin) {
-                    $pin = Read-Host "Enter numeric BitLocker PIN (6-20 digits)" -AsSecureString
-                    
-                    # Convert SecureString to plain text for validation
-                    $BSTR = [System.Runtime.InteropServices.Marshal]::SecureStringToBSTR($pin)
-                    $pinText = [System.Runtime.InteropServices.Marshal]::PtrToStringAuto($BSTR)
-                    [System.Runtime.InteropServices.Marshal]::ZeroFreeBSTR($BSTR)
-                    
-                    # Match exactly 6-20 digits
-                    if ($pinText -match "^\d{6,20}$") {
-                        $validPin = $true
-                    }
-                    else {
-                        Log "PIN must be 6-20 digits, numeric only" "WARN"
-                    }
-                }
-                
-                try {
-                    Enable-BitLocker -MountPoint C: -EncryptionMethod XtsAes256 -UsedSpaceOnly `
-                                 -TPMandPinProtector -Pin $pin -RecoveryKeyPath $recoveryPath -ErrorAction Stop
-                    Log "BitLocker enabled successfully" "SUCCESS"
-                    Log "BitLocker keys -> $recoveryPath (move offline IMMEDIATELY)" "WARN"
-                }
-                catch {
-                    $errMsg = $_.Exception.Message
-                    Log "Failed to enable BitLocker: $errMsg" "ERROR"
-                }
+            Log "Updating Defender signatures..." "INFO"
+            try {
+                Update-MpSignature -UpdateSource MicrosoftUpdateServer -ErrorAction SilentlyContinue
+                Log "Defender signatures updated" "SUCCESS"
+            } catch {
+                $errMsg = $_.Exception.Message
+                Log "Defender signature update failed: $errMsg" "WARN"
             }
-            else {
-                Log "Skipping BitLocker - TPM requirements not met" "WARN"
-            }
+        } else {
+            Log "Skipping Windows Update - module not available" "WARN"
         }
-        else {
-            Log "BitLocker already enabled on C: drive" "SUCCESS"
-        }
-    }
-    catch {
-        $errMsg = $_.Exception.Message
-        Log "Error checking BitLocker status: $errMsg" "ERROR"
-    }
 
-    # -- Verification --
-    VerifyHardening
+        # -- LM/NTLMv1 off • SMB1 off • TLS1.0/1.1 off --
+        Log "Configuring network security settings..." "INFO"
+
+        # LM/NTLM settings
+        RegSet 'HKLM:\SYSTEM\CurrentControlSet\Control\Lsa' LmCompatibilityLevel 5
+
+        # SMB1 protocol
+        try {
+            Log "Disabling SMB1 Protocol feature..." "INFO"
+            Disable-WindowsOptionalFeature -Online -FeatureName SMB1Protocol -NoRestart -ErrorAction SilentlyContinue | Out-Null
+            Log "Disabling SMB1 Protocol at server level..." "INFO"
+            Set-SmbServerConfiguration -EnableSMB1Protocol $false -Force -ErrorAction Stop
+            Log "SMB1 Protocol disabled" "SUCCESS"
+        } catch {
+            $errMsg = $_.Exception.Message
+            Log "Error disabling SMB1: $errMsg" "WARN"
+        }
+
+        # TLS configuration
+        Log "Configuring TLS settings..." "INFO"
+        $sch = 'HKLM:\SYSTEM\CurrentControlSet\Control\SecurityProviders\SCHANNEL\Protocols'
+
+        # Ensure TLS protocol paths exist
+        foreach ($v in @('TLS 1.0', 'TLS 1.1', 'TLS 1.2')) {
+            foreach ($r in @('Server', 'Client')) {
+                $path = "$sch\$v\$r"
+                if (-not (Test-Path $path)) {
+                    try {
+                        New-Item $path -Force -ErrorAction Stop | Out-Null
+                        Log "Created registry path: $path" "INFO"
+                    } catch {
+                        $errMsg = $_.Exception.Message
+                        Log "Failed to create registry path $path - $errMsg" "WARN"
+                    }
+                }
+            }
+        }
+
+        # Configure TLS versions
+        foreach ($v in @('TLS 1.0', 'TLS 1.1')) {
+            foreach ($r in @('Server', 'Client')) {
+                RegSet "$sch\$v\$r" Enabled 0
+            }
+        }
+        RegSet "$sch\TLS 1.2\Server" Enabled 1
+        RegSet "$sch\TLS 1.2\Client" Enabled 1
+        Log "TLS settings configured: 1.0/1.1 disabled, 1.2 enabled" "SUCCESS"
+
+        # -- VBS / HVCI / Credential Guard --
+        Log "Configuring Virtualization-Based Security..." "INFO"
+        try {
+            bcdedit /set hypervisorlaunchtype Auto | Out-Null
+            Log "Hypervisor launch type set to Auto" "INFO"
+        } catch {
+            $errMsg = $_.Exception.Message
+            Log "Failed to set hypervisor launch type: $errMsg" "WARN"
+        }
+
+        RegSet 'HKLM:\SYSTEM\CurrentControlSet\Control\DeviceGuard' EnableVirtualizationBasedSecurity 1
+        RegSet 'HKLM:\SYSTEM\CurrentControlSet\Control\DeviceGuard' RequirePlatformSecurityFeatures 3
+        RegSet 'HKLM:\SYSTEM\CurrentControlSet\Control\Lsa' LsaCfgFlags 1
+        Log "Virtualization-Based Security settings configured" "SUCCESS"
+
+        # -- Defender baseline + ASR --
+        Log "Configuring Windows Defender settings..." "INFO"
+        try {
+            Set-MpPreference -CloudBlockLevel High -PUAProtection Enabled `
+                            -DisableRealtimeMonitoring 0 -EnableControlledFolderAccess Enabled `
+                            -EnableNetworkProtection Enabled -ErrorAction Stop
+            Log "Defender baseline settings configured" "SUCCESS"
+        } catch {
+            $errMsg = $_.Exception.Message
+            Log "Failed to configure Defender settings: $errMsg" "WARN"
+        }
+
+        # ASR rules with friendly names
+        $asrRules = @(
+            @{Id='D4F940AB-401B-4EFC-AADC-AD5F3C50688A'; Name='Block Office from creating executable content'},
+            @{Id='3B576869-A4EC-4529-8536-B80A7769E899'; Name='Block Office apps from injecting into other processes'},
+            @{Id='75668C1F-73B5-4CF0-BB93-3ECF5CB7CC84'; Name='Block abuse of exploited vulnerable signed drivers'},
+            @{Id='26190899-1602-49E8-8B27-EB1D0A1CE869'; Name='Block Office communication apps from creating child processes'},
+            @{Id='BE9BA2D9-53EA-4CDC-84E5-9B1EEEE46550'; Name='Block execution of potentially obfuscated scripts'}
+        )
+
+        Log "Configuring Attack Surface Reduction rules..." "INFO"
+        foreach ($rule in $asrRules) {
+            try {
+                $currentState = Get-MpPreference | Select-Object -ExpandProperty AttackSurfaceReductionRules_Ids -ErrorAction SilentlyContinue
+                $currentActions = Get-MpPreference | Select-Object -ExpandProperty AttackSurfaceReductionRules_Actions -ErrorAction SilentlyContinue
+                
+                $index = [array]::IndexOf($currentState, $rule.Id)
+                if ($index -eq -1 -or $currentActions[$index] -ne 1) {
+                    Add-MpPreference -AttackSurfaceReductionRules_Ids $rule.Id -AttackSurfaceReductionRules_Actions Enabled -ErrorAction Stop
+                    Log "Enabled ASR rule: $($rule.Name)" "SUCCESS"
+                } else {
+                    Log "ASR rule already enabled: $($rule.Name)" "INFO"
+                }
+            } catch {
+                $errMsg = $_.Exception.Message
+                Log "Failed to enable ASR rule $($rule.Name): $errMsg" "WARN"
+            }
+        }
+
+        # -- Office macros --
+        Log "Configuring Office macro security..." "INFO"
+        $off = 'HKLM:\SOFTWARE\Policies\Microsoft\Office\16.0'
+
+        # Ensure Office policy paths exist
+        foreach ($a in @('Word', 'Excel', 'PowerPoint')) {
+            $path = "$off\$a\Security"
+            if (-not (Test-Path $path)) {
+                try {
+                    New-Item $path -Force -ErrorAction Stop | Out-Null
+                    Log "Created Office policy path: $path" "INFO"
+                } catch {
+                    $errMsg = $_.Exception.Message
+                    Log "Failed to create Office policy path $path - $errMsg" "WARN"
+                }
+            }
+        }
+
+        if (-not (Test-Path "$off\Common\Security")) {
+            try {
+                New-Item "$off\Common\Security" -Force -ErrorAction Stop | Out-Null
+                Log "Created Office common security policy path" "INFO"
+            } catch {
+                $errMsg = $_.Exception.Message
+                Log "Failed to create Office common security policy path: $errMsg" "WARN"
+            }
+        }
+
+        if (-not (Test-Path "$off\Common\COM Compatibility")) {
+            try {
+                New-Item "$off\Common\COM Compatibility" -Force -ErrorAction Stop | Out-Null
+                Log "Created Office COM compatibility policy path" "INFO"
+            } catch {
+                $errMsg = $_.Exception.Message
+                Log "Failed to create Office COM compatibility policy path: $errMsg" "WARN"
+            }
+        }
+
+        # Set Office macro security settings
+        foreach ($a in @('Word', 'Excel', 'PowerPoint')) {
+            RegSet "$off\$a\Security" VBAWarnings 3
+        }
+        RegSet "$off\Common\Security" BlockMacrosFromInternet 1
+        RegSet "$off\Common\Security" RequireAddinSig 1
+        RegSet "$off\Common\COM Compatibility" DisableBHOWarning 1
+        Log "Office macro security settings configured" "SUCCESS"
+
+        # -- AllSigned + logging --
+        Log "Configuring PowerShell execution policy and logging..." "INFO"
+        try {
+            Set-ExecutionPolicy AllSigned -Scope LocalMachine -Force -ErrorAction Stop
+            Log "PowerShell execution policy set to AllSigned" "SUCCESS"
+        } catch {
+            $errMsg = $_.Exception.Message
+            Log "Failed to set PowerShell execution policy: $errMsg" "WARN"
+        }
+
+        $ps = 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\PowerShell'
+
+        # Ensure PowerShell policy paths exist
+        foreach ($path in @("$ps\ScriptBlockLogging", "$ps\ModuleLogging", "$ps\Transcription")) {
+            if (-not (Test-Path $path)) {
+                try {
+                    New-Item $path -Force -ErrorAction Stop | Out-Null
+                    Log "Created PowerShell policy path: $path" "INFO"
+                } catch {
+                    $errMsg = $_.Exception.Message
+                    Log "Failed to create PowerShell policy path $path - $errMsg" "WARN"
+                }
+            }
+        }
+
+        if (-not (Test-Path "$ps\ModuleLogging\ModuleNames")) {
+            try {
+                New-Item "$ps\ModuleLogging\ModuleNames" -Force -ErrorAction Stop | Out-Null
+                Log "Created PowerShell module names policy path" "INFO"
+            } catch {
+                $errMsg = $_.Exception.Message
+                Log "Failed to create PowerShell module names policy path: $errMsg" "WARN"
+            }
+        }
+
+        # Set PowerShell logging settings
+        RegSet "$ps\ScriptBlockLogging" EnableScriptBlockLogging 1
+        RegSet "$ps\ModuleLogging" EnableModuleLogging 1
+        RegSet "$ps\ModuleLogging\ModuleNames" '*' '*' 'String'
+        RegSet "$ps\Transcription" EnableTranscripting 1
+        RegSet "$ps\Transcription" OutputDirectory 'C:\PowerShellTranscripts' 'String'
+
+        # Create transcripts directory if it doesn't exist
+        if (-not (Test-Path 'C:\PowerShellTranscripts')) {
+            try {
+                New-Item 'C:\PowerShellTranscripts' -ItemType Directory -Force -ErrorAction Stop | Out-Null
+                Log "Created PowerShell transcripts directory" "SUCCESS"
+            } catch {
+                $errMsg = $_.Exception.Message
+                Log "Failed to create PowerShell transcripts directory: $errMsg" "WARN"
+            }
+        }
+        Log "PowerShell logging settings configured" "SUCCESS"
+
+        # -- Remove obsolete optional features --
+        Log "Removing obsolete Windows optional features..." "INFO"
+        $optionalFeatures = @(
+            'MicrosoftWindowsPowerShellV2Root',
+            'SimpleTCPIPServices',
+            'TelnetClient',
+            'TFTPClient',
+            'Printing-FAXServices-Features',      # Fax services
+            'SMB1Protocol-Client',                # SMB1 client
+            'SMB1Protocol-Server',                # SMB1 server
+            'SMB1Protocol-Deprecation',           # SMB1 deprecation
+            'SNMP',                               # Simple Network Management Protocol
+            'LegacyComponents',                   # Legacy components
+            'DirectPlay',                         # DirectPlay legacy gaming component
+            'Internet-Explorer-Optional-amd64',   # Internet Explorer
+            'WorkFolders-Client',                 # Work Folders client
+            'MediaPlayback',                      # Legacy media playback
+            'WindowsMediaPlayer',                 # Windows Media Player
+            'XPS-Viewer'                          # XPS viewer
+        )
+
+        foreach ($feature in $optionalFeatures) {
+            try {
+                Log "Disabling optional feature: $feature" "INFO"
+                Disable-WindowsOptionalFeature -Online -FeatureName $feature -NoRestart -ErrorAction SilentlyContinue | Out-Null
+                Log "Optional feature disabled: $feature" "SUCCESS"
+            } catch {
+                $errMsg = $_.Exception.Message
+                Log "Failed to disable optional feature $feature - $errMsg" "WARN"
+            }
+        }
+
+        # -- Audit policy --
+        Log "Configuring Windows audit policy..." "INFO"
+        $auditCategories = @(
+            'Logon',
+            'User Account Management',
+            'Security Group Management',
+            'Process Creation',
+            'Audit Policy Change'
+        )
+
+        foreach ($category in $auditCategories) {
+            try {
+                Log "Setting audit policy for: $category" "INFO"
+                $result = auditpol /set /subcategory:"$category" /success:enable /failure:enable 2>&1
+                Log "Audit policy set for $category" "SUCCESS"
+            } catch {
+                $errMsg = $_.Exception.Message
+                Log "Failed to set audit policy for $category - $errMsg" "WARN"
+            }
+        }
+
+        # -- AnyDesk firewall --
+        Log "Checking for AnyDesk..." "INFO"
+        $anydeskInstalled = (Test-Path "${env:ProgramFiles}\AnyDesk\AnyDesk.exe") -or 
+                            (Test-Path "${env:ProgramFiles(x86)}\AnyDesk\AnyDesk.exe")
+
+        if ($anydeskInstalled) {
+            Log "AnyDesk detected, configuring firewall rules" "INFO"
+            if (-not (Get-NetFirewallRule -DisplayName 'Hardening - AnyDesk TCP 7070' -ErrorAction SilentlyContinue)) {
+                try {
+                    New-NetFirewallRule -DisplayName 'Hardening - AnyDesk TCP 7070' -Direction Inbound `
+                        -Action Allow -Protocol TCP -LocalPort 7070 -Profile Any -ErrorAction Stop | Out-Null
+                    New-NetFirewallRule -DisplayName 'Hardening - AnyDesk UDP 7070' -Direction Inbound `
+                        -Action Allow -Protocol UDP -LocalPort 7070 -Profile Any -ErrorAction Stop | Out-Null
+                    Log "AnyDesk firewall rules created" "SUCCESS"
+                } catch {
+                    $errMsg = $_.Exception.Message
+                    Log "Failed to create AnyDesk firewall rules: $errMsg" "WARN"
+                }
+            } else {
+                Log "AnyDesk firewall rules already exist" "INFO"
+            }
+        } else {
+            Log "AnyDesk not installed, creating firewall rules anyway for future use" "INFO"
+            # Create rules anyway as specified in original script
+            if (-not (Get-NetFirewallRule -DisplayName 'Hardening - AnyDesk TCP 7070' -ErrorAction SilentlyContinue)) {
+                try {
+                    New-NetFirewallRule -DisplayName 'Hardening - AnyDesk TCP 7070' -Direction Inbound `
+                        -Action Allow -Protocol TCP -LocalPort 7070 -Profile Any -ErrorAction Stop | Out-Null
+                    New-NetFirewallRule -DisplayName 'Hardening - AnyDesk UDP 7070' -Direction Inbound `
+                        -Action Allow -Protocol UDP -LocalPort 7070 -Profile Any -ErrorAction Stop | Out-Null
+                    Log "AnyDesk firewall rules created (for future use)" "SUCCESS"
+                } catch {
+                    $errMsg = $_.Exception.Message
+                    Log "Failed to create AnyDesk firewall rules: $errMsg" "WARN"
+                }
+            }
+        }
+
+        # -- Final Status Check --
+        Log "Hardening complete - checking final system status" "INFO"
+        $afterStatus = CheckHardeningStatus -phase "AFTER"
+    }
 
     # -- Completion --
     $bannerText = @"
@@ -562,6 +1058,19 @@ try {
 "@
 
     Write-Host $bannerText -ForegroundColor Green
+
+    # Display log file locations again for clarity
+    Write-Host @"
+╔════════════════════════════════════════════════════════════════╗
+║                 LOGS LOCATION                                  ║
+║                                                                ║
+║  All logs are saved in: $logDir                          
+║                                                                ║
+║  Console Log: $logFile                                         
+║  Transcript: $transcriptFile                                   
+║                                                                ║
+╚════════════════════════════════════════════════════════════════╝
+"@ -ForegroundColor Magenta
     
     # Add summary to log file
     @"
@@ -580,7 +1089,6 @@ IMPORTANT:
 3. Run verification commands to confirm settings
 ============================================================
 "@ | Out-File -FilePath $logFile -Append -Encoding utf8
-
 }
 catch {
     $errMsg = $_.Exception.Message
@@ -590,4 +1098,8 @@ catch {
 finally {
     Stop-Transcript
     Log "Script execution completed" "INFO"
+    
+    # Add a pause to prevent the window from closing
+    Write-Host "`nPress Enter to exit..." -ForegroundColor Cyan
+    Read-Host
 }
