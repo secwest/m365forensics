@@ -98,17 +98,10 @@ $LgpoExtractDir = "$env:TEMP\LGPO_Extract"
 $recoveryPath = "C:\RecoveryKeys"
 
 # -- Set up logging -----------------------------------------------------------
-$logDir = 'C:\HardeningLogs'
-if (-not (Test-Path $logDir)) {
-    New-Item $logDir -ItemType Directory -Force | Out-Null
-}
-
-$timestamp = Get-Date -Format "yyyyMMdd-HHmmss"
-$logFile = Join-Path $logDir "HardeningLog-$timestamp.txt"
-$transcriptFile = Join-Path $logDir "Transcript-$timestamp.txt"
-
-# Start transcript
-Start-Transcript -Path $transcriptFile -Force | Out-Null
+# Log file will be created in the current directory
+$logDir = $null  # Will be set later
+$logFile = $null # Will be set later
+$transcriptFile = $null # Will be set later
 
 # -- Helper functions ---------------------------------------------------------
 function Log {
@@ -235,97 +228,255 @@ function CheckTpm {
     }
 }
 
-function VerifyHardening {
-    Log "Verifying hardening settings..." "INFO"
+function CheckHardeningStatus {
+    param([string]$phase = "Current")
     
-    # Check BitLocker
+    $statusHeader = @"
+╔════════════════════════════════════════════════════════════════╗
+║               $phase HARDENING STATUS CHECK                
+║                                                                ║
+╚════════════════════════════════════════════════════════════════╝
+"@
+    
+    Write-Host $statusHeader -ForegroundColor Cyan
+    Log "$phase hardening status check..." "INFO"
+    
+    # Status container for results
+    $status = @{}
+    
+    # 1. BitLocker Status
     try {
         $blv = Get-BitLockerVolume -MountPoint C: -ErrorAction Stop
-        if ($blv.ProtectionStatus -eq 'ProtectionOn') {
-            Log "BitLocker enabled on C: drive" "SUCCESS"
+        $status.BitLocker = @{
+            Status = $blv.ProtectionStatus
+            Enabled = ($blv.ProtectionStatus -eq 'ProtectionOn')
+            Encryption = $blv.EncryptionMethod
+            Details = "Volume $($blv.MountPoint) protection: $($blv.ProtectionStatus), Encryption: $($blv.EncryptionMethod)"
         }
-        else {
-            Log "BitLocker not enabled on C: drive" "WARN"
-        }
-    }
-    catch {
-        $errMsg = $_.Exception.Message
-        Log "Could not verify BitLocker status: $errMsg" "WARN"
+        
+        Log "BitLocker: $($status.BitLocker.Details)" ($status.BitLocker.Enabled ? "SUCCESS" : "WARN")
+    } catch {
+        $status.BitLocker = @{ Status = "Error"; Enabled = $false; Details = "Error checking BitLocker: $_" }
+        Log "BitLocker: $($status.BitLocker.Details)" "ERROR"
     }
     
-    # Check TPM
+    # 2. TPM Status
     try {
         $tpm = Get-Tpm -ErrorAction Stop
-        if ($tpm.TpmReady) {
-            Log "TPM is ready" "SUCCESS"
+        $status.TPM = @{
+            Present = $tpm.TpmPresent
+            Ready = $tpm.TpmReady
+            Enabled = ($tpm.TpmPresent -and $tpm.TpmReady)
+            Details = "Present: $($tpm.TpmPresent), Ready: $($tpm.TpmReady), Activated: $($tpm.TpmActivated)"
         }
-        else {
-            Log "TPM not ready" "WARN"
-        }
-    }
-    catch {
-        $errMsg = $_.Exception.Message
-        Log "Could not verify TPM status: $errMsg" "WARN"
+        
+        Log "TPM: $($status.TPM.Details)" ($status.TPM.Enabled ? "SUCCESS" : "WARN")
+    } catch {
+        $status.TPM = @{ Present = $false; Ready = $false; Enabled = $false; Details = "Error checking TPM: $_" }
+        Log "TPM: $($status.TPM.Details)" "ERROR"
     }
     
-    # Check Device Guard
+    # 3. DeviceGuard/VBS Status
     try {
         $dg = Get-CimInstance Win32_DeviceGuard -ErrorAction Stop
-        if ($dg.VirtualizationBasedSecurityStatus -eq 1) {
-            Log "Virtualization-based security is running" "SUCCESS"
+        $vbsStatus = $dg.VirtualizationBasedSecurityStatus
+        $hvciStatus = $dg.HypervisorEnforcedCodeIntegrityStatus
+        
+        $status.DeviceGuard = @{
+            VBSEnabled = ($vbsStatus -eq 1 -or $vbsStatus -eq 2)
+            HVCIEnabled = ($hvciStatus -eq 1 -or $hvciStatus -eq 2)
+            Details = "VBS: $(if($vbsStatus -eq 0){'Not enabled'}elseif($vbsStatus -eq 1){'Enabled & running'}elseif($vbsStatus -eq 2){'Enabled but not running'}else{'Unknown'}), " +
+                      "HVCI: $(if($hvciStatus -eq 0){'Not enabled'}elseif($hvciStatus -eq 1){'Enabled & running'}elseif($hvciStatus -eq 2){'Enabled but not running'}else{'Unknown'})"
         }
-        else {
-            Log "Virtualization-based security is not running" "WARN"
-        }
-    }
-    catch {
-        $errMsg = $_.Exception.Message
-        Log "Could not verify Device Guard status: $errMsg" "WARN"
+        
+        Log "Device Guard: $($status.DeviceGuard.Details)" (($status.DeviceGuard.VBSEnabled -or $status.DeviceGuard.HVCIEnabled) ? "SUCCESS" : "WARN")
+    } catch {
+        $status.DeviceGuard = @{ VBSEnabled = $false; HVCIEnabled = $false; Details = "Error checking Device Guard: $_" }
+        Log "Device Guard: $($status.DeviceGuard.Details)" "ERROR"
     }
     
-    # Check Defender
+    # 4. Credential Guard Status
+    try {
+        $lsaCfgValue = (Get-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Control\Lsa" -Name "LsaCfgFlags" -ErrorAction SilentlyContinue).LsaCfgFlags
+        
+        $status.CredGuard = @{
+            Enabled = ($lsaCfgValue -eq 1 -or $lsaCfgValue -eq 2)
+            Details = "Credential Guard: $(if($lsaCfgValue -eq 0){'Disabled'}elseif($lsaCfgValue -eq 1){'Enabled with UEFI lock'}elseif($lsaCfgValue -eq 2){'Enabled without UEFI lock'}else{'Not configured'})"
+        }
+        
+        Log "Credential Guard: $($status.CredGuard.Details)" ($status.CredGuard.Enabled ? "SUCCESS" : "WARN")
+    } catch {
+        $status.CredGuard = @{ Enabled = $false; Details = "Error checking Credential Guard: $_" }
+        Log "Credential Guard: $($status.CredGuard.Details)" "ERROR"
+    }
+    
+    # 5. Windows Defender Status
     try {
         $mp = Get-MpComputerStatus -ErrorAction Stop
-        if ($mp.RealTimeProtectionEnabled) {
-            Log "Defender real-time protection enabled" "SUCCESS"
+        $status.Defender = @{
+            RTEnabled = $mp.RealTimeProtectionEnabled
+            ASREnabled = $mp.AttackSurfaceReductionRulesStatus -eq 1
+            NetworkProtection = $mp.IsTamperProtected
+            CloudBlockLevel = $mp.CloudBlockLevel
+            PUAProtection = $mp.PUAProtection
+            CFAEnabled = $mp.ControlledFolderAccessStatus -eq 1
+            Details = "Real-time: $($mp.RealTimeProtectionEnabled), " +
+                      "Cloud block: $($mp.CloudBlockLevel), " +
+                      "Network protection: $($mp.IsTamperProtected), " +
+                      "PUA protection: $($mp.PUAProtection)"
         }
-        else {
-            Log "Defender real-time protection disabled" "WARN"
-        }
-    }
-    catch {
-        $errMsg = $_.Exception.Message
-        Log "Could not verify Defender status: $errMsg" "WARN"
+        
+        Log "Defender: $($status.Defender.Details)" ($status.Defender.RTEnabled ? "SUCCESS" : "WARN")
+    } catch {
+        $status.Defender = @{ RTEnabled = $false; Details = "Error checking Defender: $_" }
+        Log "Defender: $($status.Defender.Details)" "ERROR"
     }
     
-    # Check AnyDesk firewall rule
+    # 6. PowerShell Execution Policy
+    try {
+        $exPol = Get-ExecutionPolicy -Scope LocalMachine -ErrorAction Stop
+        $status.ExecutionPolicy = @{
+            Policy = $exPol
+            Restricted = ($exPol -eq "Restricted" -or $exPol -eq "AllSigned")
+            Details = "Execution Policy: $exPol"
+        }
+        
+        Log "PowerShell: $($status.ExecutionPolicy.Details)" ($status.ExecutionPolicy.Restricted ? "SUCCESS" : "WARN")
+    } catch {
+        $status.ExecutionPolicy = @{ Policy = "Unknown"; Restricted = $false; Details = "Error checking execution policy: $_" }
+        Log "PowerShell: $($status.ExecutionPolicy.Details)" "ERROR"
+    }
+    
+    # 7. SMB1 Status
+    try {
+        $smb1Feature = Get-WindowsOptionalFeature -Online -FeatureName SMB1Protocol -ErrorAction SilentlyContinue
+        $smb1ServerConfig = Get-SmbServerConfiguration -ErrorAction SilentlyContinue
+        
+        $status.SMB1 = @{
+            FeatureDisabled = ($smb1Feature.State -ne "Enabled")
+            ServerDisabled = (-not $smb1ServerConfig.EnableSMB1Protocol)
+            Disabled = ($smb1Feature.State -ne "Enabled" -and -not $smb1ServerConfig.EnableSMB1Protocol)
+            Details = "Feature: $(if($smb1Feature.State -ne 'Enabled'){'Disabled'}else{'Enabled'}), " +
+                      "Server config: $(if(-not $smb1ServerConfig.EnableSMB1Protocol){'Disabled'}else{'Enabled'})"
+        }
+        
+        Log "SMB1: $($status.SMB1.Details)" ($status.SMB1.Disabled ? "SUCCESS" : "WARN")
+    } catch {
+        $status.SMB1 = @{ Disabled = $false; Details = "Error checking SMB1: $_" }
+        Log "SMB1: $($status.SMB1.Details)" "ERROR"
+    }
+    
+    # 8. TLS Configuration
+    try {
+        $sch = 'HKLM:\SYSTEM\CurrentControlSet\Control\SecurityProviders\SCHANNEL\Protocols'
+        $tls10Enabled = (Get-ItemProperty -Path "$sch\TLS 1.0\Server" -Name "Enabled" -ErrorAction SilentlyContinue).Enabled -ne 0
+        $tls11Enabled = (Get-ItemProperty -Path "$sch\TLS 1.1\Server" -Name "Enabled" -ErrorAction SilentlyContinue).Enabled -ne 0
+        $tls12Enabled = (Get-ItemProperty -Path "$sch\TLS 1.2\Server" -Name "Enabled" -ErrorAction SilentlyContinue).Enabled -ne 0
+        
+        $status.TLS = @{
+            TLS10Disabled = -not $tls10Enabled
+            TLS11Disabled = -not $tls11Enabled
+            TLS12Enabled = $tls12Enabled
+            Secure = (-not $tls10Enabled) -and (-not $tls11Enabled) -and $tls12Enabled
+            Details = "TLS 1.0: $(if($tls10Enabled){'Enabled'}else{'Disabled'}), " +
+                      "TLS 1.1: $(if($tls11Enabled){'Enabled'}else{'Disabled'}), " +
+                      "TLS 1.2: $(if($tls12Enabled){'Enabled'}else{'Disabled'})"
+        }
+        
+        Log "TLS: $($status.TLS.Details)" ($status.TLS.Secure ? "SUCCESS" : "WARN")
+    } catch {
+        $status.TLS = @{ Secure = $false; Details = "Error checking TLS configuration: $_" }
+        Log "TLS: $($status.TLS.Details)" "ERROR"
+    }
+    
+    # 9. AnyDesk Firewall Rule
     try {
         $fw = Get-NetFirewallRule -DisplayName "Hardening - AnyDesk TCP 7070" -ErrorAction SilentlyContinue
-        if ($fw) {
-            Log "AnyDesk firewall rule exists" "SUCCESS"
+        $status.AnyDesk = @{
+            RuleExists = $null -ne $fw
+            Details = "Firewall rule: $(if($null -ne $fw){'Exists'}else{'Not found'})"
         }
-        else {
-            Log "AnyDesk firewall rule missing" "WARN"
-        }
+        
+        Log "AnyDesk: $($status.AnyDesk.Details)" ($status.AnyDesk.RuleExists ? "SUCCESS" : "INFO")
+    } catch {
+        $status.AnyDesk = @{ RuleExists = $false; Details = "Error checking AnyDesk firewall rule: $_" }
+        Log "AnyDesk: $($status.AnyDesk.Details)" "ERROR"
     }
-    catch {
-        $errMsg = $_.Exception.Message
-        Log "Could not verify firewall rules: $errMsg" "WARN"
-    }
+    
+    # Final Summary
+    $totalChecks = 9
+    $passedChecks = @($status.BitLocker.Enabled, 
+                      $status.TPM.Enabled, 
+                      $status.DeviceGuard.VBSEnabled, 
+                      $status.CredGuard.Enabled,
+                      $status.Defender.RTEnabled,
+                      $status.ExecutionPolicy.Restricted,
+                      $status.SMB1.Disabled,
+                      $status.TLS.Secure,
+                      $status.AnyDesk.RuleExists) | Where-Object { $_ -eq $true } | Measure-Object | Select-Object -ExpandProperty Count
+    
+    $summaryText = @"
+╔════════════════════════════════════════════════════════════════╗
+║               HARDENING STATUS SUMMARY                         ║
+║                                                                ║
+║  Checks passed: $passedChecks of $totalChecks                            
+║  Status: $(if($passedChecks -eq $totalChecks){'ALL CHECKS PASSED'}elseif($passedChecks -ge 6){'MOST CHECKS PASSED'}else{'MULTIPLE CHECKS FAILED'})
+║                                                                ║
+╚════════════════════════════════════════════════════════════════╝
+"@
+    
+    Write-Host $summaryText -ForegroundColor $(if($passedChecks -eq $totalChecks){'Green'}elseif($passedChecks -ge 6){'Yellow'}else{'Red'})
+    Log "Status check complete - $passedChecks of $totalChecks checks passed" "INFO"
+    
+    return $status
 }
 
 # -- Main hardening section ---------------------------------------------------
 try {
     Log "Starting Windows 11 Pro hardening" "INFO"
     Log "PowerShell version: $($PSVersionTable.PSVersion.ToString())" "INFO"
-    Log "Transcript: $transcriptFile" "INFO"
+    
+    # Create logs in current directory
+    $logDir = (Get-Location).Path
+    Log "Saving logs to current directory: $logDir" "INFO"
+    
+    $timestamp = Get-Date -Format "yyyyMMdd-HHmmss"
+    $logFile = Join-Path $logDir "HardeningLog-$timestamp.txt"
+    $transcriptFile = Join-Path $logDir "Transcript-$timestamp.txt"
+    
+    # Start transcript
+    Start-Transcript -Path $transcriptFile -Force | Out-Null
+    
     Log "Log file: $logFile" "INFO"
-
-    # Create recovery key directory
-    if (-not (Test-Path $recoveryPath)) {
-        New-Item $recoveryPath -ItemType Directory -Force | Out-Null
-        Log "Created BitLocker recovery key directory" "SUCCESS"
+    Log "Transcript: $transcriptFile" "INFO"
+    
+    Write-Host @"
+╔════════════════════════════════════════════════════════════════╗
+║                 LOGS LOCATION                                  ║
+║                                                                ║
+║  Console Log: $logFile                                         
+║  Transcript: $transcriptFile                                   
+║                                                                ║
+╚════════════════════════════════════════════════════════════════╝
+"@ -ForegroundColor Magenta
+    
+    # Check system status before hardening
+    $beforeStatus = CheckHardeningStatus -phase "BEFORE"
+    
+    # Ask user if they want to continue
+    $continue = $true
+    $response = Read-Host "Do you want to proceed with hardening? (Y/N)"
+    if ($response -ne "Y" -and $response -ne "y") {
+        Log "User chose not to proceed with hardening" "INFO"
+        $continue = $false
     }
+    
+    if ($continue) {
+        # Create recovery key directory
+        if (-not (Test-Path $recoveryPath)) {
+            New-Item $recoveryPath -ItemType Directory -Force | Out-Null
+            Log "Created BitLocker recovery key directory" "SUCCESS"
+        }
 
     # -- Download and verify files --
     $skip = $false
@@ -534,8 +685,9 @@ try {
         Log "Error checking BitLocker status: $errMsg" "ERROR"
     }
 
-    # -- Verification --
-    VerifyHardening
+    # -- Final Status Check --
+    Log "Hardening complete - checking final system status" "INFO"
+    $afterStatus = CheckHardeningStatus -phase "AFTER"
 
     # -- Completion --
     $bannerText = @"
@@ -590,4 +742,8 @@ catch {
 finally {
     Stop-Transcript
     Log "Script execution completed" "INFO"
+    
+    # Add a pause to prevent the window from closing
+    Write-Host "`nPress Enter to exit..." -ForegroundColor Cyan
+    Read-Host
 }
