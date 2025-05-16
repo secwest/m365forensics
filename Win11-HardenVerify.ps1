@@ -1,39 +1,34 @@
 <# =====================================================================
- Hardening-Win11Pro.ps1                                  (2025-05-22 robust)
+ Hardening-Win11Pro.ps1                                      (2025-05-22 robust b)
  ASCII-only · streaming-safe · single-console relaunch · pwsh x64 enforced
 ────────────────────────────────────────────────────────────────────────────
  COMPLETE CONTENTS
    • Self-upgrade to 64-bit PowerShell 7 (stdin-safe relaunch)
-   • Continuous transcript → C:\HardeningLogs\Win11-Harden_<stamp>.log
+   • Continuous transcript  →  C:\HardeningLogs\Win11-Harden_<timestamp>.log
    • Imports Microsoft Security Baseline (Win 11 23H2 FINAL) via LGPO
-   • Adds extra hardening Microsoft only “recommends”:
-       – BitLocker TPM + PIN, XTS-AES-256, used-space-only
+   • Adds extra hardening Microsoft only *recommends*:
+       – BitLocker TPM + PIN (XTS-AES-256, used-space-only)
        – VBS / HVCI / Credential Guard
        – Disable LM / NTLMv1, SMB 1, TLS 1.0 & 1.1 (server + client)
        – Defender critical-five ASR + CFA + Network Protection + PUA
-       – Office macro lockdown, unsigned add-in block
-       – PowerShell AllSigned + script-block, module, transcription logs
+       – Office macro lockdown & unsigned-add-in block
+       – PowerShell AllSigned + script-block, module, transcript logging
        – Remove legacy optional features
        – Minimal advanced audit policy
-       – **AnyDesk** direct-connect firewall rule (TCP+UDP 7070 default)
-   • Robust SCT download: TLS 1.2 enforced, SHA-256 verified,
-     fall-back to `tar.exe` if `Expand-Archive` fails.
-   • Winget runs with `--disable-interactivity` → no Store prompts.
-   • Trap writes any thrown error to the transcript and console.
+       – **AnyDesk** direct-connect rule (TCP+UDP 7070 default)
+   • Robust SCT download: TLS 1.2, SHA-256 check, `tar.exe` fallback
+   • Winget runs with `--disable-interactivity`
+   • Global `trap` logs any un-handled error before exit.
 
  OPERATOR CHECKLIST
    1️⃣  Run from an **elevated** console.  
-   2️⃣  Enter a numeric BitLocker PIN (6-20 digits).  
-   3️⃣  Copy *C:\RecoveryKeys* to offline storage afterwards.  
-   4️⃣  **Reboot twice** (VBS / Cred Guard finish).  
+   2️⃣  Enter a numeric BitLocker PIN (6-20).  
+   3️⃣  Copy *C:\RecoveryKeys* to offline storage.  
+   4️⃣  **Reboot twice** to finish VBS / Cred Guard.  
    5️⃣  Verify with:  
-         Get-BitLockerVolume  
-         Get-Tpm  
-         msinfo32   → Secure Boot : On  
-         Get-CimInstance Win32_DeviceGuard  
-         Get-MpComputerStatus  
-         auditpol /get /category:*  
-         Test-NetConnection localhost -Port 7070
+         Get-BitLockerVolume ; Get-Tpm ; msinfo32 (Secure Boot = On)  
+         Get-CimInstance Win32_DeviceGuard ; Get-MpComputerStatus  
+         auditpol /get /category:* ; Test-NetConnection localhost -Port 7070
 
  HOW TO RUN
    # keep a file
@@ -41,12 +36,12 @@
      https://raw.githubusercontent.com/secwest/m365forensics/main/Hardening-Win11Pro.ps1
    powershell.exe -ExecutionPolicy Bypass -File .\Hardening-Win11Pro.ps1
 
-   # stream (leaves no script on disk)
+   # stream (no script left on disk)
    Set-ExecutionPolicy Bypass -Scope Process -Force
    curl.exe -L https://raw.githubusercontent.com/secwest/m365forensics/main/Hardening-Win11Pro.ps1 |
      powershell.exe -ExecutionPolicy Bypass -
 
- MIT-0 • Author : Dragos Ruiu
+ MIT-0 • Author : Dragos Ruiu
 ========================================================================= #>
 
 # ───────── helper utilities ─────────────────────────────────────────────
@@ -67,12 +62,12 @@ function Set-Reg {
     Set-ItemProperty -Path $Path -Name $Name -Value $Value -Type $Type -Force
 }
 
-# ───────── enforce pwsh 7 x64 (stdin-relaunch) ──────────────────────────
+# ───────── ensure pwsh 7 x64 (stdin-safe relaunch) ──────────────────────
 function Ensure-Pwsh7 {
     if ($PSVersionTable.PSVersion.Major -ge 7 -and !$env:PROCESSOR_ARCHITEW6432) { return }
     $pwsh="$([Environment]::GetEnvironmentVariable('ProgramW6432'))\PowerShell\7\pwsh.exe"
     if (-not (Test-Path $pwsh)) {
-        Log-Info 'Installing 64-bit PowerShell 7 (silent)'
+        Log-Info 'Installing 64-bit PowerShell 7 …'
         winget install Microsoft.PowerShell --architecture x64 `
               --accept-source-agreements --accept-package-agreements `
               --disable-interactivity --silent
@@ -95,7 +90,7 @@ trap { Log-Fail $_ ; Stop-Transcript | Out-Null ; exit 1 }
 Require-Admin
 Ensure-Pwsh7
 
-# start transcript
+# transcript
 $logDir='C:\HardeningLogs'
 if (-not (Test-Path $logDir)) { New-Item $logDir -ItemType Directory | Out-Null }
 $logFile = Join-Path $logDir ("Win11-Harden_{0:yyyyMMdd_HHmmss}.log" -f (Get-Date))
@@ -112,13 +107,18 @@ if (-not (Test-Path $sctZip) -or ((Get-FileHash $sctZip -Algorithm SHA256).Hash 
     Invoke-WebRequest -Uri https://aka.ms/SCTdownload -OutFile $sctZip -UseBasicParsing
 }
 if (Test-Path $sctDir) { Remove-Item $sctDir -Recurse -Force }
-try { Expand-Archive $sctZip -DestinationPath $sctDir -Force }
-catch {
-    Log-Warn "Expand-Archive failed, falling back to tar.exe …"
-    tar.exe -xf $sctZip -C $sctDir
+try {
+    Expand-Archive -Path $sctZip -DestinationPath $sctDir -Force -ErrorAction Stop
+} catch {
+    Log-Warn "Expand-Archive failed: $_  – using tar.exe fallback"
+    try { tar.exe -xf $sctZip -C $sctDir } catch {
+        Log-Warn "tar.exe also failed – baseline import skipped."; $sctDir=$null
+    }
 }
-$baseline = Get-ChildItem "$sctDir\Windows 11*" -Directory -ErrorAction SilentlyContinue |
-            Where-Object Name -Match '23H2' | Select-Object -First 1
+$baseline = if ($sctDir) {
+    Get-ChildItem "$sctDir\Windows 11*" -Directory -ErrorAction SilentlyContinue |
+      Where-Object Name -Match '23H2' | Select-Object -First 1
+}
 if ($baseline) {
     Log-Info "Applying Microsoft baseline ($($baseline.Name))"
     & "$sctDir\LGPO\LGPO.exe" /g "$($baseline.FullName)\GPOs\MSFT-Win11-23H2-FINAL"
@@ -133,13 +133,13 @@ Log-Info 'Installing cumulative updates …'
 Get-WindowsUpdate -AcceptAll -Install -AutoReboot
 Update-MpSignature -UpdateSource MicrosoftUpdateServer
 
-# 2 ▸ BitLocker
+# 2 ▸ BitLocker (TPM + PIN)
 $pin = Read-Host -AsSecureString 'Numeric BitLocker PIN (6–20 digits)'
 Enable-BitLocker -MountPoint C: -EncryptionMethod XtsAes256 -UsedSpaceOnly `
                  -TpmAndPinProtector -Pin $pin -RecoveryKeyPath C:\RecoveryKeys
 Log-Warn 'BitLocker keys saved in C:\RecoveryKeys — move offline.'
 
-# 3 ▸ LM/SMB/TLS
+# 3 ▸ LM / SMB / TLS
 Set-Reg 'HKLM:\SYSTEM\CurrentControlSet\Control\Lsa' LmCompatibilityLevel 5
 Disable-WindowsOptionalFeature -Online -FeatureName SMB1Protocol -NoRestart
 Set-SmbServerConfiguration -EnableSMB1Protocol $false -Force
@@ -190,15 +190,15 @@ foreach ($f in $features){
     catch {}
 }
 
-# 9 ▸ Audit policy (key subcategories)
+# 9 ▸ Minimal advanced audit policy
 $sub='Security System Extension','Logon','Removable Storage','Credential Validation','Audit Policy Change'
 foreach ($s in $sub){ auditpol /set /subcategory:"$s" /success:enable /failure:enable | Out-Null }
 
-# 10 ▸ AnyDesk firewall rule
+#10 ▸ AnyDesk direct-connect firewall rule
 $defaultPort=7070
 $custom=Read-Host "AnyDesk direct-connect port [$defaultPort]"
-$port=if($custom -match '^\d+$'){[int]$custom}else{$defaultPort}
-if(-not(Get-NetFirewallRule -DisplayName "AnyDesk Direct TCP $port" -ErrorAction SilentlyContinue)){
+$port  = ($custom -match '^\d+$') ? [int]$custom : $defaultPort
+if (-not (Get-NetFirewallRule -DisplayName "AnyDesk Direct TCP $port" -ErrorAction SilentlyContinue)) {
     Log-Info "Adding inbound rules for AnyDesk port $port"
     New-NetFirewallRule -DisplayName "AnyDesk Direct TCP $port" -Direction Inbound `
         -Action Allow -Protocol TCP -LocalPort $port -Profile Any | Out-Null
