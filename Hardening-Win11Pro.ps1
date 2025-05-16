@@ -1013,13 +1013,9 @@ try {
             'MediaPlayback',                    # Legacy media playback
             'WindowsMediaPlayer',               # Windows Media Player
             'Microsoft-Windows-Subsystem-Linux', # WSL1 (less secure than WSL2)
-            'NetFx3',                           # .NET Framework 3.5
-            'Microsoft-Hyper-V-All',            # Hyper-V if not needed
-            'Microsoft-Hyper-V',                # Hyper-V core
             'MSRDC-Infrastructure',             # Remote Differential Compression
             'SearchEngine-Client-Package',      # Search indexing components
             'WCF-Services45',                   # WCF Services
-            'Windows-Defender-Default-Definitions', # Default definitions (will be updated anyway)
             'WMIC'                              # Legacy WMI command-line
         )
         
