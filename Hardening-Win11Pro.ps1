@@ -1,5 +1,5 @@
 ###############################################################################
-# Windows 11 Pro Hardening Script  (v1.2.0 | 2025-05-24)
+# Windows 11 Pro Hardening Script  (v3.8.0 | 2025-05-15)
 # Self-elevating · PowerShell 5.1 & 7.x compatible · Enhanced reporting
 ###############################################################################
 #
