@@ -103,7 +103,47 @@ $logDir = $null  # Will be set later
 $logFile = $null # Will be set later
 $transcriptFile = $null # Will be set later
 
-# -- Helper functions ---------------------------------------------------------
+    # -- Helper functions ---------------------------------------------------------
+    function CheckDeviceGuard {
+        # More robust Device Guard checking
+        try {
+            # Try the standard CIM approach first
+            $dg = Get-CimInstance Win32_DeviceGuard -ErrorAction Stop
+            return $dg
+        } catch {
+            # If that fails, try registry method
+            try {
+                $vbsStatus = "Unknown"
+                $hvciStatus = "Unknown"
+                
+                # Check registry for VBS status
+                $vbsEnabled = Get-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Control\DeviceGuard" -Name "EnableVirtualizationBasedSecurity" -ErrorAction SilentlyContinue
+                if ($null -ne $vbsEnabled) {
+                    $vbsStatus = if ($vbsEnabled.EnableVirtualizationBasedSecurity -eq 1) { "Enabled" } else { "Disabled" }
+                }
+                
+                # Check registry for HVCI status
+                $hvciEnabled = Get-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Control\DeviceGuard\Scenarios\HypervisorEnforcedCodeIntegrity" -Name "Enabled" -ErrorAction SilentlyContinue
+                if ($null -ne $hvciEnabled) {
+                    $hvciStatus = if ($hvciEnabled.Enabled -eq 1) { "Enabled" } else { "Disabled" }
+                }
+                
+                # Create a custom object with the same properties
+                $customDG = [PSCustomObject]@{
+                    VirtualizationBasedSecurityStatus = if ($vbsStatus -eq "Enabled") { 1 } else { 0 }
+                    HypervisorEnforcedCodeIntegrityStatus = if ($hvciStatus -eq "Enabled") { 1 } else { 0 }
+                    VirtualizationBasedSecurityStatusDescription = $vbsStatus
+                    HypervisorEnforcedCodeIntegrityStatusDescription = $hvciStatus
+                }
+                
+                return $customDG
+            } catch {
+                $errMsg = $_.Exception.Message
+                Log "Error checking Device Guard via registry: $errMsg" "ERROR"
+                throw
+            }
+        }
+    }
 function Log {
     param($message, $type = "INFO")
     
@@ -264,7 +304,8 @@ function CheckHardeningStatus {
     
     # 3. DeviceGuard/VBS Status
     try {
-        $dg = Get-CimInstance Win32_DeviceGuard -ErrorAction Stop
+        # Use the more robust helper function
+        $dg = CheckDeviceGuard
         $vbsStatus = $dg.VirtualizationBasedSecurityStatus
         $hvciStatus = $dg.HypervisorEnforcedCodeIntegrityStatus
         
@@ -886,8 +927,14 @@ try {
         # -- AllSigned + logging --
         Log "Configuring PowerShell execution policy and logging..." "INFO"
         try {
-            Set-ExecutionPolicy AllSigned -Scope LocalMachine -Force -ErrorAction Stop
-            Log "PowerShell execution policy set to AllSigned" "SUCCESS"
+            # Check if it's already set to AllSigned
+            $currentPolicy = Get-ExecutionPolicy -Scope LocalMachine
+            if ($currentPolicy -ne "AllSigned") {
+                Set-ExecutionPolicy AllSigned -Scope LocalMachine -Force -ErrorAction Stop
+                Log "PowerShell execution policy set to AllSigned" "SUCCESS"
+            } else {
+                Log "PowerShell execution policy already set to AllSigned" "SUCCESS"
+            }
         } catch {
             $errMsg = $_.Exception.Message
             Log "Failed to set PowerShell execution policy: $errMsg" "WARN"
@@ -939,24 +986,46 @@ try {
 
         # -- Remove obsolete optional features --
         Log "Removing obsolete Windows optional features..." "INFO"
-        $optionalFeatures = @(
+        
+        # Get available optional features first
+        Log "Checking available Windows optional features..." "INFO"
+        $availableFeatures = Get-WindowsOptionalFeature -Online | Select-Object -ExpandProperty FeatureName
+        Log "Found $(($availableFeatures | Measure-Object).Count) available features" "INFO"
+        
+        # Candidates for removal, we'll check if they exist first
+        $featureCandidates = @(
             'MicrosoftWindowsPowerShellV2Root',
+            'MicrosoftWindowsPowerShellV2',
             'SimpleTCPIPServices',
             'TelnetClient',
             'TFTPClient',
-            'Printing-FAXServices-Features',      # Fax services
-            'SMB1Protocol-Client',                # SMB1 client
-            'SMB1Protocol-Server',                # SMB1 server
-            'SMB1Protocol-Deprecation',           # SMB1 deprecation
-            'SNMP',                               # Simple Network Management Protocol
-            'LegacyComponents',                   # Legacy components
-            'DirectPlay',                         # DirectPlay legacy gaming component
-            'Internet-Explorer-Optional-amd64',   # Internet Explorer
-            'WorkFolders-Client',                 # Work Folders client
-            'MediaPlayback',                      # Legacy media playback
-            'WindowsMediaPlayer',                 # Windows Media Player
-            'XPS-Viewer'                          # XPS viewer
+            'Printing-FaxServices-Features',    # Note corrected name: FaxServices not FAXServices
+            'Printing-XPSServices-Features',    # XPS Services
+            'SMB1Protocol',                     # Main SMB1 feature
+            'SMB1Protocol-Client',              # SMB1 client
+            'SMB1Protocol-Server',              # SMB1 server
+            'SMB1Protocol-Deprecation',         # SMB1 deprecation
+            'SNMP-Service',                     # Correct SNMP feature name
+            'LegacyComponents',                 # Legacy components
+            'DirectPlay',                       # DirectPlay legacy gaming component
+            'Internet-Explorer-Optional-amd64', # Try IE feature
+            'WorkFolders-Client',               # Work Folders client
+            'MediaPlayback',                    # Legacy media playback
+            'WindowsMediaPlayer',               # Windows Media Player
+            'Microsoft-Windows-Subsystem-Linux', # WSL1 (less secure than WSL2)
+            'NetFx3',                           # .NET Framework 3.5
+            'Microsoft-Hyper-V-All',            # Hyper-V if not needed
+            'Microsoft-Hyper-V',                # Hyper-V core
+            'MSRDC-Infrastructure',             # Remote Differential Compression
+            'SearchEngine-Client-Package',      # Search indexing components
+            'WCF-Services45',                   # WCF Services
+            'Windows-Defender-Default-Definitions', # Default definitions (will be updated anyway)
+            'WMIC'                              # Legacy WMI command-line
         )
+        
+        # Filter to only features that actually exist on this system
+        $optionalFeatures = $featureCandidates | Where-Object { $availableFeatures -contains $_ }
+        Log "Found $(($optionalFeatures | Measure-Object).Count) removable features" "INFO"
 
         foreach ($feature in $optionalFeatures) {
             try {
