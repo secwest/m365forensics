@@ -1,64 +1,58 @@
 <# =====================================================================
- Hardening-Win11Pro.ps1                                   (2025-05-22  robust+doc)
+ Hardening-Win11Pro.ps1                                  (2025-05-22 robust)
  ASCII-only · streaming-safe · single-console relaunch · pwsh x64 enforced
 ────────────────────────────────────────────────────────────────────────────
- FULL CONTENTS
-   ✔ 64-bit PowerShell 7 self-upgrade (silent, stdin-safe relaunch)
-   ✔ Microsoft Windows 11 23H2 **Security Baseline** import (LGPO)
-   ✔ Extra hardening that baseline only “recommends”:
-        · BitLocker  (TPM + PIN, XTS-AES-256, used-space-only)
-        · VBS / HVCI / Credential Guard
-        · Disable LM / NTLMv1, SMB 1, TLS 1.0 & 1.1  (server + client)
-        · Defender: critical-five ASR + CFA + NetProt + PUA
-        · Office macro lockdown + unsigned add-in block
-        · PowerShell AllSigned + script-block, module, transcription logging
-        · Legacy optional-feature removal
-        · Minimal but high-value advanced audit policy
-        · **AnyDesk** direct-connect firewall rule (TCP & UDP 7070 by default)
-   ✔ Continuous **transcript** → C:\HardeningLogs\Win11-Harden_<timestamp>.log
-   ✔ Robust SCT download: TLS 1.2 enforced, SHA-256 checked, safe re-extract
-   ✔ Winget non-interactive (no Store prompts)
-   ✔ Trap writes last error to transcript & console before exit
+ COMPLETE CONTENTS
+   • Self-upgrade to 64-bit PowerShell 7 (stdin-safe relaunch)
+   • Continuous transcript → C:\HardeningLogs\Win11-Harden_<stamp>.log
+   • Imports Microsoft Security Baseline (Win 11 23H2 FINAL) via LGPO
+   • Adds extra hardening Microsoft only “recommends”:
+       – BitLocker TPM + PIN, XTS-AES-256, used-space-only
+       – VBS / HVCI / Credential Guard
+       – Disable LM / NTLMv1, SMB 1, TLS 1.0 & 1.1 (server + client)
+       – Defender critical-five ASR + CFA + Network Protection + PUA
+       – Office macro lockdown, unsigned add-in block
+       – PowerShell AllSigned + script-block, module, transcription logs
+       – Remove legacy optional features
+       – Minimal advanced audit policy
+       – **AnyDesk** direct-connect firewall rule (TCP+UDP 7070 default)
+   • Robust SCT download: TLS 1.2 enforced, SHA-256 verified,
+     fall-back to `tar.exe` if `Expand-Archive` fails.
+   • Winget runs with `--disable-interactivity` → no Store prompts.
+   • Trap writes any thrown error to the transcript and console.
 
- OPERATOR REMINDERS
-   1️⃣  Run from an **elevated** console (Administrator).  
-   2️⃣  Provide a *numeric* BitLocker PIN (6–20 digits) when prompted.  
-   3️⃣  After completion copy **C:\RecoveryKeys** to offline storage.  
-   4️⃣  **Reboot twice** so VBS / Credential Guard become active.  
-   5️⃣  Archive the transcript in *C:\HardeningLogs*.
-
- VERIFICATION (run after the second reboot)
-   Get-BitLockerVolume
-   Get-Tpm
-   msinfo32    →  Secure Boot : On
-   Get-CimInstance Win32_DeviceGuard
-   Get-MpComputerStatus
-   auditpol /get /category:*
-   Test-NetConnection localhost -Port 7070   # AnyDesk direct open
-   PowerShell logs exist  →  dir C:\PSLogs
+ OPERATOR CHECKLIST
+   1️⃣  Run from an **elevated** console.  
+   2️⃣  Enter a numeric BitLocker PIN (6-20 digits).  
+   3️⃣  Copy *C:\RecoveryKeys* to offline storage afterwards.  
+   4️⃣  **Reboot twice** (VBS / Cred Guard finish).  
+   5️⃣  Verify with:  
+         Get-BitLockerVolume  
+         Get-Tpm  
+         msinfo32   → Secure Boot : On  
+         Get-CimInstance Win32_DeviceGuard  
+         Get-MpComputerStatus  
+         auditpol /get /category:*  
+         Test-NetConnection localhost -Port 7070
 
  HOW TO RUN
- ──────────────────────────────────────────────────────────────────────────
-   # Download & keep a file
+   # keep a file
    curl.exe -L -o Hardening-Win11Pro.ps1 ^
      https://raw.githubusercontent.com/secwest/m365forensics/main/Hardening-Win11Pro.ps1
    powershell.exe -ExecutionPolicy Bypass -File .\Hardening-Win11Pro.ps1
 
-   # Streaming (no file left behind)
+   # stream (leaves no script on disk)
    Set-ExecutionPolicy Bypass -Scope Process -Force
    curl.exe -L https://raw.githubusercontent.com/secwest/m365forensics/main/Hardening-Win11Pro.ps1 |
      powershell.exe -ExecutionPolicy Bypass -
 
-     (Streaming path drops a temp copy in %TEMP%, relaunches under pwsh 7,
-      then deletes that temp file. Only the transcript persists.)
-
- MIT-0  •  Author : Dragos Ruiu
+ MIT-0 • Author : Dragos Ruiu
 ========================================================================= #>
 
 # ───────── helper utilities ─────────────────────────────────────────────
 function Require-Admin {
-    $p = [Security.Principal.WindowsPrincipal] `
-         [Security.Principal.WindowsIdentity]::GetCurrent()
+    $p=[Security.Principal.WindowsPrincipal] `
+       [Security.Principal.WindowsIdentity]::GetCurrent()
     if (-not $p.IsInRole([Security.Principal.WindowsBuiltinRole]::Administrator)) {
         Write-Error 'Run this script from an **elevated** console.' ; exit 1
     }
@@ -68,17 +62,15 @@ function Log-Warn { param($m) ; Write-Host "[!] $m" -Foreground Yellow }
 function Log-Fail { param($m) ; Write-Host "[X] $m" -Foreground Red }
 
 function Set-Reg {
-    param($Path,$Name,$Value,
-          [ValidateSet('DWord','QWord','String','ExpandString')]$Type='DWord')
+    param($Path,$Name,$Value,[ValidateSet('DWord','QWord','String','ExpandString')]$Type='DWord')
     if (-not (Test-Path $Path)) { New-Item $Path -Force | Out-Null }
     Set-ItemProperty -Path $Path -Name $Name -Value $Value -Type $Type -Force
 }
 
-# ───────── enforce pwsh 7 x64 ───────────────────────────────────────────
+# ───────── enforce pwsh 7 x64 (stdin-relaunch) ──────────────────────────
 function Ensure-Pwsh7 {
     if ($PSVersionTable.PSVersion.Major -ge 7 -and !$env:PROCESSOR_ARCHITEW6432) { return }
-
-    $pwsh = "$([Environment]::GetEnvironmentVariable('ProgramW6432'))\PowerShell\7\pwsh.exe"
+    $pwsh="$([Environment]::GetEnvironmentVariable('ProgramW6432'))\PowerShell\7\pwsh.exe"
     if (-not (Test-Path $pwsh)) {
         Log-Info 'Installing 64-bit PowerShell 7 (silent)'
         winget install Microsoft.PowerShell --architecture x64 `
@@ -87,10 +79,9 @@ function Ensure-Pwsh7 {
     }
     if (-not (Test-Path $pwsh)) { Log-Fail 'pwsh.exe x64 not found.' ; exit 1 }
 
-    if ($PSCommandPath) {
-        & $pwsh -NoLogo -NoProfile -ExecutionPolicy Bypass -File $PSCommandPath
-    } else {
-        $tmp = Join-Path $env:TEMP ("Harden_"+[guid]::NewGuid()+'.ps1')
+    if ($PSCommandPath) { & $pwsh -NoLogo -NoProfile -ExecutionPolicy Bypass -File $PSCommandPath }
+    else {
+        $tmp=Join-Path $env:TEMP ("Harden_"+[guid]::NewGuid()+'.ps1')
         [IO.File]::WriteAllText($tmp,$MyInvocation.MyCommand.Definition,[Text.Encoding]::ASCII)
         & $pwsh -NoLogo -NoProfile -ExecutionPolicy Bypass -File $tmp
         Remove-Item $tmp -Force
@@ -104,7 +95,7 @@ trap { Log-Fail $_ ; Stop-Transcript | Out-Null ; exit 1 }
 Require-Admin
 Ensure-Pwsh7
 
-# transcript
+# start transcript
 $logDir='C:\HardeningLogs'
 if (-not (Test-Path $logDir)) { New-Item $logDir -ItemType Directory | Out-Null }
 $logFile = Join-Path $logDir ("Win11-Harden_{0:yyyyMMdd_HHmmss}.log" -f (Get-Date))
@@ -112,31 +103,28 @@ Start-Transcript -LiteralPath $logFile -Force | Out-Null
 Log-Info "Transcript → $logFile"
 Log-Info "pwsh version $($PSVersionTable.PSVersion)"
 
-# 0 ▸ Microsoft baseline (robust download + LGPO)
+# 0 ▸ Microsoft baseline (robust)
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 $sctZip="$env:TEMP\SCT.zip"; $sctDir="$env:TEMP\SCT"
-$hash='282138ED19812CAEF7277F8F53FEC8C8B9BC84778559A7F89A4CBD23D1C6FE04'
-if (-not (Test-Path $sctZip) -or ((Get-FileHash $sctZip -Algorithm SHA256).Hash -ne $hash)) {
+$sha='282138ED19812CAEF7277F8F53FEC8C8B9BC84778559A7F89A4CBD23D1C6FE04'  # SCT 2310.1
+if (-not (Test-Path $sctZip) -or ((Get-FileHash $sctZip -Algorithm SHA256).Hash -ne $sha)) {
     Log-Info 'Downloading Microsoft Security Compliance Toolkit …'
     Invoke-WebRequest -Uri https://aka.ms/SCTdownload -OutFile $sctZip -UseBasicParsing
 }
 if (Test-Path $sctDir) { Remove-Item $sctDir -Recurse -Force }
 try { Expand-Archive $sctZip -DestinationPath $sctDir -Force }
-catch { Log-Warn "Expand-Archive failed: $_" ; $sctDir=$null }
-
-$baseline = if ($sctDir) {
-    Get-ChildItem "$sctDir\Windows 11*" -Directory |
-        Where-Object { $_.Name -match '23H2' } | Select-Object -First 1
+catch {
+    Log-Warn "Expand-Archive failed, falling back to tar.exe …"
+    tar.exe -xf $sctZip -C $sctDir
 }
+$baseline = Get-ChildItem "$sctDir\Windows 11*" -Directory -ErrorAction SilentlyContinue |
+            Where-Object Name -Match '23H2' | Select-Object -First 1
 if ($baseline) {
-    $gpo = Join-Path $baseline.FullName 'GPOs\MSFT-Win11-23H2-FINAL'
     Log-Info "Applying Microsoft baseline ($($baseline.Name))"
-    & "$sctDir\LGPO\LGPO.exe" /g "$gpo"
-} else {
-    Log-Warn 'Baseline folder not found – LGPO step skipped.'
-}
+    & "$sctDir\LGPO\LGPO.exe" /g "$($baseline.FullName)\GPOs\MSFT-Win11-23H2-FINAL"
+} else { Log-Warn 'Baseline folder not found – LGPO step skipped.' }
 
-# 1 ▸ OS & Defender updates
+# 1 ▸ Windows Update + Defender sigs
 if (-not (Get-Module -ListAvailable PSWindowsUpdate)) {
     Install-Module PSWindowsUpdate -Force -Confirm:$false
 }
@@ -146,7 +134,7 @@ Get-WindowsUpdate -AcceptAll -Install -AutoReboot
 Update-MpSignature -UpdateSource MicrosoftUpdateServer
 
 # 2 ▸ BitLocker
-$pin = Read-Host -AsSecureString 'Numeric BitLocker PIN (6-20 digits)'
+$pin = Read-Host -AsSecureString 'Numeric BitLocker PIN (6–20 digits)'
 Enable-BitLocker -MountPoint C: -EncryptionMethod XtsAes256 -UsedSpaceOnly `
                  -TpmAndPinProtector -Pin $pin -RecoveryKeyPath C:\RecoveryKeys
 Log-Warn 'BitLocker keys saved in C:\RecoveryKeys — move offline.'
@@ -163,13 +151,13 @@ $sch='HKLM:\SYSTEM\CurrentControlSet\Control\SecurityProviders\SCHANNEL\Protocol
 Set-Reg "$sch\TLS 1.2\Server" Enabled 1
 Set-Reg "$sch\TLS 1.2\Client" Enabled 1
 
-# 4 ▸ VBS / HVCI / CG
+# 4 ▸ VBS / HVCI / Credential Guard
 bcdedit /set hypervisorlaunchtype Auto | Out-Null
 Set-Reg 'HKLM:\SYSTEM\CurrentControlSet\Control\DeviceGuard' EnableVirtualizationBasedSecurity 1
 Set-Reg 'HKLM:\SYSTEM\CurrentControlSet\Control\DeviceGuard' RequirePlatformSecurityFeatures 3
 Set-Reg 'HKLM:\SYSTEM\CurrentControlSet\Control\Lsa' LsaCfgFlags 1
 
-# 5 ▸ Defender + ASR
+# 5 ▸ Defender baseline + critical 5 ASR
 Set-MpPreference -CloudBlockLevel High -PUAProtection Enabled -DisableRealtimeMonitoring 0 `
                  -ScanScheduleQuickScanTime 5 -ScanAvgCPULoadFactor 20 `
                  -EnableControlledFolderAccess Enabled -EnableNetworkProtection Enabled
@@ -182,11 +170,11 @@ Add-MpPreference -AttackSurfaceReductionRules_Ids $asr `
 # 6 ▸ Office macro lockdown
 $office='HKCU:\Software\Policies\Microsoft\Office\16.0'
 'Excel','Word','PowerPoint' | ForEach-Object{ Set-Reg "$office\$_\Security" VBAWarnings 4 }
-Set-Reg "$office\Common\Security"          BlockMacrosFromInternet 1
-Set-Reg "$office\Common\Security"          RequireAddinSig 1
+Set-Reg "$office\Common\Security" BlockMacrosFromInternet 1
+Set-Reg "$office\Common\Security" RequireAddinSig 1
 Set-Reg "$office\Common\COM Compatibility" DisableBHOWarning 1
 
-# 7 ▸ PowerShell AllSigned + logs
+# 7 ▸ PowerShell AllSigned + logging
 Set-ExecutionPolicy AllSigned -Scope LocalMachine -Force 2>$null
 Set-Reg 'HKLM:\SOFTWARE\Microsoft\PowerShell\3\PowerShellEngine' EnableScriptBlockLogging 1
 Set-Reg 'HKLM:\SOFTWARE\Microsoft\PowerShell\3\PowerShellEngine' EnableModuleLogging 1
@@ -202,15 +190,15 @@ foreach ($f in $features){
     catch {}
 }
 
-# 9 ▸ Audit policy
+# 9 ▸ Audit policy (key subcategories)
 $sub='Security System Extension','Logon','Removable Storage','Credential Validation','Audit Policy Change'
 foreach ($s in $sub){ auditpol /set /subcategory:"$s" /success:enable /failure:enable | Out-Null }
 
 # 10 ▸ AnyDesk firewall rule
 $defaultPort=7070
 $custom=Read-Host "AnyDesk direct-connect port [$defaultPort]"
-$port  = if ($custom -match '^\d+$') { [int]$custom } else { $defaultPort }
-if (-not (Get-NetFirewallRule -DisplayName "AnyDesk Direct TCP $port" -ErrorAction SilentlyContinue)) {
+$port=if($custom -match '^\d+$'){[int]$custom}else{$defaultPort}
+if(-not(Get-NetFirewallRule -DisplayName "AnyDesk Direct TCP $port" -ErrorAction SilentlyContinue)){
     Log-Info "Adding inbound rules for AnyDesk port $port"
     New-NetFirewallRule -DisplayName "AnyDesk Direct TCP $port" -Direction Inbound `
         -Action Allow -Protocol TCP -LocalPort $port -Profile Any | Out-Null
@@ -218,7 +206,6 @@ if (-not (Get-NetFirewallRule -DisplayName "AnyDesk Direct TCP $port" -ErrorActi
         -Action Allow -Protocol UDP -LocalPort $port -Profile Any | Out-Null
 }
 
-# finish
 Log-Warn 'Hardening COMPLETE — reboot twice and secure your recovery keys.'
 Stop-Transcript | Out-Null
 Log-Info "Transcript saved → $logFile"
