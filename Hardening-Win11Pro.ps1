@@ -1,11 +1,66 @@
 ###############################################################################
-# Windows 11 Pro Hardening Script - Self-elevating and PowerShell 7 compatible
-# This script will:
-# 1. Check for administrative privileges
-# 2. Install PowerShell 7 if needed
-# 3. Launch the hardening portion with PowerShell 7
+# Windows 11 Pro Hardening Script  (v1.2.0 | 2025-05-24)
+# Self-elevating · PowerShell 5.1 & 7.x compatible · Enhanced reporting
+###############################################################################
 #
-# USAGE: powershell.exe -ExecutionPolicy Bypass -File .\Windows11Pro-Hardening.ps1
+# DESCRIPTION
+#   Comprehensive hardening script for Windows 11 Pro workstations that implements
+#   Microsoft Security Baseline 23H2 plus additional security controls. Suitable
+#   for enterprise environments and security-focused individual users.
+#
+# OVERVIEW
+#   • Auto-elevates to administrator and uses PowerShell 7 if available
+#   • Logs to current directory with detailed execution transcript
+#   • Downloads & verifies:
+#        LGPO.zip      SHA-256 CB7159D134A0A1E7B1ED2ADA9A3CE8CE8F4DE391D14403D55438AF824247CC55
+#        Win11Baseline SHA-256 2E3A61D0245C16BEA51A9EE78CBF0793C88046901CECC0039DB0DC84FAE7D7B7
+#   • Runs comprehensive before/after security assessment
+#   • Implements Microsoft Security Baseline 23H2 via LGPO
+#   • Additional hardening:
+#        BitLocker TPM+PIN with XtsAes256 encryption
+#        VBS / HVCI / Credential Guard
+#        Disable LM / NTLMv1 · SMB1 · TLS 1.0/1.1 (enables TLS 1.2)
+#        Defender cloud=High · PUA · CFA · NetProt · 5 critical ASR rules
+#        Office macro lockdown · unsigned add-ins blocked
+#        PowerShell AllSigned + ScriptBlock / Module / Transcription logging
+#        Removal of legacy/insecure Windows features
+#        Minimal audit policy (5 key subcategories)
+#        AnyDesk firewall rules (TCP+UDP 7070)
+#
+# OPERATOR CHECKLIST
+#   1️⃣  Run in an **elevated** console (or let it self-elevate)
+#        powershell.exe -ExecutionPolicy Bypass -File .\Windows11Pro-Hardening.ps1
+#
+#   2️⃣  Review initial security assessment and choose whether to proceed
+#
+#   3️⃣  Supply numeric BitLocker PIN when prompted (if not already enabled)
+#
+#   4️⃣  Verify status after hardening completes
+#
+#   5️⃣  Copy C:\RecoveryKeys to offline media
+#
+#   6️⃣  **Reboot twice** (VBS/Cred Guard finalizes on 2nd boot)
+#
+# VERIFICATION COMMANDS
+#   After rebooting, verify security with these commands:
+#     Get-BitLockerVolume
+#     Get-Tpm
+#     msinfo32 → System Summary → Secure Boot State : On
+#     msinfo32 → System Summary → Virtualization-based security : Running
+#     Get-CimInstance Win32_DeviceGuard
+#     Get-MpComputerStatus
+#     auditpol /get /category:*
+#
+# LOGS & REPORTING
+#   The script saves detailed logs in the current directory:
+#   • HardeningLog-[DATE].txt - Console output with status of each operation
+#   • Transcript-[DATE].txt - Full PowerShell transcript for troubleshooting
+#   • PowerShell transcription is also enabled at C:\PowerShellTranscripts
+#
+# AUTHOR
+#   Original script by SecWest, M365Forensics
+#   Enhanced with improved error handling and compatibility
+#
 ###############################################################################
 
 param()
@@ -1013,9 +1068,13 @@ try {
             'MediaPlayback',                    # Legacy media playback
             'WindowsMediaPlayer',               # Windows Media Player
             'Microsoft-Windows-Subsystem-Linux', # WSL1 (less secure than WSL2)
+            'NetFx3',                           # .NET Framework 3.5
+            'Microsoft-Hyper-V-All',            # Hyper-V if not needed
+            'Microsoft-Hyper-V',                # Hyper-V core
             'MSRDC-Infrastructure',             # Remote Differential Compression
             'SearchEngine-Client-Package',      # Search indexing components
             'WCF-Services45',                   # WCF Services
+            'Windows-Defender-Default-Definitions', # Default definitions (will be updated anyway)
             'WMIC'                              # Legacy WMI command-line
         )
         
