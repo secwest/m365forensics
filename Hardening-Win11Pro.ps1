@@ -358,15 +358,24 @@ foreach ($d in @(
     Log 'SUCCESS' "$($d.n) downloaded and verified"
 }
 
+# Create both extraction directories if needed
+if (-not (Test-Path $ExtractDir)) {
+    New-Item $ExtractDir -ItemType Directory -Force | Out-Null
+}
+
+$LgpoExtractDir = "$env:TEMP\LGPO_Extract"
+if (-not (Test-Path $LgpoExtractDir)) {
+    New-Item $LgpoExtractDir -ItemType Directory -Force | Out-Null
+}
+
 if (-not $skip) {
-    if (Test-Path $ExtractDir) {
-        Remove-Item $ExtractDir -Recurse -Force -ErrorAction SilentlyContinue
-    }
-    
+    # Extract files to separate directories to avoid conflicts
     try {
-        Log 'INFO' "Extracting Baseline and LGPO files..."
+        Log 'INFO' "Extracting Baseline to $ExtractDir..."
         Expand-Archive $BaselineZip -DestinationPath $ExtractDir -Force -ErrorAction Stop
-        Expand-Archive $LgpoZip -DestinationPath $ExtractDir -Force -ErrorAction Stop
+        
+        Log 'INFO' "Extracting LGPO to $LgpoExtractDir..."
+        Expand-Archive $LgpoZip -DestinationPath $LgpoExtractDir -Force -ErrorAction Stop
         Log 'SUCCESS' "Files extracted successfully"
     }
     catch { 
@@ -374,7 +383,7 @@ if (-not $skip) {
         Log 'WARN' "PowerShell extraction failed, trying tar.exe fallback: $errMsg"
         try {
             tar.exe -xf $BaselineZip -C $ExtractDir 
-            tar.exe -xf $LgpoZip -C $ExtractDir
+            tar.exe -xf $LgpoZip -C $LgpoExtractDir
             Log 'SUCCESS' "Files extracted using tar.exe"
         }
         catch {
@@ -385,32 +394,76 @@ if (-not $skip) {
     }
     
     if (-not $skip) {
-        $gpo = Get-ChildItem "$ExtractDir\Windows 11*" -Directory -ErrorAction SilentlyContinue | 
-               Where-Object { $_.Name -match '23H2' } |
-               ForEach-Object { Join-Path $_.FullName 'GPOs\MSFT-Win11-23H2-FINAL' } | 
-               Select-Object -First 1
+        # Find LGPO.exe with very flexible search through both directories
+        Log 'INFO' "Searching for LGPO executable..."
+        $lgpoExeOptions = @(
+            # Search in LGPO extraction directory first
+            $(Get-ChildItem -Path $LgpoExtractDir -Recurse -Filter "LGPO.exe" -File -ErrorAction SilentlyContinue),
+            $(Get-ChildItem -Path $LgpoExtractDir -Recurse -Filter "LGPO" -File -ErrorAction SilentlyContinue | Where-Object { $_.Extension -eq "" -or $_.Extension -eq ".exe" }),
+            # If not found, search in baseline extraction directory as fallback
+            $(Get-ChildItem -Path $ExtractDir -Recurse -Filter "LGPO.exe" -File -ErrorAction SilentlyContinue),
+            $(Get-ChildItem -Path $ExtractDir -Recurse -Filter "LGPO" -File -ErrorAction SilentlyContinue | Where-Object { $_.Extension -eq "" -or $_.Extension -eq ".exe" })
+        )
         
-        if ($gpo) { 
-            $lgpoExe = "$ExtractDir\LGPO\LGPO.exe"
-            if (Test-Path $lgpoExe) {
-                Log 'INFO' 'Importing baseline via LGPO.exe...'
+        $lgpoExeFiles = @()
+        foreach ($option in $lgpoExeOptions) {
+            if ($option -and $option.Count -gt 0) {
+                $lgpoExeFiles += $option
+            }
+        }
+        
+        if ($lgpoExeFiles.Count -eq 0) {
+            Log 'FAIL' "No LGPO executable found in extracted files"
+            $skip = $true
+        }
+        else {
+            $lgpoExe = $lgpoExeFiles[0].FullName
+            Log 'SUCCESS' "Found LGPO executable at: $lgpoExe"
+            
+            # Find GPO directory with flexible search
+            Log 'INFO' "Searching for Windows 11 baseline GPO directory..."
+            $gpoOptions = @(
+                # Try most specific search first
+                $(Get-ChildItem -Path $ExtractDir -Recurse -Filter "MSFT-Win11-23H2-FINAL" -Directory -ErrorAction SilentlyContinue),
+                # Somewhat specific search
+                $(Get-ChildItem -Path $ExtractDir -Recurse -Directory -ErrorAction SilentlyContinue | Where-Object { $_.Name -like "MSFT-Win11*" }),
+                # More flexible search
+                $(Get-ChildItem -Path $ExtractDir -Recurse -Directory -ErrorAction SilentlyContinue | Where-Object { $_.Name -like "*Win11*" -and $_.FullName -match "GPOs" }),
+                # Very flexible search
+                $(Get-ChildItem -Path $ExtractDir -Recurse -Directory -ErrorAction SilentlyContinue | Where-Object { $_.FullName -match "GPOs" })
+            )
+            
+            $gpoDirs = @()
+            foreach ($option in $gpoOptions) {
+                if ($option -and $option.Count -gt 0) {
+                    $gpoDirs += $option
+                    break # Use the first successful search strategy
+                }
+            }
+            
+            if ($gpoDirs.Count -eq 0) {
+                Log 'FAIL' "Could not find GPO directory in extracted files"
+                $skip = $true
+            }
+            else {
+                $gpo = $gpoDirs[0].FullName
+                Log 'SUCCESS' "Found GPO directory at: $gpo"
+                
+                Log 'INFO' "Importing baseline via LGPO executable..."
                 try {
-                    $result = & "$lgpoExe" /g $gpo 2>&1
-                    Log 'SUCCESS' 'Security baseline imported successfully'
+                    Log 'INFO' "Running command: & '$lgpoExe' /g '$gpo'"
+                    $result = & "$lgpoExe" /g "$gpo" 2>&1
+                    Log 'SUCCESS' "Security baseline imported successfully"
                 }
                 catch {
                     $errMsg = $_.Exception.Message
-                    Log 'FAIL' "LGPO.exe failed: $errMsg"
+                    Log 'FAIL' "LGPO execution failed: $errMsg"
+                    Log 'INFO' "Command attempted: & '$lgpoExe' /g '$gpo'"
                 }
             }
-            else {
-                Log 'FAIL' "LGPO.exe not found at $lgpoExe"
-            }
-        }
-        else {
-            Log 'FAIL' "Could not find GPO directory in extracted files"
         }
     }
+}
 }
 
 # 1 ▸ Windows Update + Defender sigs
