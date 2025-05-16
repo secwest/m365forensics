@@ -101,19 +101,66 @@ $ExtractDir  = "$env:TEMP\Win11Baseline"
 $recoveryPath = "C:\RecoveryKeys"
 
 # -- tiny helpers -------------------------------------------------------------
+# Global log file path
+$global:logFilePath = $null
+
+function Initialize-Logging {
+    # Create logs directory if it doesn't exist
+    $logDir = 'C:\HardeningLogs'
+    if (-not (Test-Path $logDir)) {
+        New-Item $logDir -ItemType Directory -Force | Out-Null
+    }
+    
+    # Create console log file path
+    $timestamp = Get-Date -Format "yyyyMMdd-HHmmss"
+    $global:logFilePath = Join-Path $logDir "HardeningConsoleLog-$timestamp.txt"
+    
+    # Create log header
+    $header = @"
+============================================================
+WINDOWS 11 PRO HARDENING SCRIPT LOG
+Date/Time: $(Get-Date)
+PowerShell Version: $($PSVersionTable.PSVersion)
+Computer Name: $env:COMPUTERNAME
+User: $env:USERNAME
+============================================================
+
+"@
+    
+    # Write header to log file
+    $header | Out-File -FilePath $global:logFilePath -Encoding utf8 -Force
+    
+    # Return transcript path for use by Start-Transcript
+    return (Join-Path $logDir "HardeningTranscript-$timestamp.txt")
+}
+
 function Log {
     param($t, $m)
+    
+    # Format and color for console output
+    $timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
+    $consoleMsg = "[$timestamp] "
+    
     if ($t -eq 'INFO') {
-        Write-Host "[*] $m"
+        $consoleMsg += "[*] $m"
+        Write-Host $consoleMsg
     }
     elseif ($t -eq 'WARN') {
-        Write-Host "[!] $m" -ForegroundColor Yellow
+        $consoleMsg += "[!] $m"
+        Write-Host $consoleMsg -ForegroundColor Yellow
     }
     elseif ($t -eq 'FAIL') {
-        Write-Host "[X] $m" -ForegroundColor Red
+        $consoleMsg += "[X] $m"
+        Write-Host $consoleMsg -ForegroundColor Red
     }
     elseif ($t -eq 'SUCCESS') {
-        Write-Host "[+] $m" -ForegroundColor Green
+        $consoleMsg += "[+] $m"
+        Write-Host $consoleMsg -ForegroundColor Green
+    }
+    
+    # Log to file (without color codes)
+    if ($global:logFilePath) {
+        $consoleMsg | Out-File -FilePath $global:logFilePath -Append -Encoding utf8
     }
 }
 
@@ -878,11 +925,33 @@ $bannerText = @"
 ║     Get-CimInstance Win32_DeviceGuard                          ║
 ║     Get-MpComputerStatus                                       ║
 ║                                                                ║
-║  Transcript saved: $log                                        ║
+║  Logs saved:                                                   ║
+║     Console Log: $global:logFilePath                           ║
+║     Transcript: $transcriptPath                                ║
 ╚════════════════════════════════════════════════════════════════╝
 "@
 
 Write-Host $bannerText -ForegroundColor Green
 
 Stop-Transcript | Out-Null
-Log 'INFO' "Transcript saved -> $log"
+Log 'INFO' "Script completed successfully at $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')"
+Log 'INFO' "Console log saved -> $global:logFilePath"
+Log 'INFO' "Transcript saved -> $transcriptPath"
+
+# Add summary to log file
+@"
+
+============================================================
+SUMMARY
+============================================================
+- Hardening completed at: $(Get-Date)
+- Console log saved to: $global:logFilePath
+- PowerShell transcript saved to: $transcriptPath
+- BitLocker recovery key location: C:\RecoveryKeys
+
+IMPORTANT: 
+1. Copy BitLocker recovery keys to offline media
+2. Reboot TWICE to fully activate all settings
+3. Run verification commands to confirm settings
+============================================================
+"@ | Out-File -FilePath $global:logFilePath -Append -Encoding utf8
