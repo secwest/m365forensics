@@ -1135,7 +1135,7 @@ try {
                 Log "AnyDesk firewall rules already exist" "INFO"
             }
         } else {
-            Log "AnyDesk not installed" "INFO"
+                Log "AnyDesk not installed" "INFO"
             }
         }
 
