@@ -1135,19 +1135,7 @@ try {
                 Log "AnyDesk firewall rules already exist" "INFO"
             }
         } else {
-            Log "AnyDesk not installed, creating firewall rules anyway for future use" "INFO"
-            # Create rules anyway as specified in original script
-            if (-not (Get-NetFirewallRule -DisplayName 'Hardening - AnyDesk TCP 7070' -ErrorAction SilentlyContinue)) {
-                try {
-                    New-NetFirewallRule -DisplayName 'Hardening - AnyDesk TCP 7070' -Direction Inbound `
-                        -Action Allow -Protocol TCP -LocalPort 7070 -Profile Any -ErrorAction Stop | Out-Null
-                    New-NetFirewallRule -DisplayName 'Hardening - AnyDesk UDP 7070' -Direction Inbound `
-                        -Action Allow -Protocol UDP -LocalPort 7070 -Profile Any -ErrorAction Stop | Out-Null
-                    Log "AnyDesk firewall rules created (for future use)" "SUCCESS"
-                } catch {
-                    $errMsg = $_.Exception.Message
-                    Log "Failed to create AnyDesk firewall rules: $errMsg" "WARN"
-                }
+            Log "AnyDesk not installed" "INFO"
             }
         }
 
