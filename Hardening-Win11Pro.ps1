@@ -1,5 +1,5 @@
 <# =====================================================================
-Hardening-Win11Pro.ps1       ASCII-only, streaming-safe, single-console relaunch
+Hardening-Win11Pro.ps1      ASCII-only • streaming-safe • single-console relaunch
 ---------------------------------------------------------------------------
 Baseline hardening for an *un-managed* Windows 11 Pro 23H2/24H1 workstation.
 
@@ -58,6 +58,7 @@ function Set-RegValue { param($Path,$Name,$Type='DWord',$Value)
     New-ItemProperty -Path $Path -Name $Name -PropertyType $Type -Value $Value -Force | Out-Null
 }
 
+# ----------------------- robust self-upgrade to pwsh 7 ---------------------
 function Ensure-Pwsh7 {
     if ($PSVersionTable.PSVersion.Major -ge 7) { return }
 
@@ -69,18 +70,24 @@ function Ensure-Pwsh7 {
     winget install --id Microsoft.PowerShell --source winget `
                    --accept-source-agreements --accept-package-agreements --silent
 
-    $pwsh = "$env:ProgramFiles\PowerShell\7\pwsh.exe"
-    if (-not (Test-Path $pwsh)) { Log-Fail 'pwsh.exe not found after install.' ; exit 1 }
+    # Resolve both 64-bit and 32-bit install paths
+    $paths = @(
+        "$([Environment]::GetEnvironmentVariable('ProgramW6432'))\PowerShell\7\pwsh.exe",
+        "$env:ProgramFiles\PowerShell\7\pwsh.exe"
+    ) | Where-Object { Test-Path $_ }
+
+    if ($paths.Count -eq 0) { Log-Fail 'pwsh.exe not found after install.' ; exit 1 }
+    $pwsh = $paths[0]
 
     if ($PSCommandPath) {
-        & $pwsh -ExecutionPolicy Bypass -File $PSCommandPath
+        & "$pwsh" -NoLogo -NoProfile -ExecutionPolicy Bypass -File "$PSCommandPath"
     } else {
         $tmp = Join-Path $env:TEMP "HardenWin11_$([guid]::NewGuid()).ps1"
         [IO.File]::WriteAllText($tmp,$MyInvocation.MyCommand.Definition,[Text.Encoding]::ASCII)
-        & $pwsh -ExecutionPolicy Bypass -File $tmp
+        & "$pwsh" -NoLogo -NoProfile -ExecutionPolicy Bypass -File "$tmp"
         Remove-Item -Force $tmp
     }
-    exit   # leave 5.1 host only after pwsh 7 run completes
+    exit   # exit 5.1 only after pwsh 7 run completes
 }
 
 # ------------------------------- MAIN -------------------------------------
@@ -97,7 +104,7 @@ Import-Module PSWindowsUpdate
 Get-WindowsUpdate -AcceptAll -Install -AutoReboot
 Update-MpSignature -UpdateSource MicrosoftUpdateServer
 
-# 2. BitLocker (TPM + PIN)
+# 2. BitLocker (TPM + PIN, XTS-AES-256)
 $pinSecure = Read-Host -AsSecureString 'Enter NUMERIC BitLocker PIN (6-20 digits)'
 $pinPlain  = [Runtime.InteropServices.Marshal]::PtrToStringUni(
                [Runtime.InteropServices.Marshal]::SecureStringToBSTR($pinSecure))
@@ -149,7 +156,7 @@ Set-RegValue "$office\Common\Security"     'BlockMacrosFromInternet' 'DWord' 1
 Set-RegValue "$office\Common\Security"     'RequireAddinSig'         'DWord' 1
 Set-RegValue "$office\Common\COM Compatibility" 'DisableBHOWarning'  'DWord' 1
 
-# 7. PowerShell logging + ExecutionPolicy
+# 7. PowerShell logging + AllSigned
 Log-Info 'Enabling PowerShell advanced logging'
 Set-ExecutionPolicy AllSigned -Scope LocalMachine -Force
 Set-RegValue 'HKLM:\SOFTWARE\Microsoft\PowerShell\3\PowerShellEngine' `
@@ -163,7 +170,7 @@ Set-RegValue 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\PowerShell\Transcription
 if (-not (Test-Path C:\PSLogs)) { New-Item C:\PSLogs -ItemType Directory | Out-Null }
 
 # 8. Remove legacy optional features
-Log-Info 'Removing unused Windows optional features'
+Log-Info 'Removing unused optional features'
 'FaxServicesClientPackage','XPSViewer','PrintFaxAndScan',
 'MicrosoftPaint','WorkFolders-Client',
 'Browsing-tools-Internet-Explorer-Optional-amd64','WebClient' |
