@@ -21,7 +21,7 @@
         before any changes are made.
 
    ➌ Baseline import
-      ▪ Downloads two ZIPs you provided on Google Drive  
+      ▪ Downloads two ZIPs provided on Google Drive  
         • *Windows 11 v23H2 Security Baseline.zip*  
         • *LGPO.zip* (contains LGPO.exe).  
       ▪ Verifies each ZIP:
