@@ -1,43 +1,43 @@
 <# =====================================================================
-Hardening-Win11Pro.ps1         ASCII-only, streaming-safe, self-relaunching
+Hardening-Win11Pro.ps1       ASCII-only, streaming-safe, single-console relaunch
 ---------------------------------------------------------------------------
 Baseline hardening for an *un-managed* Windows 11 Pro 23H2/24H1 workstation.
 
 SELF-UPGRADE FLOW
-    • If launched under Windows PowerShell 5.1:
-        – Installs PowerShell 7 silently via winget
-        – Relaunches itself under pwsh 7
-             · From file  → opens same file
-             · From stdin → writes itself to %TEMP%, launches that, then deletes
+    • If launched under Windows PowerShell 5.1 it
+        – Installs PowerShell 7 silently with winget
+        – Relaunches itself **in the same console** under pwsh 7
+             · From file   → calls the same file
+             · From stdin  → saves itself to %TEMP%, calls that, deletes it
 
 OPERATOR REMINDERS
-    1. Run from an *elevated* console (Administrator).
-    2. **BitLocker recovery keys** land in C:\RecoveryKeys – move them offline.
-    3. Reboot the system *twice* after the script completes to finish VBS / Cred Guard.
-    4. Verify controls with the checklist embedded at the end of this file.
+    1. Run from an **elevated** console (Administrator).
+    2. **BitLocker recovery keys** are saved in *C:\RecoveryKeys* – copy them offline.
+    3. Reboot the system **twice** after the script completes (VBS / Cred Guard).
+    4. Verify controls with the checklist at the bottom of this header.
 
 ────────────────────────────────────────────────────────────────────────────
-GETTING THE SCRIPT
-  # Download, then run (preferred)
+GET THE SCRIPT
+  # Download then execute (preferred)
   curl.exe -L -o Hardening-Win11Pro.ps1 ^
     https://raw.githubusercontent.com/secwest/m365forensics/main/Hardening-Win11Pro.ps1
   powershell.exe -ExecutionPolicy Bypass -File .\Hardening-Win11Pro.ps1
 
-  # Pipe straight to PowerShell (leaves no file, auto-relaunches)
+  # Stream (no file kept, auto-relaunch after pwsh 7 install)
   Set-ExecutionPolicy Bypass -Scope Process -Force
   curl.exe -L https://raw.githubusercontent.com/secwest/m365forensics/main/Hardening-Win11Pro.ps1 |
     powershell.exe -ExecutionPolicy Bypass -
 ────────────────────────────────────────────────────────────────────────────
-VERIFICATION (run after two reboots)
+VERIFY AFTER TWO REBOOTS
   Get-BitLockerVolume
   Get-Tpm
-  msinfo32  (check Secure Boot)
+  msinfo32   # Secure Boot state: On
   Get-CimInstance Win32_DeviceGuard
   Get-MpComputerStatus
   auditpol /get /category:*
   Get-WinEvent -LogName "Microsoft-Windows-PowerShell/Operational" -Max 5
 ────────────────────────────────────────────────────────────────────────────
-License : MIT-0   |  Author : Dragos Ruiu   |  Date : 2025-05-15
+License : MIT-0  •  Author : Dragos Ruiu  •  Date : 2025-05-15
 ===================================================================== #>
 
 # ---------------------------- helper utilities ----------------------------
@@ -61,31 +61,26 @@ function Set-RegValue { param($Path,$Name,$Type='DWord',$Value)
 function Ensure-Pwsh7 {
     if ($PSVersionTable.PSVersion.Major -ge 7) { return }
 
-    Log-Info 'PowerShell 7 not detected – installing via winget ...'
+    Log-Info 'PowerShell 7 not detected — installing via winget'
     if (-not (Get-Command winget -ErrorAction SilentlyContinue)) {
-        Log-Fail 'winget missing – install PowerShell 7 manually, then rerun.' ; exit 1
+        Log-Fail 'winget missing; install PowerShell 7 manually then rerun.' ; exit 1
     }
 
-    Start-Process winget -Wait -ArgumentList `
-        'install','--id','Microsoft.PowerShell','--source','winget',`
-        '--accept-source-agreements','--accept-package-agreements','--silent'
+    winget install --id Microsoft.PowerShell --source winget `
+                   --accept-source-agreements --accept-package-agreements --silent
 
     $pwsh = "$env:ProgramFiles\PowerShell\7\pwsh.exe"
-    if (-not (Test-Path $pwsh)) {
-        Log-Fail 'pwsh.exe not found after installation.' ; exit 1
-    }
+    if (-not (Test-Path $pwsh)) { Log-Fail 'pwsh.exe not found after install.' ; exit 1 }
 
-    if ($PSCommandPath) {  # script from file
-        Start-Process -FilePath $pwsh -Verb RunAs -ArgumentList `
-            '-ExecutionPolicy','Bypass','-File',"`"$PSCommandPath`""
-    } else {               # streamed script
+    if ($PSCommandPath) {
+        & $pwsh -ExecutionPolicy Bypass -File $PSCommandPath
+    } else {
         $tmp = Join-Path $env:TEMP "HardenWin11_$([guid]::NewGuid()).ps1"
         [IO.File]::WriteAllText($tmp,$MyInvocation.MyCommand.Definition,[Text.Encoding]::ASCII)
-        $env:HARDEN_TEMP_FILE = $tmp
-        Start-Process -FilePath $pwsh -Verb RunAs -ArgumentList `
-            '-ExecutionPolicy','Bypass','-File',"`"$tmp`""
+        & $pwsh -ExecutionPolicy Bypass -File $tmp
+        Remove-Item -Force $tmp
     }
-    exit
+    exit   # leave 5.1 host only after pwsh 7 run completes
 }
 
 # ------------------------------- MAIN -------------------------------------
@@ -175,18 +170,12 @@ Log-Info 'Removing unused Windows optional features'
   ForEach-Object { Disable-WindowsOptionalFeature -Online -FeatureName $_ -NoRestart -ErrorAction SilentlyContinue }
 
 # 9. Minimal audit policy
-Log-Info 'Setting minimal advanced audit policy'
+Log-Info 'Applying minimal advanced audit policy'
 'auditpol /set /subcategory:"System: Security System Extension" /success:enable /failure:enable',
 'auditpol /set /subcategory:"Logon/Logoff: Logon"              /success:enable /failure:enable',
 'auditpol /set /subcategory:"Object Access: Removable Storage" /success:enable /failure:enable',
 'auditpol /set /subcategory:"Account Logon: Credential Validation" /success:enable /failure:enable',
 'auditpol /set /subcategory:"Policy Change: Audit Policy Change"   /success:enable /failure:enable' |
   ForEach-Object { Invoke-Expression $_ }
-
-# ----- clean up temp file (if script was streamed) -----
-if ($env:HARDEN_TEMP_FILE) {
-    try { Remove-Item -Force $env:HARDEN_TEMP_FILE } catch {}
-    Remove-Item Env:HARDEN_TEMP_FILE
-}
 
 Log-Warn 'Hardening COMPLETE – move BitLocker keys offline and reboot TWICE.'
