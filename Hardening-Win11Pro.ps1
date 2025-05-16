@@ -589,6 +589,204 @@ function DownloadWithRetry {
     return $true
 }
 
+# -- BitLocker Functions --
+function ConfigureBitLocker {
+    param([System.Security.SecureString]$pin = $null)
+    
+    Log "Starting BitLocker configuration..." "INFO"
+    
+    # Check for BitLocker feature
+    try {
+        $blFeature = Get-WindowsCapability -Online -Name "BitLocker*" -ErrorAction SilentlyContinue
+        if ($blFeature -and $blFeature.State -ne "Installed") {
+            Log "BitLocker feature not installed, attempting to install..." "WARN"
+            Add-WindowsCapability -Online -Name $blFeature.Name -ErrorAction Stop
+            Log "BitLocker feature installed" "SUCCESS"
+        }
+    } catch {
+        $errMsg = $_.Exception.Message
+        Log "Failed to install BitLocker feature: $errMsg" "ERROR"
+    }
+    
+    # Check BitLocker service
+    try {
+        $blService = Get-Service -Name "BDESVC" -ErrorAction SilentlyContinue
+        if ($blService.Status -ne "Running") {
+            Log "BitLocker service not running, attempting to start..." "WARN"
+            Start-Service -Name "BDESVC" -ErrorAction Stop
+            Log "BitLocker service started" "SUCCESS"
+        }
+    } catch {
+        $errMsg = $_.Exception.Message
+        Log "Failed to start BitLocker service: $errMsg" "ERROR"
+    }
+    
+    # Check current BitLocker status
+    try {
+        $blv = Get-BitLockerVolume -MountPoint C: -ErrorAction Stop
+        
+        # Check if BitLocker is already enabled
+        if ($blv.ProtectionStatus -eq "On") {
+            Log "BitLocker is already enabled on drive C:" "INFO"
+            
+            # Check encryption method
+            if ($blv.EncryptionMethod -ne "XtsAes256") {
+                Log "Current BitLocker encryption method is $($blv.EncryptionMethod), not XtsAes256" "WARN"
+            }
+            
+            # Check if TPM+PIN is used
+            $hasTpmPin = ($blv.KeyProtector | Where-Object { $_.KeyProtectorType -eq "TpmPin" }) -ne $null
+            if (-not $hasTpmPin) {
+                Log "BitLocker is not using TPM+PIN protection" "WARN"
+                
+                # If user provided a PIN, add TPM+PIN protector
+                if ($pin) {
+                    try {
+                        Add-BitLockerKeyProtector -MountPoint C: -TpmAndPinProtector -Pin $pin -ErrorAction Stop
+                        Log "Added TPM+PIN protector to existing BitLocker encryption" "SUCCESS"
+                    } catch {
+                        $errMsg = $_.Exception.Message
+                        Log "Failed to add TPM+PIN protector: $errMsg" "ERROR"
+                    }
+                } else {
+                    Log "No PIN provided, skipping addition of TPM+PIN protector" "WARN"
+                }
+            }
+            
+            # Check if recovery key exists and back it up
+            $recoveryKey = $blv.KeyProtector | Where-Object { $_.KeyProtectorType -eq "RecoveryPassword" }
+            if ($recoveryKey) {
+                BackupBitLockerKey -recoveryKey $recoveryKey
+            } else {
+                Log "No BitLocker recovery key found, generating new one..." "WARN"
+                try {
+                    $recoveryKey = Add-BitLockerKeyProtector -MountPoint C: -RecoveryPasswordProtector -ErrorAction Stop
+                    BackupBitLockerKey -recoveryKey $recoveryKey
+                } catch {
+                    $errMsg = $_.Exception.Message
+                    Log "Failed to add recovery key: $errMsg" "ERROR"
+                }
+            }
+        } else {
+            # BitLocker not enabled, proceed with enabling
+            Log "BitLocker is not enabled on drive C:, enabling now..." "INFO"
+            
+            # If PIN not provided, prompt for it
+            if (-not $pin) {
+                $pin = ReadBitLockerPin
+            }
+            
+            # Enable BitLocker with TPM+PIN
+            try {
+                # Use the desired encryption method (XtsAes256)
+                Enable-BitLocker -MountPoint C: -EncryptionMethod XtsAes256 -UsedSpaceOnly -TpmAndPinProtector -Pin $pin -ErrorAction Stop
+                Log "BitLocker enabled with TPM+PIN and XtsAes256 encryption" "SUCCESS"
+                
+                # Add recovery password if not already present
+                if (($blv.KeyProtector | Where-Object { $_.KeyProtectorType -eq "RecoveryPassword" }) -eq $null) {
+                    $recoveryKey = Add-BitLockerKeyProtector -MountPoint C: -RecoveryPasswordProtector -ErrorAction Stop
+                    BackupBitLockerKey -recoveryKey $recoveryKey
+                }
+            } catch {
+                $errMsg = $_.Exception.Message
+                Log "Failed to enable BitLocker: $errMsg" "ERROR"
+                return $false
+            }
+        }
+        
+        # Start encryption if needed
+        if ($blv.VolumeStatus -eq "FullyDecrypted" -or $blv.VolumeStatus -eq "PartiallyDecrypted") {
+            try {
+                Resume-BitLocker -MountPoint C: -ErrorAction Stop
+                Log "BitLocker encryption started" "SUCCESS"
+            } catch {
+                $errMsg = $_.Exception.Message
+                Log "Failed to start BitLocker encryption: $errMsg" "ERROR"
+            }
+        }
+        
+        return $true
+    } catch {
+        $errMsg = $_.Exception.Message
+        Log "Error configuring BitLocker: $errMsg" "ERROR"
+        return $false
+    }
+}
+
+function ReadBitLockerPin {
+    # Prompt for PIN and validate
+    $validPin = $false
+    $securePin = $null
+    
+    while (-not $validPin) {
+        Write-Host "`nBitLocker requires a numeric PIN (6-20 digits)" -ForegroundColor Cyan
+        $securePin = Read-Host "Enter BitLocker PIN" -AsSecureString
+        
+        # Convert secure string to plain text for validation
+        $BSTR = [System.Runtime.InteropServices.Marshal]::SecureStringToBSTR($securePin)
+        $plainPin = [System.Runtime.InteropServices.Marshal]::PtrToStringAuto($BSTR)
+        [System.Runtime.InteropServices.Marshal]::ZeroFreeBSTR($BSTR)
+        
+        # Validate PIN
+        if ($plainPin -match '^\d{6,20}$') {
+            $validPin = $true
+        } else {
+            Write-Host "PIN must be 6-20 digits only. Please try again." -ForegroundColor Red
+        }
+        
+        # Safely clear the plain text PIN
+        $plainPin = "0" * $plainPin.Length
+        [System.GC]::Collect()
+    }
+    
+    return $securePin
+}
+
+function BackupBitLockerKey {
+    param($recoveryKey)
+    
+    if (-not $recoveryKey) {
+        Log "No recovery key provided for backup" "WARN"
+        return
+    }
+    
+    try {
+        # Ensure recovery directory exists
+        if (-not (Test-Path $recoveryPath)) {
+            New-Item -Path $recoveryPath -ItemType Directory -Force | Out-Null
+            Log "Created BitLocker recovery key directory: $recoveryPath" "SUCCESS"
+        }
+        
+        # Save recovery key to file
+        $recoveryKeyPath = Join-Path $recoveryPath "BitLocker-RecoveryKey-C-$(Get-Date -Format 'yyyyMMdd-HHmmss').txt"
+        $recoveryKey.RecoveryPassword | Out-File -FilePath $recoveryKeyPath -Encoding utf8
+        
+        # Also save key with ID in filename for better identification
+        $keyId = $recoveryKey.KeyProtectorId.Replace("{", "").Replace("}", "").Substring(0, 8)
+        $recoveryKeyPathWithId = Join-Path $recoveryPath "BitLocker-RecoveryKey-ID-$keyId-$(Get-Date -Format 'yyyyMMdd').txt"
+        $recoveryKey.RecoveryPassword | Out-File -FilePath $recoveryKeyPathWithId -Encoding utf8
+        
+        Log "BitLocker recovery key saved to: $recoveryPath" "SUCCESS"
+        Log "Recovery key ID: $keyId" "INFO"
+        
+        # Backup to AD if domain joined
+        if ((Get-WmiObject Win32_ComputerSystem).PartOfDomain) {
+            try {
+                # Only attempt to backup to AD if machine is domain-joined
+                Backup-BitLockerKeyProtector -MountPoint C: -KeyProtectorId $recoveryKey.KeyProtectorId -ErrorAction Stop
+                Log "BitLocker recovery key backed up to Active Directory" "SUCCESS"
+            } catch {
+                $errMsg = $_.Exception.Message
+                Log "Failed to backup recovery key to AD: $errMsg" "WARN"
+                Log "Manual backup of recovery key files is essential" "WARN"
+            }
+        }
+    } catch {
+        $errMsg = $_.Exception.Message
+        Log "Failed to backup BitLocker recovery key: $errMsg" "ERROR"
+    }
+}
+
 # -- main ---------------------------------------------------------------------
 try {
     Log "Starting Windows 11 Pro hardening" "INFO"
@@ -827,6 +1025,30 @@ try {
             }
         } else {
             Log "Skipping Windows Update - module not available" "WARN"
+        }
+
+        # -- BitLocker setup --
+        Log "Setting up BitLocker..." "INFO"
+        
+        # Check TPM first
+        if (CheckTpm) {
+            Log "TPM is ready for BitLocker configuration" "SUCCESS"
+            
+            # Prompt for BitLocker PIN and configure
+            $pin = ReadBitLockerPin
+            if ($pin) {
+                $success = ConfigureBitLocker -pin $pin
+                if ($success) {
+                    Log "BitLocker configuration completed successfully" "SUCCESS"
+                } else {
+                    Log "BitLocker configuration had issues, check logs for details" "WARN"
+                }
+            } else {
+                Log "PIN input canceled, skipping BitLocker configuration" "WARN"
+            }
+        } else {
+            Log "TPM not ready - BitLocker with TPM+PIN is not possible" "ERROR"
+            Log "Skipping BitLocker configuration" "WARN"
         }
 
         # -- LM/NTLMv1 off • SMB1 off • TLS1.0/1.1 off --
@@ -1144,7 +1366,7 @@ try {
                     Log "AnyDesk firewall rules created (for future use)" "SUCCESS"
                 } catch {
                     $errMsg = $_.Exception.Message
-                    Log "Failed to create AnyDesk firewall rules: $errMsg" "WARN"
+                    Log "Failed to create AnyDesk firewall rules: $errMsg" "ERROR"
                 }
             }
         }
