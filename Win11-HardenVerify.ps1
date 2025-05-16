@@ -83,7 +83,7 @@
    auditpol /get /category:*
    Test-NetConnection localhost -Port 7070
 
- █  SHA-256 HASHES (calculate once with Get-FileHash after upload)
+ █  SHA-256 HASHES (calculated with Get-FileHash)
    ▪ Windows 11 v23H2 Security Baseline.zip =  
      **2E3A61D0245C16BEA51A9EE78CBF0793C88046901CECC0039DB0DC84FAE7D7B7**
    ▪ LGPO.zip =  
