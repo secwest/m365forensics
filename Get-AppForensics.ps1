@@ -21,6 +21,23 @@ function Get-SafeProperty {
     catch { return $Default }
 }
 
+# Function to safely filter by date
+function Test-RecentlyCreated {
+    param($CreatedDateTime, $DaysAgo = 30)
+    
+    if ($CreatedDateTime -eq "N/A" -or $null -eq $CreatedDateTime -or $CreatedDateTime -eq "") {
+        return $false
+    }
+    
+    try {
+        $date = [DateTime]$CreatedDateTime
+        return $date -gt (Get-Date).AddDays(-$DaysAgo)
+    }
+    catch {
+        return $false
+    }
+}
+
 # Function to convert permissions to readable format
 function Convert-PermissionsToReadable {
     param($Permissions)
@@ -484,7 +501,7 @@ $($spData | Where-Object { $_.Category -eq "Third-Party/External" } | Select-Obj
 $($nonMicrosoftApps | Where-Object { ([int]$_.DelegatedPermissionsCount + [int]$_.AppRoleAssignmentsCount) -gt 5 } | Select-Object DisplayName, Category, @{Name="TotalPermissions";Expression={[int]$_.DelegatedPermissionsCount + [int]$_.AppRoleAssignmentsCount}}, PublisherName | Format-Table -AutoSize | Out-String)
 
 4. RECENTLY CREATED NON-MICROSOFT APPLICATIONS (Last 30 days):
-$($nonMicrosoftApps | Where-Object { $_.CreatedDateTime -ne "N/A" -and [DateTime]$_.CreatedDateTime -gt (Get-Date).AddDays(-30) } | Select-Object DisplayName, CreatedDateTime, Category, PublisherName | Format-Table -AutoSize | Out-String)
+$($nonMicrosoftApps | Where-Object { Test-RecentlyCreated -CreatedDateTime $_.CreatedDateTime -DaysAgo 30 } | Select-Object DisplayName, CreatedDateTime, Category, PublisherName | Format-Table -AutoSize | Out-String)
 
 5. NON-MICROSOFT APPLICATIONS WITH MULTIPLE CREDENTIALS:
 $($credentialData | Where-Object { $_.EntityName -in $nonMicrosoftApps.DisplayName } | Group-Object EntityName | Where-Object Count -gt 1 | ForEach-Object { [PSCustomObject]@{ApplicationName = $_.Name; CredentialCount = $_.Count; CredentialTypes = ($_.Group.CredentialType | Sort-Object -Unique) -join ", "} } | Format-Table -AutoSize | Out-String)
@@ -529,9 +546,16 @@ Write-Host "Summary report saved to ForensicsSummary.txt" -ForegroundColor Green
 Write-Host "All output files are in: $OutputPath" -ForegroundColor Yellow
 
 # Display quick stats
-Write-Host "`n=== QUICK STATISTICS ===" -ForegroundColor Magenta
+Write-Host "`n=== FORENSIC ANALYSIS SUMMARY ===" -ForegroundColor Magenta
 Write-Host "Application Registrations: $($applications.Count)" -ForegroundColor White
-Write-Host "Service Principals: $($servicePrincipals.Count)" -ForegroundColor White  
+Write-Host "Service Principals (Total): $($spData.Count)" -ForegroundColor White
+Write-Host "├─ Microsoft Built-ins: $microsoftBuiltIns" -ForegroundColor Cyan
+Write-Host "├─ Tenant-Created: $tenantCreated" -ForegroundColor Green  
+Write-Host "└─ Third-Party/External: $thirdParty" -ForegroundColor Magenta
 Write-Host "OAuth2 Grants: $($oauth2Grants.Count)" -ForegroundColor White
 Write-Host "App Role Assignments: $($allAppRoleAssignments.Count)" -ForegroundColor White
 Write-Host "Total Credentials: $($credentialData.Count)" -ForegroundColor White
+
+Write-Host "`n🔴 HIGH PRIORITY FILES FOR REVIEW:" -ForegroundColor Red
+Write-Host "  - ServicePrincipals_TenantCreated.csv ($tenantCreated apps)" -ForegroundColor Yellow
+Write-Host "  - ServicePrincipals_NonMicrosoft.csv ($($nonMicrosoftApps.Count) apps)" -ForegroundColor Yellow
