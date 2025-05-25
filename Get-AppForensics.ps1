@@ -471,8 +471,409 @@ catch {
     Write-Host "Error retrieving application credentials: $($_.Exception.Message)" -ForegroundColor Red
 }
 
-# 6. Generate Summary Report
-Write-Host "`n[6/6] Generating Summary Report..." -ForegroundColor Cyan
+# 6. Generate Summary Report and Pretty Print Results
+Write-Host "`n[6/6] Generating Summary Report and Analysis..." -ForegroundColor Cyan
+
+# Function to generate HTML report
+function New-ForensicsHtmlReport {
+    param(
+        $Applications,
+        $AllServicePrincipals, 
+        $TenantApps,
+        $NonMicrosoftApps,
+        $OAuth2Grants,
+        $AppRoleAssignments,
+        $Credentials,
+        $MicrosoftCount,
+        $TenantCount,
+        $ThirdPartyCount,
+        $OutputPath
+    )
+    
+    $htmlContent = @"
+<!DOCTYPE html>
+<html>
+<head>
+    <title>M365 Application Forensics Report</title>
+    <style>
+        body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; margin: 20px; background-color: #f5f5f5; }
+        .container { max-width: 1200px; margin: 0 auto; background-color: white; padding: 30px; border-radius: 10px; box-shadow: 0 0 20px rgba(0,0,0,0.1); }
+        .header { background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; padding: 20px; margin: -30px -30px 30px -30px; border-radius: 10px 10px 0 0; }
+        .tenant-info { background-color: #e8f4f8; padding: 15px; border-radius: 5px; margin: 20px 0; border-left: 4px solid #2196F3; }
+        .stats-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 15px; margin: 20px 0; }
+        .stat-box { background: linear-gradient(135deg, #f093fb 0%, #f5576c 100%); color: white; padding: 15px; border-radius: 8px; text-align: center; }
+        .stat-number { font-size: 2em; font-weight: bold; }
+        .stat-label { font-size: 0.9em; opacity: 0.9; }
+        .priority-high { background: linear-gradient(135deg, #ff6b6b 0%, #ee5a52 100%); }
+        .priority-medium { background: linear-gradient(135deg, #feca57 0%, #ff9ff3 100%); }
+        .priority-low { background: linear-gradient(135deg, #48dbfb 0%, #0abde3 100%); }
+        .section { margin: 30px 0; padding: 20px; background-color: #fafafa; border-radius: 8px; border-left: 4px solid #4CAF50; }
+        .section-title { color: #2c3e50; font-size: 1.3em; font-weight: bold; margin-bottom: 15px; }
+        table { width: 100%; border-collapse: collapse; margin: 15px 0; background-color: white; box-shadow: 0 2px 5px rgba(0,0,0,0.1); }
+        th { background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; padding: 12px; text-align: left; font-weight: bold; }
+        td { padding: 10px 12px; border-bottom: 1px solid #ddd; }
+        tr:nth-child(even) { background-color: #f9f9f9; }
+        tr:hover { background-color: #f0f8ff; }
+        .alert-danger { background-color: #f8d7da; color: #721c24; padding: 10px; border-radius: 5px; border-left: 4px solid #dc3545; margin: 10px 0; }
+        .alert-warning { background-color: #fff3cd; color: #856404; padding: 10px; border-radius: 5px; border-left: 4px solid #ffc107; margin: 10px 0; }
+        .alert-info { background-color: #d1ecf1; color: #0c5460; padding: 10px; border-radius: 5px; border-left: 4px solid #17a2b8; margin: 10px 0; }
+        .recommendations { background-color: #e8f5e8; padding: 20px; border-radius: 8px; border-left: 4px solid #28a745; }
+        .file-list { background-color: #f8f9fa; padding: 15px; border-radius: 5px; font-family: 'Courier New', monospace; }
+        .timestamp { color: #6c757d; font-size: 0.9em; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>🔍 M365 Application Forensics Report</h1>
+            <p>Comprehensive security analysis of application registrations and enterprise applications</p>
+        </div>
+        
+        <div class="tenant-info">
+            <h3>📋 Tenant Information</h3>
+            <strong>Organization:</strong> Matrix Helicopter Solutions Inc<br>
+            <strong>Tenant ID:</strong> 63ad9bfc-1f87-4b03-918e-81434c7ae363<br>
+            <strong>Analysis Date:</strong> $(Get-Date -Format "yyyy-MM-dd HH:mm:ss")<br>
+            <strong>Domain:</strong> MatrixHelicopter.onmicrosoft.com, matrixco.ca
+        </div>
+
+        <div class="stats-grid">
+            <div class="stat-box priority-high">
+                <div class="stat-number">$TenantCount</div>
+                <div class="stat-label">Tenant-Created Apps</div>
+            </div>
+            <div class="stat-box priority-medium">
+                <div class="stat-number">$ThirdPartyCount</div>
+                <div class="stat-label">Third-Party Apps</div>
+            </div>
+            <div class="stat-box priority-low">
+                <div class="stat-number">$MicrosoftCount</div>
+                <div class="stat-label">Microsoft Built-ins</div>
+            </div>
+            <div class="stat-box">
+                <div class="stat-number">$($Applications.Count)</div>
+                <div class="stat-label">App Registrations</div>
+            </div>
+            <div class="stat-box">
+                <div class="stat-number">$($OAuth2Grants.Count)</div>
+                <div class="stat-label">OAuth2 Grants</div>
+            </div>
+            <div class="stat-box">
+                <div class="stat-number">$($Credentials.Count)</div>
+                <div class="stat-label">Credentials</div>
+            </div>
+        </div>
+
+        <div class="alert-danger">
+            <strong>🚨 CRITICAL FINDINGS:</strong> Focus your investigation on the $TenantCount tenant-created applications and $ThirdPartyCount third-party applications listed below.
+        </div>
+"@
+
+    # Add Tenant-Created Applications section
+    if ($TenantApps.Count -gt 0) {
+        $htmlContent += @"
+        <div class="section">
+            <div class="section-title">🔴 Tenant-Created Applications (HIGHEST PRIORITY)</div>
+            <div class="alert-danger">These applications were created directly in your tenant and require immediate review.</div>
+            <table>
+                <tr>
+                    <th>Application Name</th>
+                    <th>Created Date</th>
+                    <th>Publisher</th>
+                    <th>Permissions</th>
+                    <th>Enabled</th>
+                    <th>Credentials</th>
+                </tr>
+"@
+        foreach ($app in $TenantApps) {
+            $permCount = [int]$app.DelegatedPermissionsCount + [int]$app.AppRoleAssignmentsCount
+            $credCount = [int]$app.KeyCredentialsCount + [int]$app.PasswordCredentialsCount
+            $htmlContent += @"
+                <tr>
+                    <td><strong>$($app.DisplayName)</strong></td>
+                    <td>$($app.CreatedDateTime)</td>
+                    <td>$($app.PublisherName)</td>
+                    <td>$permCount</td>
+                    <td>$($app.IsEnabled)</td>
+                    <td>$credCount</td>
+                </tr>
+"@
+        }
+        $htmlContent += "</table></div>"
+    }
+
+    # Add Third-Party Applications section
+    $thirdPartyApps = $NonMicrosoftApps | Where-Object { $_.Category -eq "Third-Party/External" } | Select-Object -First 20
+    if ($thirdPartyApps.Count -gt 0) {
+        $htmlContent += @"
+        <div class="section">
+            <div class="section-title">🟡 Third-Party/External Applications (HIGH PRIORITY)</div>
+            <div class="alert-warning">These applications are from external organizations and should be reviewed for legitimacy.</div>
+            <table>
+                <tr>
+                    <th>Application Name</th>
+                    <th>Publisher</th>
+                    <th>Created Date</th>
+                    <th>Category Reason</th>
+                    <th>Permissions</th>
+                </tr>
+"@
+        foreach ($app in $thirdPartyApps) {
+            $permCount = [int]$app.DelegatedPermissionsCount + [int]$app.AppRoleAssignmentsCount
+            $htmlContent += @"
+                <tr>
+                    <td><strong>$($app.DisplayName)</strong></td>
+                    <td>$($app.PublisherName)</td>
+                    <td>$($app.CreatedDateTime)</td>
+                    <td><small>$($app.CategoryReason)</small></td>
+                    <td>$permCount</td>
+                </tr>
+"@
+        }
+        $htmlContent += "</table></div>"
+    }
+
+    # Add Recent Applications section
+    $recentApps = $NonMicrosoftApps | Where-Object { Test-RecentlyCreated -CreatedDateTime $_.CreatedDateTime -DaysAgo 30 } | Select-Object -First 10
+    if ($recentApps.Count -gt 0) {
+        $htmlContent += @"
+        <div class="section">
+            <div class="section-title">📅 Recently Created Applications (Last 30 Days)</div>
+            <div class="alert-info">Applications created recently may correlate with security incidents.</div>
+            <table>
+                <tr>
+                    <th>Application Name</th>
+                    <th>Created Date</th>
+                    <th>Category</th>
+                    <th>Publisher</th>
+                    <th>Permissions</th>
+                </tr>
+"@
+        foreach ($app in $recentApps) {
+            $permCount = [int]$app.DelegatedPermissionsCount + [int]$app.AppRoleAssignmentsCount
+            $htmlContent += @"
+                <tr>
+                    <td><strong>$($app.DisplayName)</strong></td>
+                    <td>$($app.CreatedDateTime)</td>
+                    <td>$($app.Category)</td>
+                    <td>$($app.PublisherName)</td>
+                    <td>$permCount</td>
+                </tr>
+"@
+        }
+        $htmlContent += "</table></div>"
+    }
+
+    # Add High-Permission Applications section
+    $highPermApps = $NonMicrosoftApps | Where-Object { ([int]$_.DelegatedPermissionsCount + [int]$_.AppRoleAssignmentsCount) -gt 5 } | 
+                    Sort-Object { [int]$_.DelegatedPermissionsCount + [int]$_.AppRoleAssignmentsCount } -Descending | Select-Object -First 15
+    if ($highPermApps.Count -gt 0) {
+        $htmlContent += @"
+        <div class="section">
+            <div class="section-title">⚠️ Applications with Excessive Permissions</div>
+            <div class="alert-warning">Applications with many permissions may pose security risks.</div>
+            <table>
+                <tr>
+                    <th>Application Name</th>
+                    <th>Total Permissions</th>
+                    <th>Category</th>
+                    <th>Publisher</th>
+                    <th>Created Date</th>
+                </tr>
+"@
+        foreach ($app in $highPermApps) {
+            $permCount = [int]$app.DelegatedPermissionsCount + [int]$app.AppRoleAssignmentsCount
+            $htmlContent += @"
+                <tr>
+                    <td><strong>$($app.DisplayName)</strong></td>
+                    <td><strong>$permCount</strong></td>
+                    <td>$($app.Category)</td>
+                    <td>$($app.PublisherName)</td>
+                    <td>$($app.CreatedDateTime)</td>
+                </tr>
+"@
+        }
+        $htmlContent += "</table></div>"
+    }
+
+    # Add Credentials Analysis section
+    $multiCredApps = $Credentials | Where-Object { $_.EntityName -in $NonMicrosoftApps.DisplayName } | 
+                     Group-Object EntityName | Where-Object Count -gt 1 | Select-Object -First 10
+    if ($multiCredApps.Count -gt 0) {
+        $htmlContent += @"
+        <div class="section">
+            <div class="section-title">🔑 Applications with Multiple Credentials</div>
+            <div class="alert-info">Applications with multiple authentication methods may indicate sophistication or misuse.</div>
+            <table>
+                <tr>
+                    <th>Application Name</th>
+                    <th>Credential Count</th>
+                    <th>Credential Types</th>
+                </tr>
+"@
+        foreach ($group in $multiCredApps) {
+            $credTypes = ($group.Group.CredentialType | Sort-Object -Unique) -join ", "
+            $htmlContent += @"
+                <tr>
+                    <td><strong>$($group.Name)</strong></td>
+                    <td>$($group.Count)</td>
+                    <td>$credTypes</td>
+                </tr>
+"@
+        }
+        $htmlContent += "</table></div>"
+    }
+
+    # Add recommendations and files section
+    $htmlContent += @"
+        <div class="recommendations">
+            <h3>📋 Recommended Actions</h3>
+            <h4>🔴 IMMEDIATE (Next 24 Hours):</h4>
+            <ul>
+                <li>Review all $TenantCount tenant-created applications for legitimacy</li>
+                <li>Investigate applications created by non-administrative users</li>
+                <li>Check for applications with suspicious names or unexpected permissions</li>
+                <li>Disable any unauthorized applications immediately</li>
+            </ul>
+            
+            <h4>🟡 HIGH PRIORITY (Next 72 Hours):</h4>
+            <ul>
+                <li>Audit all $ThirdPartyCount third-party applications for business justification</li>
+                <li>Review applications with broad Microsoft Graph permissions</li>
+                <li>Check for expired or soon-to-expire credentials</li>
+                <li>Validate OAuth consent grants, especially admin consent</li>
+            </ul>
+            
+            <h4>🟢 ONGOING MONITORING:</h4>
+            <ul>
+                <li>Implement alerts for new application registrations</li>
+                <li>Regular review of applications accessing sensitive resources</li>
+                <li>Monitor for applications with escalating permissions</li>
+                <li>Establish application governance policies</li>
+            </ul>
+        </div>
+
+        <div class="section">
+            <div class="section-title">📁 Generated Files</div>
+            <div class="file-list">
+                <strong>🔴 High Priority Files:</strong><br>
+                • ServicePrincipals_TenantCreated.csv ($TenantCount apps)<br>
+                • ServicePrincipals_NonMicrosoft.csv ($($NonMicrosoftApps.Count) apps)<br><br>
+                
+                <strong>📊 Complete Analysis Files:</strong><br>
+                • ApplicationRegistrations.csv ($($Applications.Count) apps)<br>
+                • ServicePrincipals_All.csv ($($AllServicePrincipals.Count) apps)<br>
+                • OAuth2PermissionGrants.csv ($($OAuth2Grants.Count) grants)<br>
+                • AppRoleAssignments.csv ($($AppRoleAssignments.Count) assignments)<br>
+                • ApplicationCredentials.csv ($($Credentials.Count) credentials)<br>
+                • ForensicsSummary.txt (Text summary)<br>
+                • ForensicsReport.html (This report)<br>
+            </div>
+        </div>
+
+        <div class="section">
+            <div class="section-title">🔍 Threat Hunting Queries</div>
+            <div class="alert-info">
+                <strong>Suspicious Permission Patterns:</strong><br>
+                Search OAuth2PermissionGrants.csv for: Directory.ReadWrite.All, RoleManagement.ReadWrite.Directory, User.ReadWrite.All<br><br>
+                
+                <strong>Admin Consent Grants:</strong><br>
+                Filter OAuth2PermissionGrants.csv where ConsentType = "AllPrincipals"<br><br>
+                
+                <strong>External Publishers:</strong><br>
+                Review ServicePrincipals_NonMicrosoft.csv for unfamiliar publisher names<br><br>
+                
+                <strong>Correlation Analysis:</strong><br>
+                Cross-reference application creation dates with security incident timelines
+            </div>
+        </div>
+
+        <div class="timestamp">
+            <hr>
+            <p><em>Report generated on $(Get-Date -Format "yyyy-MM-dd HH:mm:ss") by M365 Application Forensics Tool</em></p>
+        </div>
+    </div>
+</body>
+</html>
+"@
+
+    return $htmlContent
+}
+
+# Generate HTML Report
+$htmlReport = New-ForensicsHtmlReport -Applications $applications -AllServicePrincipals $spData -TenantApps $tenantApps -NonMicrosoftApps $nonMicrosoftApps -OAuth2Grants $oauth2Grants -AppRoleAssignments $allAppRoleAssignments -Credentials $credentialData -MicrosoftCount $microsoftBuiltIns -TenantCount $tenantCreated -ThirdPartyCount $thirdParty -OutputPath $OutputPath
+
+$htmlReport | Out-File -FilePath "$OutputPath\ForensicsReport.html" -Encoding UTF8
+
+# Console Pretty Print
+Write-Host "`n" -NoNewline
+Write-Host "="*80 -ForegroundColor Blue
+Write-Host "🔍 M365 APPLICATION FORENSICS ANALYSIS COMPLETE" -ForegroundColor White -BackgroundColor Blue
+Write-Host "="*80 -ForegroundColor Blue
+
+Write-Host "`n📋 TENANT INFORMATION:" -ForegroundColor Cyan
+Write-Host "   Organization: Matrix Helicopter Solutions Inc" -ForegroundColor White
+Write-Host "   Tenant ID: 63ad9bfc-1f87-4b03-918e-81434c7ae363" -ForegroundColor White
+Write-Host "   Analysis Date: $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')" -ForegroundColor White
+
+Write-Host "`n📊 SUMMARY STATISTICS:" -ForegroundColor Cyan
+Write-Host "   ├─ Application Registrations: $($applications.Count)" -ForegroundColor White
+Write-Host "   ├─ Total Service Principals: $($spData.Count)" -ForegroundColor White
+Write-Host "   │  ├─ 🔴 Tenant-Created: $tenantCreated" -ForegroundColor Red
+Write-Host "   │  ├─ 🟡 Third-Party/External: $thirdParty" -ForegroundColor Yellow
+Write-Host "   │  └─ 🟢 Microsoft Built-ins: $microsoftBuiltIns" -ForegroundColor Green
+Write-Host "   ├─ OAuth2 Permission Grants: $($oauth2Grants.Count)" -ForegroundColor White
+Write-Host "   ├─ App Role Assignments: $($allAppRoleAssignments.Count)" -ForegroundColor White
+Write-Host "   └─ Total Credentials: $($credentialData.Count)" -ForegroundColor White
+
+if ($tenantCreated -gt 0) {
+    Write-Host "`n🔴 TENANT-CREATED APPLICATIONS (HIGHEST PRIORITY):" -ForegroundColor Red
+    $tenantApps | Select-Object DisplayName, CreatedDateTime, PublisherName, 
+        @{Name="Permissions";Expression={[int]$_.DelegatedPermissionsCount + [int]$_.AppRoleAssignmentsCount}},
+        @{Name="Credentials";Expression={[int]$_.KeyCredentialsCount + [int]$_.PasswordCredentialsCount}} |
+        Format-Table -AutoSize | Out-String | Write-Host
+}
+
+$thirdPartyApps = $nonMicrosoftApps | Where-Object { $_.Category -eq "Third-Party/External" } | Select-Object -First 10
+if ($thirdPartyApps.Count -gt 0) {
+    Write-Host "🟡 THIRD-PARTY APPLICATIONS (HIGH PRIORITY - Top 10):" -ForegroundColor Yellow
+    $thirdPartyApps | Select-Object DisplayName, PublisherName, CreatedDateTime,
+        @{Name="Permissions";Expression={[int]$_.DelegatedPermissionsCount + [int]$_.AppRoleAssignmentsCount}} |
+        Format-Table -AutoSize | Out-String | Write-Host
+}
+
+$recentApps = $nonMicrosoftApps | Where-Object { Test-RecentlyCreated -CreatedDateTime $_.CreatedDateTime -DaysAgo 30 } | Select-Object -First 5
+if ($recentApps.Count -gt 0) {
+    Write-Host "📅 RECENTLY CREATED APPLICATIONS (Last 30 Days - Top 5):" -ForegroundColor Magenta
+    $recentApps | Select-Object DisplayName, CreatedDateTime, Category, PublisherName |
+        Format-Table -AutoSize | Out-String | Write-Host
+}
+
+$highPermApps = $nonMicrosoftApps | Where-Object { ([int]$_.DelegatedPermissionsCount + [int]$_.AppRoleAssignmentsCount) -gt 5 } | 
+                Sort-Object { [int]$_.DelegatedPermissionsCount + [int]$_.AppRoleAssignmentsCount } -Descending | Select-Object -First 5
+if ($highPermApps.Count -gt 0) {
+    Write-Host "⚠️  APPLICATIONS WITH EXCESSIVE PERMISSIONS (Top 5):" -ForegroundColor DarkYellow
+    $highPermApps | Select-Object DisplayName, Category,
+        @{Name="TotalPermissions";Expression={[int]$_.DelegatedPermissionsCount + [int]$_.AppRoleAssignmentsCount}},
+        PublisherName | Format-Table -AutoSize | Out-String | Write-Host
+}
+
+Write-Host "📋 RECOMMENDED IMMEDIATE ACTIONS:" -ForegroundColor Cyan
+Write-Host "   🔴 Review $tenantCreated tenant-created applications" -ForegroundColor Red
+Write-Host "   🟡 Audit $thirdParty third-party applications" -ForegroundColor Yellow
+Write-Host "   ⚠️  Check applications with >5 permissions" -ForegroundColor DarkYellow
+Write-Host "   📅 Investigate recent application registrations" -ForegroundColor Magenta
+Write-Host "   🔑 Review applications with multiple credentials" -ForegroundColor Cyan
+
+Write-Host "`n📁 GENERATED FILES:" -ForegroundColor Cyan
+Write-Host "   🔴 ServicePrincipals_TenantCreated.csv ($tenantCreated apps)" -ForegroundColor Red
+Write-Host "   🟡 ServicePrincipals_NonMicrosoft.csv ($($nonMicrosoftApps.Count) apps)" -ForegroundColor Yellow
+Write-Host "   📊 ForensicsReport.html (Interactive HTML report)" -ForegroundColor Green
+Write-Host "   📋 ForensicsSummary.txt (Text summary)" -ForegroundColor White
+Write-Host "   📄 All other CSV files for detailed analysis" -ForegroundColor Gray
+
+Write-Host "`n🌐 OPEN HTML REPORT:" -ForegroundColor Green
+Write-Host "   File: $OutputPath\ForensicsReport.html" -ForegroundColor White
 
 $summary = @"
 === M365 Tenant Application Registration Forensics Summary ===
