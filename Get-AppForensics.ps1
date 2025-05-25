@@ -38,6 +38,95 @@ function Convert-PermissionsToReadable {
     return $readablePerms
 }
 
+# Function to determine if an application is a Microsoft built-in
+function Test-IsMicrosoftBuiltIn {
+    param($ServicePrincipal)
+    
+    # Well-known Microsoft Application IDs (partial list of common ones)
+    $wellKnownMicrosoftAppIds = @{
+        "00000003-0000-0000-c000-000000000000" = "Microsoft Graph"
+        "00000002-0000-0000-c000-000000000000" = "Microsoft Graph (Legacy)"
+        "797f4846-ba00-4fd7-ba43-dac1f8f63013" = "Windows Azure Service Management API"
+        "00000001-0000-0000-c000-000000000000" = "Azure Active Directory Graph"
+        "00000007-0000-0000-c000-000000000000" = "Microsoft Dynamics CRM"
+        "48ac35b8-9aa8-4d74-927d-1f4a14a0b239" = "Microsoft Intune Web Company Portal"
+        "0000000c-0000-0000-c000-000000000000" = "Microsoft App Access Panel"
+        "89bee1f7-5e6e-4d8a-9f3d-ecd601259da7" = "Office365 Shell WCSS-Client"
+        "c5393580-f805-4401-95e8-94b7a6ef2fc2" = "Office365 Management APIs"
+        "4345a7b9-9a63-4910-a426-35363201d503" = "Office 365 Management APIs"
+        "d3590ed6-52b3-4102-aeff-aad2292ab01c" = "Microsoft Office"
+        "00000006-0000-0000-c000-000000000000" = "Microsoft Office 365 Portal"
+        "67e3df25-268a-4324-a550-0de1c7f97287" = "Microsoft Office Web Apps Service"
+    }
+    
+    $appId = Get-SafeProperty $ServicePrincipal "AppId"
+    $publisherName = Get-SafeProperty $ServicePrincipal "PublisherName"
+    $appOwnerOrgId = Get-SafeProperty $ServicePrincipal "AppOwnerOrganizationId"
+    $servicePrincipalType = Get-SafeProperty $ServicePrincipal "ServicePrincipalType"
+    $displayName = Get-SafeProperty $ServicePrincipal "DisplayName"
+    
+    # Check if it's a well-known Microsoft app
+    if ($wellKnownMicrosoftAppIds.ContainsKey($appId)) {
+        return @{
+            IsMicrosoft = $true
+            Category = "Microsoft Built-in"
+            Reason = "Well-known Microsoft AppId: $($wellKnownMicrosoftAppIds[$appId])"
+        }
+    }
+    
+    # Check publisher name
+    if ($publisherName -like "*Microsoft*" -or $publisherName -eq "Microsoft Services") {
+        return @{
+            IsMicrosoft = $true
+            Category = "Microsoft Built-in"
+            Reason = "Microsoft Publisher: $publisherName"
+        }
+    }
+    
+    # Check for Microsoft-owned organization
+    if ($appOwnerOrgId -eq "f8cdef31-a31e-4b4a-93e4-5f571e91255a" -or  # Microsoft Services
+        $appOwnerOrgId -eq "72f988bf-86f1-41af-91ab-2d7cd011db47") {      # Microsoft Corp
+        return @{
+            IsMicrosoft = $true
+            Category = "Microsoft Built-in"
+            Reason = "Microsoft Organization ID: $appOwnerOrgId"
+        }
+    }
+    
+    # Check for Microsoft-specific naming patterns
+    if ($displayName -like "Microsoft*" -or 
+        $displayName -like "Office*" -or 
+        $displayName -like "Azure*" -or
+        $displayName -like "Windows*" -or
+        $displayName -like "*Graph*" -or
+        $displayName -like "OneDrive*" -or
+        $displayName -like "SharePoint*" -or
+        $displayName -like "Exchange*" -or
+        $displayName -like "Outlook*") {
+        return @{
+            IsMicrosoft = $true
+            Category = "Microsoft Built-in"
+            Reason = "Microsoft naming pattern: $displayName"
+        }
+    }
+    
+    # Check if owned by current tenant (user-created apps)
+    if ($appOwnerOrgId -eq "63ad9bfc-1f87-4b03-918e-81434c7ae363") {
+        return @{
+            IsMicrosoft = $false
+            Category = "Tenant-Created"
+            Reason = "Owned by current tenant: $appOwnerOrgId"
+        }
+    }
+    
+    # If none of the above, likely third-party
+    return @{
+        IsMicrosoft = $false
+        Category = "Third-Party/External"
+        Reason = "External organization or unknown publisher: $publisherName"
+    }
+}
+
 Write-Host "Starting comprehensive application enumeration..." -ForegroundColor Yellow
 
 # 1. Get all Application Registrations
@@ -108,21 +197,27 @@ catch {
 # 2. Get all Service Principals (Enterprise Applications)
 Write-Host "`n[2/6] Enumerating Service Principals (Enterprise Applications)..." -ForegroundColor Cyan
 try {
-    # Filter out built-in Microsoft apps unless specifically requested
-    if ($IncludeBuiltInApps) {
-        $servicePrincipals = Get-MgServicePrincipal -All -Property *
-    } else {
-        $servicePrincipals = Get-MgServicePrincipal -All -Property * | Where-Object { 
-            $_.AppOwnerOrganizationId -eq "63ad9bfc-1f87-4b03-918e-81434c7ae363" -or 
-            $_.PublisherName -notlike "*Microsoft*"
-        }
-    }
-    
-    Write-Host "Found $($servicePrincipals.Count) service principals" -ForegroundColor Green
+    # Get ALL service principals first
+    $allServicePrincipals = Get-MgServicePrincipal -All -Property *
+    Write-Host "Found $($allServicePrincipals.Count) total service principals" -ForegroundColor Green
     
     $spData = @()
-    foreach ($sp in $servicePrincipals) {
-        Write-Progress -Activity "Processing Service Principals" -Status "Processing $($sp.DisplayName)" -PercentComplete (($spData.Count / $servicePrincipals.Count) * 100)
+    $microsoftBuiltIns = 0
+    $tenantCreated = 0
+    $thirdParty = 0
+    
+    foreach ($sp in $allServicePrincipals) {
+        Write-Progress -Activity "Processing Service Principals" -Status "Processing $($sp.DisplayName)" -PercentComplete (($spData.Count / $allServicePrincipals.Count) * 100)
+        
+        # Categorize the application
+        $category = Test-IsMicrosoftBuiltIn -ServicePrincipal $sp
+        
+        # Count by category
+        switch ($category.Category) {
+            "Microsoft Built-in" { $microsoftBuiltIns++ }
+            "Tenant-Created" { $tenantCreated++ }
+            "Third-Party/External" { $thirdParty++ }
+        }
         
         # Get owners
         $owners = @()
@@ -187,13 +282,34 @@ try {
             KeyCredentialsCount = $sp.KeyCredentials.Count
             PasswordCredentialsCount = $sp.PasswordCredentials.Count
             IsEnabled = Get-SafeProperty $sp "AccountEnabled"
+            # New categorization fields
+            Category = $category.Category
+            IsMicrosoftBuiltIn = $category.IsMicrosoft
+            CategoryReason = $category.Reason
         }
         $spData += $spInfo
     }
     
-    # Export service principals data
-    $spData | Export-Csv -Path "$OutputPath\ServicePrincipals.csv" -NoTypeInformation
-    Write-Host "Service principals exported to ServicePrincipals.csv" -ForegroundColor Green
+    Write-Host "Categorization Summary:" -ForegroundColor Yellow
+    Write-Host "  Microsoft Built-ins: $microsoftBuiltIns" -ForegroundColor Cyan
+    Write-Host "  Tenant-Created: $tenantCreated" -ForegroundColor Green
+    Write-Host "  Third-Party/External: $thirdParty" -ForegroundColor Magenta
+    
+    # Export all service principals data
+    $spData | Export-Csv -Path "$OutputPath\ServicePrincipals_All.csv" -NoTypeInformation
+    
+    # Export only non-Microsoft applications (high priority for forensics)
+    $nonMicrosoftApps = $spData | Where-Object { -not $_.IsMicrosoftBuiltIn }
+    $nonMicrosoftApps | Export-Csv -Path "$OutputPath\ServicePrincipals_NonMicrosoft.csv" -NoTypeInformation
+    
+    # Export tenant-created applications
+    $tenantApps = $spData | Where-Object { $_.Category -eq "Tenant-Created" }
+    $tenantApps | Export-Csv -Path "$OutputPath\ServicePrincipals_TenantCreated.csv" -NoTypeInformation
+    
+    Write-Host "Service principals exported to:" -ForegroundColor Green
+    Write-Host "  - ServicePrincipals_All.csv (all $($spData.Count) apps)" -ForegroundColor White
+    Write-Host "  - ServicePrincipals_NonMicrosoft.csv ($($nonMicrosoftApps.Count) non-Microsoft apps)" -ForegroundColor White
+    Write-Host "  - ServicePrincipals_TenantCreated.csv ($($tenantApps.Count) tenant-created apps)" -ForegroundColor White
 }
 catch {
     Write-Host "Error retrieving service principals: $($_.Exception.Message)" -ForegroundColor Red
@@ -248,7 +364,7 @@ try {
     $allAppRoleAssignments = @()
     
     # Get assignments for each service principal
-    foreach ($sp in $servicePrincipals) {
+    foreach ($sp in $allServicePrincipals) {
         try {
             $assignments = Get-MgServicePrincipalAppRoleAssignment -ServicePrincipalId $sp.Id
             foreach ($assignment in $assignments) {
@@ -290,7 +406,7 @@ try {
     # Check both applications and service principals for credentials
     $allEntities = @()
     $allEntities += $applications | Select-Object Id, DisplayName, @{Name="Type"; Expression={"Application"}}, KeyCredentials, PasswordCredentials
-    $allEntities += $servicePrincipals | Select-Object Id, DisplayName, @{Name="Type"; Expression={"ServicePrincipal"}}, KeyCredentials, PasswordCredentials
+    $allEntities += $allServicePrincipals | Select-Object Id, DisplayName, @{Name="Type"; Expression={"ServicePrincipal"}}, KeyCredentials, PasswordCredentials
     
     foreach ($entity in $allEntities) {
         # Process key credentials (certificates)
@@ -348,39 +464,63 @@ Analysis Date: $(Get-Date)
 
 COUNTS:
 - Application Registrations: $($applications.Count)
-- Service Principals: $($servicePrincipals.Count) 
+- Total Service Principals: $($spData.Count)
+  * Microsoft Built-ins: $microsoftBuiltIns
+  * Tenant-Created: $tenantCreated  
+  * Third-Party/External: $thirdParty
 - OAuth2 Permission Grants: $($oauth2Grants.Count)
 - App Role Assignments: $($allAppRoleAssignments.Count)
 - Total Credentials: $($credentialData.Count)
 
-HIGH-RISK INDICATORS TO INVESTIGATE:
+=== FORENSIC PRIORITY ANALYSIS ===
 
-1. Applications with Excessive Permissions:
-$($appData + $spData | Where-Object { $_.ApiPermissionsCount -gt 10 -or $_.DelegatedPermissionsCount -gt 10 } | Select-Object DisplayName, ApiPermissionsCount, DelegatedPermissionsCount | Format-Table -AutoSize | Out-String)
+1. TENANT-CREATED APPLICATIONS (Highest Priority):
+$($tenantApps | Select-Object DisplayName, CreatedDateTime, PublisherName, @{Name="Permissions";Expression={$_.DelegatedPermissionsCount + $_.AppRoleAssignmentsCount}} | Format-Table -AutoSize | Out-String)
 
-2. Recently Created Applications (Last 30 days):
-$($appData + $spData | Where-Object { $_.CreatedDateTime -ne "N/A" -and [DateTime]$_.CreatedDateTime -gt (Get-Date).AddDays(-30) } | Select-Object DisplayName, CreatedDateTime, AppType | Format-Table -AutoSize | Out-String)
+2. THIRD-PARTY/EXTERNAL APPLICATIONS (High Priority):
+$($spData | Where-Object { $_.Category -eq "Third-Party/External" } | Select-Object DisplayName, CreatedDateTime, PublisherName, CategoryReason | Format-Table -AutoSize | Out-String)
 
-3. Applications with Multiple Credentials:
-$($credentialData | Group-Object EntityId | Where-Object Count -gt 2 | ForEach-Object { $_.Group | Select-Object EntityName, CredentialType -First 1 } | Format-Table -AutoSize | Out-String)
+3. NON-MICROSOFT APPLICATIONS WITH EXCESSIVE PERMISSIONS:
+$($nonMicrosoftApps | Where-Object { ([int]$_.DelegatedPermissionsCount + [int]$_.AppRoleAssignmentsCount) -gt 5 } | Select-Object DisplayName, Category, @{Name="TotalPermissions";Expression={[int]$_.DelegatedPermissionsCount + [int]$_.AppRoleAssignmentsCount}}, PublisherName | Format-Table -AutoSize | Out-String)
 
-4. External Applications (Non-Microsoft):
-$($spData | Where-Object { $_.PublisherName -notlike "*Microsoft*" -and $_.AppOwnerOrganizationId -ne "63ad9bfc-1f87-4b03-918e-81434c7ae363" } | Select-Object DisplayName, PublisherName, CreatedDateTime | Format-Table -AutoSize | Out-String)
+4. RECENTLY CREATED NON-MICROSOFT APPLICATIONS (Last 30 days):
+$($nonMicrosoftApps | Where-Object { $_.CreatedDateTime -ne "N/A" -and [DateTime]$_.CreatedDateTime -gt (Get-Date).AddDays(-30) } | Select-Object DisplayName, CreatedDateTime, Category, PublisherName | Format-Table -AutoSize | Out-String)
+
+5. NON-MICROSOFT APPLICATIONS WITH MULTIPLE CREDENTIALS:
+$($credentialData | Where-Object { $_.EntityName -in $nonMicrosoftApps.DisplayName } | Group-Object EntityName | Where-Object Count -gt 1 | ForEach-Object { [PSCustomObject]@{ApplicationName = $_.Name; CredentialCount = $_.Count; CredentialTypes = ($_.Group.CredentialType | Sort-Object -Unique) -join ", "} } | Format-Table -AutoSize | Out-String)
 
 FILES GENERATED:
-- ApplicationRegistrations.csv: All registered applications
-- ServicePrincipals.csv: All enterprise applications  
-- OAuth2PermissionGrants.csv: Delegated permissions
-- AppRoleAssignments.csv: Application role assignments
-- ApplicationCredentials.csv: Certificates and secrets
+- ApplicationRegistrations.csv: All registered applications ($($applications.Count) apps)
+- ServicePrincipals_All.csv: All enterprise applications ($($spData.Count) apps)
+- ServicePrincipals_NonMicrosoft.csv: Non-Microsoft applications ($($nonMicrosoftApps.Count) apps) ⚠️ HIGH PRIORITY
+- ServicePrincipals_TenantCreated.csv: Tenant-created applications ($($tenantApps.Count) apps) ⚠️ HIGHEST PRIORITY
+- OAuth2PermissionGrants.csv: Delegated permissions ($($oauth2Grants.Count) grants)
+- AppRoleAssignments.csv: Application role assignments ($($allAppRoleAssignments.Count) assignments)
+- ApplicationCredentials.csv: Certificates and secrets ($($credentialData.Count) credentials)
 - ForensicsSummary.txt: This summary report
 
-RECOMMENDED NEXT STEPS:
-1. Review applications created by non-admin users
-2. Audit applications with broad Microsoft Graph permissions
+RECOMMENDED FORENSIC ACTIONS:
+🔴 IMMEDIATE:
+1. Review all applications in ServicePrincipals_TenantCreated.csv - these were created in your tenant
+2. Investigate any applications created by non-admin users
+3. Check for applications with suspicious names or excessive permissions
+
+🟡 HIGH PRIORITY:
+1. Audit third-party applications in ServicePrincipals_NonMicrosoft.csv
+2. Review applications with broad Microsoft Graph permissions (User.ReadWrite.All, Mail.ReadWrite, etc.)
 3. Check for applications with expired or expiring credentials
-4. Investigate any applications with suspicious names or external publishers
-5. Review OAuth consent grants for unusual patterns
+4. Look for unusual OAuth consent grants
+
+🟢 GENERAL:
+1. Review applications created in the last 30 days for timing correlation with security incidents
+2. Audit applications with multiple authentication credentials
+3. Check for applications accessing sensitive resources (Exchange, SharePoint, etc.)
+
+THREAT HUNTING QUERIES:
+- Apps with admin consent: Look for ConsentType = "AllPrincipals" in OAuth2PermissionGrants.csv
+- Suspicious permissions: Search for "Directory.ReadWrite.All", "RoleManagement.ReadWrite.Directory"
+- Recent activity: Filter by CreatedDateTime in the last 30-90 days
+- External publishers: Review apps where PublisherName doesn't match known vendors
 "@
 
 $summary | Out-File -FilePath "$OutputPath\ForensicsSummary.txt" -Encoding UTF8
