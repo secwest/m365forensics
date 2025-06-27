@@ -94,6 +94,7 @@ if ($StartTime -ge $EndTime) {
 $MaxEvents  = 1000                           # Increased for better coverage
 $OutputPath = "C:\Temp\ElevationAudit_Enhanced_$(Get-Date -Format 'yyyyMMdd_HHmmss').txt"
 $prefetchExportPath = $OutputPath -replace "\.txt$", "_PrefetchData.csv"
+$runOnceExportPath = $OutputPath -replace "\.txt$", "_RunOnceEntries.csv"
 
 # Suspicious process list includes commonly abused/impersonated executables
 # Note: svchost.exe, dllhost.exe, and explorer.exe are legitimate Windows processes
@@ -140,11 +141,13 @@ if ($BeforeTime -ne "") {
 $header += "Output file: $OutputPath`r`n"
 $header += "`r`nIMPORTANT: This tool identifies potentially suspicious patterns that may also`r`n"
 $header += "           occur in legitimate software. Review all findings in context.`r`n"
+$header += "           Pay special attention to svchost.exe, dllhost.exe, and explorer.exe`r`n"
+$header += "           running from non-system directories - common malware technique.`r`n"
 $header += "`r`nThis report includes:`r`n"
 $header += "  - Complete prefetch activity log for specified time period`r`n"
 $header += "  - MSI installer events and patterns`r`n"
 $header += "  - Security process creation monitoring`r`n"
-$header += "  - Persistence mechanism checks`r`n"
+$header += "  - Persistence mechanism checks (including ALL RunOnce entries)`r`n"
 $header += "  - Network connection analysis`r`n"
 $header += "  - Suspicious time period analysis`r`n"
 $header += "  - Risk assessment and recommendations`r`n"
@@ -210,6 +213,7 @@ try {
         }
         
         if ($suspiciousMsi) {
+            $script:suspiciousMsi = $suspiciousMsi  # Make available for summary
             Write-Alert "Found $($suspiciousMsi.Count) MSI installations during off-hours or in temporary locations"
         }
         } else {
@@ -361,6 +365,7 @@ Write-Output $out
 # Suspicious prefetch files
 $suspiciousPrefetch = $last24HoursPrefetch | Where-Object { $_.IsSuspicious }
 if ($suspiciousPrefetch) {
+    $script:suspiciousPrefetch = $suspiciousPrefetch  # Make available for summary
     Write-Alert "Found $($suspiciousPrefetch.Count) suspicious prefetch entries in the $Hours-hour window"
     $out = "`r`nSuspicious Prefetch Files Detail:`r`n"
     $out += $suspiciousPrefetch |
@@ -415,6 +420,7 @@ for ($i = 0; $i -lt ($sortedPrefetch.Count - 5); $i++) {
 }
 
 if ($rapidExecutions) {
+    $script:rapidExecutions = $rapidExecutions  # Make available for summary
     Write-Alert "Detected rapid execution patterns"
     foreach ($burst in $rapidExecutions) {
         $out += "`r`nBurst at $($burst.StartTime.ToString('yyyy-MM-dd HH:mm:ss')):`r`n"
@@ -570,6 +576,7 @@ try {
         $nonMsTasks = $last24HoursTasks | Where-Object { $_.Task.TaskPath -notmatch "^\\Microsoft\\" }
         
         if ($nonMsTasks) {
+            $script:nonMsTasks = $nonMsTasks  # Make available for summary
             Write-Alert "Found $($nonMsTasks.Count) non-Microsoft tasks that ran in the $Hours-hour window"
             $out = "`r`nNon-Microsoft Tasks (DETAILED ANALYSIS):`r`n"
             $out += "=" * 100 + "`r`n"
@@ -641,33 +648,148 @@ try {
 
 # C. RunOnce Registry Entries
 Write-Host "`nChecking RunOnce Registry Entries..." -ForegroundColor Yellow
+Write-Host "These entries execute once at next logon/reboot and are then deleted" -ForegroundColor Gray
+Write-Host "Often used by installers and malware for persistence" -ForegroundColor Gray
+Write-Host "`r`n" -ForegroundColor Cyan
+Write-Host "================================================================" -ForegroundColor Cyan
+Write-Host "COMPREHENSIVE RUNONCE ANALYSIS - ALL ENTRIES EXPLICITLY LISTED" -ForegroundColor Yellow
+Write-Host "================================================================" -ForegroundColor Cyan
+Write-Host "`r`n" -ForegroundColor Cyan
+
 $runOnceKeys = @(
-    "HKLM:\Software\Microsoft\Windows\CurrentVersion\RunOnce",
-    "HKLM:\Software\Microsoft\Windows\CurrentVersion\RunOnceEx",
-    "HKCU:\Software\Microsoft\Windows\CurrentVersion\RunOnce",
-    "HKCU:\Software\Microsoft\Windows\CurrentVersion\RunOnceEx"
+    @{Path="HKLM:\Software\Microsoft\Windows\CurrentVersion\RunOnce"; Name="HKLM RunOnce (64-bit)"},
+    @{Path="HKLM:\Software\Microsoft\Windows\CurrentVersion\RunOnceEx"; Name="HKLM RunOnceEx (64-bit)"},
+    @{Path="HKLM:\Software\Microsoft\Windows\CurrentVersion\RunServices"; Name="HKLM RunServices (Legacy)"},
+    @{Path="HKLM:\Software\Microsoft\Windows\CurrentVersion\RunServicesOnce"; Name="HKLM RunServicesOnce (Legacy)"},
+    @{Path="HKLM:\Software\Wow6432Node\Microsoft\Windows\CurrentVersion\RunOnce"; Name="HKLM RunOnce (32-bit)"},
+    @{Path="HKLM:\Software\Wow6432Node\Microsoft\Windows\CurrentVersion\RunOnceEx"; Name="HKLM RunOnceEx (32-bit)"},
+    @{Path="HKCU:\Software\Microsoft\Windows\CurrentVersion\RunOnce"; Name="HKCU RunOnce (64-bit)"},
+    @{Path="HKCU:\Software\Microsoft\Windows\CurrentVersion\RunOnceEx"; Name="HKCU RunOnceEx (64-bit)"},
+    @{Path="HKCU:\Software\Microsoft\Windows\CurrentVersion\RunServices"; Name="HKCU RunServices (Legacy)"},
+    @{Path="HKCU:\Software\Microsoft\Windows\CurrentVersion\RunServicesOnce"; Name="HKCU RunServicesOnce (Legacy)"},
+    @{Path="HKCU:\Software\Wow6432Node\Microsoft\Windows\CurrentVersion\RunOnce"; Name="HKCU RunOnce (32-bit)"},
+    @{Path="HKCU:\Software\Wow6432Node\Microsoft\Windows\CurrentVersion\RunOnceEx"; Name="HKCU RunOnceEx (32-bit)"}
 )
 
+$allRunOnceEntries = @()
 $runOnceFound = $false
-foreach ($key in $runOnceKeys) {
+
+foreach ($keyInfo in $runOnceKeys) {
     try {
-        $entries = Get-ItemProperty -Path $key -ErrorAction SilentlyContinue
-        if ($entries) {
-            $runOnceFound = $true
-            $out = "`r`n$key entries:`r`n"
-            $entries.PSObject.Properties | Where-Object { $_.Name -ne "PSPath" -and $_.Name -ne "PSParentPath" -and $_.Name -ne "PSChildName" -and $_.Name -ne "PSDrive" -and $_.Name -ne "PSProvider" } | ForEach-Object {
-                $out += "  $($_.Name) = $($_.Value)`r`n"
+        if (Test-Path $keyInfo.Path) {
+            $entries = Get-ItemProperty -Path $keyInfo.Path -ErrorAction SilentlyContinue
+            if ($entries) {
+                $properties = $entries.PSObject.Properties | Where-Object { 
+                    $_.Name -notin @("PSPath", "PSParentPath", "PSChildName", "PSDrive", "PSProvider") 
+                }
+                
+                if ($properties) {
+                    $runOnceFound = $true
+                    foreach ($prop in $properties) {
+                        $entryInfo = [PSCustomObject]@{
+                            Location = $keyInfo.Name
+                            FullPath = $keyInfo.Path
+                            EntryName = $prop.Name
+                            Command = $prop.Value
+                            IsSuspicious = $false
+                        }
+                        
+                        # Check for suspicious patterns
+                        if ($prop.Value -match "(powershell|cmd|wscript|cscript|mshta|rundll32)" -or
+                            $prop.Value -match "(\\temp\\|\\appdata\\|\\users\\[^\\]+\\appdata)" -or
+                            $prop.Value -match "\.(ps1|bat|vbs|js|hta|exe)") {
+                            $entryInfo.IsSuspicious = $true
+                        }
+                        
+                        $allRunOnceEntries += $entryInfo
+                    }
+                }
             }
-            Write-Host $out
-            Write-Output $out
         }
     } catch {
-        # Key doesn't exist
+        # Key doesn't exist or access denied
     }
 }
 
-if (-not $runOnceFound) {
-    $out = "No RunOnce entries found.`r`n"
+if ($runOnceFound) {
+    Write-Alert "Found $($allRunOnceEntries.Count) RunOnce entries"
+    $out = "`r`nDETAILED RUNONCE ENTRIES:`r`n"
+    $out += "=" * 100 + "`r`n`r`n"
+    
+    # Export all RunOnce entries to CSV
+    try {
+        $allRunOnceEntries | 
+            Select-Object Location, EntryName, Command, 
+                @{Name="IsSuspicious";Expression={if($_.IsSuspicious){"Yes"}else{"No"}}},
+                FullPath |
+            Export-Csv -Path $runOnceExportPath -NoTypeInformation -Encoding ASCII
+        
+        $out += "All RunOnce entries exported to: $runOnceExportPath`r`n`r`n"
+    } catch {
+        # Export failed
+    }
+    
+    # Group by location
+    $groupedEntries = $allRunOnceEntries | Group-Object Location
+    
+    foreach ($group in $groupedEntries) {
+        $out += "$($group.Name): $($group.Count) entries`r`n"
+        $out += "-" * 80 + "`r`n"
+        
+        foreach ($entry in $group.Group) {
+            $out += "Entry Name: $($entry.EntryName)`r`n"
+            $out += "Full Path:  $($entry.FullPath)\$($entry.EntryName)`r`n"
+            $out += "Command:    $($entry.Command)`r`n"
+            if ($entry.IsSuspicious) {
+                $out += "[FLAGGED]   This entry contains suspicious patterns`r`n"
+            }
+            $out += "`r`n"
+        }
+    }
+    
+    # Summary table
+    $out += "`r`nRUNONCE ENTRIES SUMMARY:`r`n"
+    $out += $allRunOnceEntries | 
+        Select-Object Location, EntryName, 
+            @{Name="Command";Expression={
+                if ($_.Command.Length -gt 80) { 
+                    $_.Command.Substring(0,77) + "..." 
+                } else { 
+                    $_.Command 
+                }
+            }},
+            @{Name="Flagged";Expression={if($_.IsSuspicious){"YES"}else{""}}} |
+        Format-Table -AutoSize | 
+        Out-String
+    
+    # Check for suspicious entries
+    $suspiciousRunOnce = $allRunOnceEntries | Where-Object { $_.IsSuspicious }
+    if ($suspiciousRunOnce) {
+        $script:suspiciousRunOnce = $suspiciousRunOnce  # Make available for summary
+        Write-Alert "Found $($suspiciousRunOnce.Count) potentially suspicious RunOnce entries"
+        $out += "`r`nSUSPICIOUS RUNONCE ENTRIES REQUIRING REVIEW:`r`n"
+        $out += "=" * 100 + "`r`n"
+        foreach ($entry in $suspiciousRunOnce) {
+            $out += "`r`nLocation: $($entry.Location)`r`n"
+            $out += "Entry:    $($entry.EntryName)`r`n"
+            $out += "Command:  $($entry.Command)`r`n"
+            $out += "Path:     $($entry.FullPath)`r`n"
+            
+            # Add to suspicious items for summary
+            $script:suspiciousItems += "RunOnce: $($entry.EntryName) - $($entry.Command.Substring(0, [Math]::Min(50, $entry.Command.Length)))"
+        }
+    }
+    
+    Write-Host $out
+    Write-Output $out
+} else {
+    $out = "No RunOnce entries found in any location.`r`n"
+    $out += "`r`nChecked locations:`r`n"
+    foreach ($keyInfo in $runOnceKeys) {
+        $exists = if (Test-Path $keyInfo.Path) { "[Key Exists]" } else { "[Not Found]" }
+        $out += "  $exists $($keyInfo.Name): $($keyInfo.Path)`r`n"
+    }
+    $out += "`r`nNote: Empty RunOnce keys are normal. Entries are deleted after execution.`r`n"
     Write-Host $out
     Write-Output $out
 }
@@ -720,6 +842,7 @@ try {
     }
 
     if ($suspiciousServices) {
+        $script:suspiciousServices = $suspiciousServices  # Make available for summary
         Write-Alert "Found $($suspiciousServices.Count) potentially suspicious services"
         $out = "`r`nSuspicious Services Detail:`r`n"
         $out += $suspiciousServices | Format-Table -Property Name, DisplayName, StartMode, PathName -Wrap -AutoSize | Out-String
@@ -855,6 +978,7 @@ try {
     }
     
     if ($suspiciousConnections) {
+        $script:suspiciousConnections = $suspiciousConnections  # Make available for summary
         Write-Alert "Found $($suspiciousConnections.Count) network connections from potentially suspicious processes"
         $out = "`r`nSuspicious Network Connections:`r`n"
         foreach ($conn in $suspiciousConnections) {
@@ -902,6 +1026,7 @@ foreach ($location in $suspiciousLocations) {
 }
 
 if ($recentExes) {
+    $script:recentExes = $recentExes  # Make available for summary
     Write-Alert "Found $($recentExes.Count) recently modified executables in suspicious locations"
             $out = "`r`nRecent Executables in Monitored Locations:`r`n"
     $out += $recentExes | 
@@ -982,6 +1107,7 @@ foreach ($logName in $logNames) {
 }
 
 if ($suspiciousTimes) {
+    $script:suspiciousTimes = $suspiciousTimes  # Make available for summary
     Write-Alert "Found $($suspiciousTimes.Count) events during off-hours (11PM-7AM)"
     $grouped = $suspiciousTimes | 
         Group-Object { $_.TimeCreated.ToString("yyyy-MM-dd HH:00") } |
@@ -1224,6 +1350,7 @@ $recommendations = "Based on the comprehensive analysis:
    - Check all services running from temp/user directories
    - Verify legitimacy of any elevation_service.exe instances
    - Review all startup items and RunOnce entries
+   - IMPORTANT: RunOnce entries execute at next logon - remove suspicious ones immediately
 
 2. INVESTIGATION PRIORITIES:
    - Review activities during off-hours (11PM-7AM) for your environment
@@ -1292,7 +1419,17 @@ $summary += "=" * 60 + "`r`n"
 
 # Count suspicious indicators
 $indicators = 0
-$suspiciousItems = @()
+$script:suspiciousItems = @()
+$script:suspiciousRunOnce = $null  # Initialize for summary section
+$script:suspicious = $null  # Initialize for WMI startup commands
+$script:suspiciousServices = $null  # Initialize for services section
+$script:suspiciousMsi = $null  # Initialize for MSI section
+$script:suspiciousPrefetch = $null  # Initialize for prefetch section
+$script:recentExes = $null  # Initialize for file system checks
+$script:nonMsTasks = $null  # Initialize for scheduled tasks
+$script:suspiciousConnections = $null  # Initialize for network analysis
+$script:rapidExecutions = $null  # Initialize for rapid execution patterns
+$script:suspiciousTimes = $null  # Initialize for time-based analysis
 
 # Check for elevation service
 if ($elevationPrefetch -or $foundElevation) {
@@ -1302,56 +1439,59 @@ if ($elevationPrefetch -or $foundElevation) {
 }
 
 # Check for suspicious MSI activity
-if ($suspiciousMsi) {
-    $summary += "[*] Suspicious MSI installations: $($suspiciousMsi.Count)`r`n"
+if ($script:suspiciousMsi) {
+    $summary += "[*] Suspicious MSI installations: $($script:suspiciousMsi.Count)`r`n"
     $indicators++
 }
 
 # Check for off-hours activity
-if ($suspiciousTimes -and $suspiciousTimes.Count -gt 100) {
-    $summary += "[*] High volume of off-hours activity: $($suspiciousTimes.Count) events`r`n"
+if ($script:suspiciousTimes -and $script:suspiciousTimes.Count -gt 100) {
+    $summary += "[*] High volume of off-hours activity: $($script:suspiciousTimes.Count) events`r`n"
     $indicators++
 }
 
 # Check for suspicious prefetch
-if ($suspiciousPrefetch) {
-    $summary += "[*] Suspicious programs executed: $($suspiciousPrefetch.Count)`r`n"
+if ($script:suspiciousPrefetch) {
+    $summary += "[*] Suspicious programs executed: $($script:suspiciousPrefetch.Count)`r`n"
     $indicators++
 }
 
 # Check for suspicious services
-if ($suspiciousServices) {
-    $summary += "[*] Suspicious services found: $($suspiciousServices.Count)`r`n"
+if ($script:suspiciousServices) {
+    $summary += "[*] Suspicious services found: $($script:suspiciousServices.Count)`r`n"
     $indicators++
 }
 
-# Check for suspicious startup items
-if ($suspicious) {
-    $summary += "[*] Suspicious startup commands: $($suspicious.Count)`r`n"
+# Check for suspicious startup items (including RunOnce)
+if ($script:suspicious -or $script:suspiciousRunOnce) {
+    $totalSuspiciousStartup = 0
+    if ($script:suspicious) { $totalSuspiciousStartup += $script:suspicious.Count }
+    if ($script:suspiciousRunOnce) { $totalSuspiciousStartup += $script:suspiciousRunOnce.Count }
+    $summary += "[*] Suspicious startup commands (including RunOnce): $totalSuspiciousStartup`r`n"
     $indicators++
 }
 
 # Check for recent executables in temp
-if ($recentExes) {
-    $summary += "[*] Recent executables in temp/appdata: $($recentExes.Count)`r`n"
+if ($script:recentExes) {
+    $summary += "[*] Recent executables in temp/appdata: $($script:recentExes.Count)`r`n"
     $indicators++
 }
 
 # Check for non-Microsoft scheduled tasks
-if ($nonMsTasks) {
-    $summary += "[*] Non-Microsoft scheduled tasks active: $($nonMsTasks.Count)`r`n"
+if ($script:nonMsTasks) {
+    $summary += "[*] Non-Microsoft scheduled tasks active: $($script:nonMsTasks.Count)`r`n"
     $indicators++
 }
 
 # Check for network connections
-if ($suspiciousConnections) {
-    $summary += "[*] Suspicious network connections: $($suspiciousConnections.Count)`r`n"
+if ($script:suspiciousConnections) {
+    $summary += "[*] Suspicious network connections: $($script:suspiciousConnections.Count)`r`n"
     $indicators++
 }
 
 # Check for rapid execution patterns
-if ($rapidExecutions) {
-    $summary += "[*] Rapid execution patterns detected: $($rapidExecutions.Count)`r`n"
+if ($script:rapidExecutions) {
+    $summary += "[*] Rapid execution patterns detected: $($script:rapidExecutions.Count)`r`n"
     $indicators++
 }
 
@@ -1377,10 +1517,10 @@ $summary += "Time window analyzed: $($StartTime.ToString('yyyy-MM-dd HH:mm:ss'))
 $summary += "Duration: $Hours hours before $($EndTime.ToString('yyyy-MM-dd HH:mm:ss'))`r`n"
 
 # List key findings
-if ($suspiciousItems.Count -gt 0) {
+if ($script:suspiciousItems.Count -gt 0) {
     $summary += "`r`nFINDINGS REQUIRING REVIEW:`r`n"
     $summary += "=" * 60 + "`r`n"
-    foreach ($item in $suspiciousItems) {
+    foreach ($item in $script:suspiciousItems) {
         $summary += "  - $item`r`n"
     }
 }
@@ -1400,6 +1540,9 @@ Write-Host "======== OUTPUT FILES CREATED ========" -ForegroundColor Green
 Write-Host "Main Report:     $OutputPath" -ForegroundColor Yellow
 if ($prefetchExportPath -and (Test-Path $prefetchExportPath)) {
     Write-Host "Prefetch Data:   $prefetchExportPath" -ForegroundColor Yellow
+}
+if ($runOnceExportPath -and (Test-Path $runOnceExportPath)) {
+    Write-Host "RunOnce Data:    $runOnceExportPath" -ForegroundColor Yellow
 }
 Write-Host "=====================================" -ForegroundColor Green
 Write-Host "`r`n" -ForegroundColor Green
@@ -1423,3 +1566,19 @@ if ($Hours -eq 24 -and $BeforeTime -eq "") {
     Write-Host "    Analyzes 72 hours before June 26, 2025 3:00 PM (June 23-26)" -ForegroundColor Gray
     Write-Host "`r`n" -ForegroundColor Cyan
 }
+
+Write-Host "`r`n" -ForegroundColor Cyan
+Write-Host "======================================================================" -ForegroundColor Cyan
+Write-Host "IMPORTANT LOCATIONS IN THIS REPORT:" -ForegroundColor Yellow
+Write-Host "======================================================================" -ForegroundColor Cyan
+Write-Host "1. RUNONCE REGISTRY ENTRIES: Located in 'Persistence Mechanism Detection'" -ForegroundColor Green
+Write-Host "   - ALL RunOnce entries are explicitly listed with full commands" -ForegroundColor Gray
+Write-Host "   - Includes 32-bit and 64-bit registry locations" -ForegroundColor Gray
+Write-Host "   - Shows both HKLM and HKCU entries" -ForegroundColor Gray
+Write-Host "`r`n" -ForegroundColor Cyan
+Write-Host "2. COMPLETE PREFETCH LOG: Located near the end of the report" -ForegroundColor Green
+Write-Host "   - Contains EVERY prefetch file from your time window" -ForegroundColor Gray
+Write-Host "   - Includes CSV export for Excel analysis" -ForegroundColor Gray
+Write-Host "   - Shows execution timeline and patterns" -ForegroundColor Gray
+Write-Host "======================================================================" -ForegroundColor Cyan
+Write-Host "`r`n" -ForegroundColor Cyan
