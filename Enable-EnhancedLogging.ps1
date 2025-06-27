@@ -1,229 +1,168 @@
 # Enable-EnhancedLogging.ps1
 
+<#
+.SYNOPSIS
+  Installs or uninstalls enhanced logging and protections.
+.DESCRIPTION
+  Modes:
+    Install   - Enable audit policies, PowerShell logging, Defender features, and prompt/install Sysmon.
+    Uninstall - Prompt and disable each enabled setting, and optionally uninstall Sysmon.
+#>
+param(
+    [ValidateSet("Install","Uninstall")]
+    [string]$Mode = "Install",
+    [switch]$IncludeSysmon                 # If set, Sysmon will be installed without prompt
+)
+
 # ------------------------------------------------------------------------
 # CONFIGURATION
 # ------------------------------------------------------------------------
 $LogFile        = "C:\Temp\EnhancedLoggingSetup.log"
 $ErrorActionPreference = "Continue"
 
-# Paths for Sysmon install
-$BaseDir        = $PSScriptRoot
-$SysmonDir      = Join-Path $BaseDir "Sysmon"
-$SysmonZip      = Join-Path $SysmonDir "Sysmon.zip"
-$SysmonExe      = Join-Path $SysmonDir "Sysmon.exe"
-$SysmonConfig   = Join-Path $SysmonDir "sysmon-config.xml"
+# Paths for Sysmon
+$BaseDir      = $PSScriptRoot
+$SysmonDir    = Join-Path $BaseDir "Sysmon"
+$SysmonZip    = Join-Path $SysmonDir "Sysmon.zip"
+$SysmonExe    = Join-Path $SysmonDir "Sysmon.exe"
+$SysmonConfig = Join-Path $SysmonDir "sysmon-config.xml"
 
-# Ensure log directory exists
+# Ensure log directory and file
 $logDir = Split-Path $LogFile
-if (-not (Test-Path $logDir)) {
-  New-Item -Path $logDir -ItemType Directory -Force | Out-Null
-}
-# Ensure clean log
-"`r`n=== Enhanced Logging Setup started on $(Get-Date) ===`r`n" |
-  Out-File -FilePath $LogFile -Encoding UTF8
+if (-not (Test-Path $logDir)) { New-Item -Path $logDir -ItemType Directory -Force | Out-Null }
+"`r`n=== Enhanced Logging Script started on $(Get-Date) Mode=$Mode ===`r`n" |
+    Out-File -FilePath $LogFile -Encoding UTF8
 
 function Write-Log {
-  param([string]$Message)
-  $ts = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
-  $line = "$ts - $Message"
-  Write-Host $line
-  Add-Content -Path $LogFile -Value $line
+    param([string]$Msg)
+    $ts = Get-Date -Format 'yyyy-MM-dd HH:mm:ss'
+    $line = "$ts [$Mode] - $Msg"
+    Write-Host $line
+    Add-Content -Path $LogFile -Value $line
 }
 
-Write-Log "Beginning setup..."
+# Audit and logging settings
+$auditSettings = @{
+    'Process Creation' = '/success:enable /failure:enable'
+    'Module Load'      = '/success:enable /failure:enable'
+    'File System'      = '/success:enable /failure:enable'
+    'Registry'         = '/success:enable /failure:enable'
+}
+$regPath    = 'HKLM:\SYSTEM\CurrentControlSet\Control\Lsa'
+$regName    = 'KernelAuditIncludeCommandLine'
+$sbLogPath  = 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\PowerShell\ScriptBlockLogging'
+$modLogPath = 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\PowerShell\ModuleLogging'
 
-# ------------------------------------------------------------------------
-# 1) Prompt to install Sysmon
-# ------------------------------------------------------------------------
-$installSysmon = Read-Host "Install Sysmon with basic config? (Y/N)"
-if ($installSysmon -match '^[Yy]') {
-  try {
-    Write-Log "Preparing Sysmon directory..."
-    if (-not (Test-Path $SysmonDir)) {
-      New-Item -Path $SysmonDir -ItemType Directory -Force | Out-Null
+function Prompt-Disable {
+    param(
+        [string]$Description,
+        [scriptblock]$Action
+    )
+    $resp = Read-Host "Disable $Description? (Y/N)"
+    if ($resp -match '^[Yy]') {
+        Write-Log "Disabling: $Description"
+        & $Action
+        Write-Log "Disabled: $Description"
+    } else {
+        Write-Log "Skipped disabling: $Description"
     }
+}
 
-    Write-Log "Downloading Sysmon.zip..."
-    Invoke-WebRequest -UseBasicParsing `
-      "https://download.sysinternals.com/files/Sysmon.zip" `
-      -OutFile $SysmonZip -ErrorAction Stop
-
-    Write-Log "Extracting Sysmon.exe..."
-    Expand-Archive -LiteralPath $SysmonZip -DestinationPath $SysmonDir -Force
-
-    Write-Log "Writing minimal Sysmon config..."
-    @"
-<Sysmon schemaversion="4.30">
+function Install-Features {
+    Write-Log 'Installing features...'
+    # Audit policies
+    foreach ($cat in $auditSettings.Keys) {
+        $cmd = "auditpol /set /subcategory:`"$cat`" $($auditSettings[$cat])"
+        Write-Log "Executing: $cmd"
+        Invoke-Expression $cmd
+        Write-Log "Audit $cat enabled."
+    }
+    # CommandLine inclusion
+    $cmd = "New-ItemProperty -Path $regPath -Name $regName -Value 1 -PropertyType DWord -Force"
+    Write-Log "Executing: $cmd"
+    Invoke-Expression $cmd | Out-Null
+    Write-Log 'CommandLine inclusion enabled.'
+    # PowerShell logging
+    foreach ($psPath in @($sbLogPath, $modLogPath)) {
+        $cmd = "New-Item -Path $psPath -Force"
+        Write-Log "Executing: $cmd"
+        Invoke-Expression $cmd | Out-Null
+    }
+    $cmd = "New-ItemProperty -Path $sbLogPath -Name EnableScriptBlockLogging -PropertyType DWord -Value 1 -Force"
+    Write-Log "Executing: $cmd"
+    Invoke-Expression $cmd | Out-Null
+    $cmd = "New-ItemProperty -Path $modLogPath -Name EnableModuleLogging -PropertyType DWord -Value 1 -Force"
+    Write-Log "Executing: $cmd"
+    Invoke-Expression $cmd | Out-Null
+    $cmd = "New-ItemProperty -Path $modLogPath -Name ModuleNames -PropertyType MultiString -Value '*' -Force"
+    Write-Log "Executing: $cmd"
+    Invoke-Expression $cmd | Out-Null
+    Write-Log 'PowerShell logging enabled.'
+    # Defender features
+    foreach ($dCmd in @(
+        'Set-MpPreference -EnableControlledFolderAccess Enabled',
+        'Set-MpPreference -EnableNetworkProtection Enabled'
+    )) {
+        Write-Log "Executing: $dCmd"
+        Invoke-Expression $dCmd | Out-Null
+        Write-Log "$dCmd successful."
+    }
+    # Sysmon install prompt
+    $install = $IncludeSysmon -or (Read-Host 'Install Sysmon? (Y/N)' -match '^[Yy]')
+    if ($install) {
+        Write-Log 'Installing Sysmon...'
+        if (-not (Test-Path $SysmonDir)) { New-Item -Path $SysmonDir -ItemType Directory -Force }
+        $cmd = "Invoke-WebRequest -UseBasicParsing -Uri https://download.sysinternals.com/files/Sysmon.zip -OutFile `"$SysmonZip`""
+        Write-Log "Executing: $cmd"
+        Invoke-Expression $cmd
+        $cmd = "Expand-Archive -LiteralPath `"$SysmonZip`" -DestinationPath `"$SysmonDir`" -Force"
+        Write-Log "Executing: $cmd"
+        Invoke-Expression $cmd
+        @"
+<Sysmon schemaversion=\"4.30\">
   <EventFiltering>
-    <ProcessCreate onmatch="include" />
-    <NetworkConnect onmatch="include" />
+    <ProcessCreate onmatch=\"include\" />
+    <NetworkConnect onmatch=\"include\" />
   </EventFiltering>
 </Sysmon>
 "@ | Out-File -FilePath $SysmonConfig -Encoding ASCII
-
-    Write-Log "Installing Sysmon service..."
-    & $SysmonExe -accepteula -i $SysmonConfig | Out-Null
-    Write-Log "Sysmon installed."
-  }
-  catch {
-    Write-Log "ERROR installing Sysmon: $_"
-  }
-}
-else {
-  Write-Log "Skipping Sysmon installation."
-}
-
-# ------------------------------------------------------------------------
-# 2) Advanced Audit Policies
-# ------------------------------------------------------------------------
-$auditSettings = @{
-  "Process Creation" = "/success:enable /failure:enable"
-  "Module Load"      = "/success:enable /failure:enable"
-  "File System"      = "/success:enable /failure:enable"
-  "Registry"         = "/success:enable /failure:enable"
+        $cmd = "& `$SysmonExe -accepteula -i `$SysmonConfig"
+        Write-Log "Executing: $cmd"
+        & $SysmonExe -accepteula -i $SysmonConfig | Out-Null
+        Write-Log 'Sysmon installed.'
+    } else { Write-Log 'Sysmon install skipped.' }
+    Write-Log 'Installation complete.'
+    # Explicit disable commands summary
+    Write-Host "`nCut-and-paste to disable specific features:`n"
+    Write-Host "# Disable a specific audit:"; $auditSettings.Keys | ForEach-Object { Write-Host "auditpol /set /subcategory:'$_' /success:disable /failure:disable" }
+    Write-Host "`n# Disable CommandLine inclusion:"; Write-Host "Remove-ItemProperty -Path $regPath -Name $regName"
+    Write-Host "`n# Disable PowerShell logging:";
+    Write-Host "Remove-Item -Path $sbLogPath -Recurse -Force";
+    Write-Host "Remove-Item -Path $modLogPath -Recurse -Force"
+    Write-Host "`n# Disable Defender features:";
+    Write-Host "Set-MpPreference -EnableControlledFolderAccess Disabled";
+    Write-Host "Set-MpPreference -EnableNetworkProtection Disabled"
+    Write-Host "`n# Uninstall Sysmon:"; Write-Host "& $SysmonExe -u -accepteula"
+    Write-Log 'Displayed explicit disable instructions.'
 }
 
-foreach ($subcat in $auditSettings.Keys) {
-  try {
-    Write-Log "Enabling audit for '$subcat'..."
-    auditpol /set /subcategory:"$subcat" $auditSettings[$subcat] | Out-Null
-    Write-Log "Audit '$subcat' enabled."
-  }
-  catch {
-    Write-Log "ERROR enabling audit '$subcat': $_"
-  }
-}
-
-# ------------------------------------------------------------------------
-# 3) Include CommandLine in 4688 events
-# ------------------------------------------------------------------------
-$regPath = "HKLM:\SYSTEM\CurrentControlSet\Control\Lsa"
-$regName = "KernelAuditIncludeCommandLine"
-try {
-  $current = Get-ItemProperty -Path $regPath -Name $regName -ErrorAction SilentlyContinue
-  if ($current.$regName -eq 1) {
-    Write-Log "CommandLine inclusion already enabled."
-  }
-  else {
-    Write-Log "Enabling CommandLine inclusion..."
-    New-ItemProperty -Path $regPath -Name $regName -Value 1 -PropertyType DWord -Force | Out-Null
-    Write-Log "CommandLine inclusion enabled."
-  }
-}
-catch {
-  Write-Log "ERROR setting CommandLine inclusion: $_"
-}
-
-# ------------------------------------------------------------------------
-# 4) PowerShell ScriptBlock & Module Logging
-# ------------------------------------------------------------------------
-$sbLogPath  = "HKLM:\SOFTWARE\Policies\Microsoft\Windows\PowerShell\ScriptBlockLogging"
-$modLogPath = "HKLM:\SOFTWARE\Policies\Microsoft\Windows\PowerShell\ModuleLogging"
-
-try {
-  Write-Log "Enabling ScriptBlockLogging..."
-  New-Item -Path $sbLogPath -Force | Out-Null
-  New-ItemProperty -Path $sbLogPath -Name "EnableScriptBlockLogging" -PropertyType DWord -Value 1 -Force | Out-Null
-  Write-Log "ScriptBlockLogging enabled."
-}
-catch {
-  Write-Log "ERROR enabling ScriptBlockLogging: $_"
-}
-
-try {
-  Write-Log "Enabling ModuleLogging for all modules..."
-  New-Item -Path $modLogPath -Force | Out-Null
-  New-ItemProperty -Path $modLogPath -Name "EnableModuleLogging" -PropertyType DWord -Value 1 -Force | Out-Null
-  New-ItemProperty -Path $modLogPath -Name "ModuleNames"         -PropertyType MultiString -Value "*" -Force | Out-Null
-  Write-Log "ModuleLogging enabled."
-}
-catch {
-  Write-Log "ERROR enabling ModuleLogging: $_"
-}
-
-# ------------------------------------------------------------------------
-# 5) Defender Preferences
-# ------------------------------------------------------------------------
-try {
-  Write-Log "Enabling Controlled Folder Access..."
-  Set-MpPreference -EnableControlledFolderAccess Enabled -ErrorAction SilentlyContinue
-  Write-Log "Controlled Folder Access enabled."
-}
-catch {
-  Write-Log "ERROR enabling Controlled Folder Access: $_"
-}
-
-try {
-  Write-Log "Enabling Network Protection..."
-  Set-MpPreference -EnableNetworkProtection Enabled -ErrorAction SilentlyContinue
-  Write-Log "Network Protection enabled."
-}
-catch {
-  Write-Log "ERROR enabling Network Protection: $_"
-}
-
-Write-Log "==== Setup complete. Now offering interactive disable options. ===="
-
-# ------------------------------------------------------------------------
-# Interactive disable prompts
-# ------------------------------------------------------------------------
-function Prompt-Disable {
-  param(
-    [string]$Description,
-    [scriptblock]$Action
-  )
-  $resp = Read-Host "Disable $Description? (Y/N)"
-  if ($resp -match '^[Yy]') {
-    try {
-      & $Action
-      Write-Log "Disabled: $Description"
+function Uninstall-Features {
+    Write-Log 'Uninstalling features...'
+    # Prompt and disable each section
+    foreach ($cat in $auditSettings.Keys) {
+        Prompt-Disable "audit $cat" { auditpol /set /subcategory:"$cat" /success:disable /failure:disable }
     }
-    catch {
-      Write-Log "ERROR disabling $Description: $_"
+    Prompt-Disable 'CommandLine inclusion' { Remove-ItemProperty -Path $regPath -Name $regName -ErrorAction SilentlyContinue }
+    Prompt-Disable 'ScriptBlockLogging' { Remove-Item -Path $sbLogPath -Recurse -Force }
+    Prompt-Disable 'ModuleLogging' { Remove-Item -Path $modLogPath -Recurse -Force }
+    Prompt-Disable 'ControlledFolderAccess' { Set-MpPreference -EnableControlledFolderAccess Disabled }
+    Prompt-Disable 'NetworkProtection'     { Set-MpPreference -EnableNetworkProtection Disabled }
+    if (Test-Path $SysmonExe) {
+        Prompt-Disable 'Sysmon service' { & $SysmonExe -u -accepteula }
     }
-  }
-  else {
-    Write-Log "Skipped disabling: $Description"
-  }
+    Write-Log 'Uninstallation complete.'
 }
 
-# 1) Advanced audits
-foreach ($subcat in $auditSettings.Keys) {
-  Prompt-Disable "audit policy '$subcat'" {
-    auditpol /set /subcategory:"$subcat" /success:disable /failure:disable | Out-Null
-  }
-}
-
-# 2) CommandLine inclusion
-Prompt-Disable "CommandLine inclusion in 4688 events" {
-  Remove-ItemProperty -Path $regPath -Name $regName -ErrorAction SilentlyContinue
-}
-
-# 3) ScriptBlockLogging
-Prompt-Disable "PowerShell ScriptBlockLogging" {
-  Remove-Item -Path $sbLogPath -Recurse -Force -ErrorAction SilentlyContinue
-}
-
-# 4) ModuleLogging
-Prompt-Disable "PowerShell ModuleLogging" {
-  Remove-Item -Path $modLogPath -Recurse -Force -ErrorAction SilentlyContinue
-}
-
-# 5) Defender features
-Prompt-Disable "Controlled Folder Access" {
-  Set-MpPreference -EnableControlledFolderAccess Disabled -ErrorAction SilentlyContinue
-}
-Prompt-Disable "Network Protection" {
-  Set-MpPreference -EnableNetworkProtection Disabled -ErrorAction SilentlyContinue
-}
-
-# 6) Sysmon uninstall
-if (Test-Path $SysmonExe) {
-  Prompt-Disable "Sysmon service" {
-    & $SysmonExe -u -accepteula | Out-Null
-  }
-}
-
-Write-Log "Interactive disable complete."
-Write-Host ""
-Write-Host "Detailed log available at $LogFile"
+# Main
+if ($Mode -eq 'Install') { Install-Features } else { Uninstall-Features }
+Write-Host "`nLog written to: $LogFile`n"
