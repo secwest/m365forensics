@@ -17,13 +17,65 @@
   - File System Checks
   - Time-Based Analysis
   - Advanced Event Log Analysis
+
+.PARAMETER Hours
+  Number of hours to look back from current time (default: 24)
+
+.PARAMETER BeforeTime
+  Optional datetime to filter events that occurred before this time
+  Format: "yyyy-MM-dd HH:mm:ss" or any valid datetime format
+
+.EXAMPLE
+  .\ElevationDiagnostics.ps1
+  Analyzes last 24 hours
+
+.EXAMPLE
+  .\ElevationDiagnostics.ps1 -Hours 48
+  Analyzes last 48 hours
+
+.EXAMPLE
+  .\ElevationDiagnostics.ps1 -Hours 72 -BeforeTime "2025-06-26 15:00:00"
+  Analyzes 72 hours back but only events before 3 PM on June 26, 2025
 #>
+
+param(
+    [Parameter(Mandatory=$false)]
+    [int]$Hours = 24,
+    
+    [Parameter(Mandatory=$false)]
+    [string]$BeforeTime = ""
+)
 
 # ------------------------------------------------------------------------
 # CONFIGURATION
 # ------------------------------------------------------------------------
-$StartTime  = (Get-Date).AddHours(-24)       # Automatic 24-hour window
-$EndTime    = Get-Date
+$StartTime = (Get-Date).AddHours(-$Hours)    # Configurable time window
+$EndTime = Get-Date                          # Current time by default
+
+# If BeforeTime is specified, parse it and use it as EndTime
+if ($BeforeTime -ne "") {
+    try {
+        $parsedBeforeTime = [datetime]::Parse($BeforeTime)
+        if ($parsedBeforeTime -lt $EndTime) {
+            $EndTime = $parsedBeforeTime
+            Write-Host "Filtering for events before: $($EndTime.ToString('yyyy-MM-dd HH:mm:ss'))" -ForegroundColor Cyan
+        } else {
+            Write-Host "Warning: BeforeTime is in the future, ignoring filter" -ForegroundColor Yellow
+        }
+    } catch {
+        Write-Host "Error: Invalid BeforeTime format. Use 'yyyy-MM-dd HH:mm:ss'" -ForegroundColor Red
+        Write-Host "Continuing without BeforeTime filter..." -ForegroundColor Yellow
+    }
+}
+
+# Ensure StartTime is before EndTime
+if ($StartTime -ge $EndTime) {
+    Write-Host "Error: StartTime must be before EndTime" -ForegroundColor Red
+    Write-Host "StartTime: $($StartTime.ToString('yyyy-MM-dd HH:mm:ss'))" -ForegroundColor Red
+    Write-Host "EndTime: $($EndTime.ToString('yyyy-MM-dd HH:mm:ss'))" -ForegroundColor Red
+    exit 1
+}
+
 $MaxEvents  = 1000                           # Increased for better coverage
 $OutputPath = "C:\Temp\ElevationAudit_Enhanced_$(Get-Date -Format 'yyyyMMdd_HHmmss').txt"
 $SuspiciousProcesses = @(
@@ -55,10 +107,13 @@ function Write-Output {
 
 # Header
 $header = "`r`n=== Enhanced Elevation Diagnostics Report - $(Get-Date) ===`r`n"
-$header += "Analyzing 24-hour period: $($StartTime.ToString('yyyy-MM-dd HH:mm:ss')) to $($EndTime.ToString('yyyy-MM-dd HH:mm:ss'))`r`n"
+$header += "Analyzing $Hours-hour period: $($StartTime.ToString('yyyy-MM-dd HH:mm:ss')) to $($EndTime.ToString('yyyy-MM-dd HH:mm:ss'))`r`n"
+if ($BeforeTime -ne "") {
+    $header += "Filtered for events BEFORE: $($EndTime.ToString('yyyy-MM-dd HH:mm:ss'))`r`n"
+}
 $header += "Output file: $OutputPath`r`n"
 $header += "`r`nThis report includes:`r`n"
-$header += "  - Complete prefetch activity log for last 24 hours`r`n"
+$header += "  - Complete prefetch activity log for specified time period`r`n"
 $header += "  - MSI installer events and patterns`r`n"
 $header += "  - Security process creation monitoring`r`n"
 $header += "  - Persistence mechanism checks`r`n"
@@ -99,7 +154,7 @@ try {
     Where-Object { $_.Id -in @(1001,11706,11707,11708) }
 
     if ($msi) {
-        Write-Host "Found $($msi.Count) MSI installer events in last 24 hours" -ForegroundColor Yellow
+        Write-Host "Found $($msi.Count) MSI installer events in last $Hours hours" -ForegroundColor Yellow
         
         # Group by hour to see patterns
         $msiByHour = $msi | Group-Object { $_.TimeCreated.ToString("yyyy-MM-dd HH:00") } | Sort-Object Name
@@ -129,9 +184,9 @@ try {
         if ($suspiciousMsi) {
             Write-Alert "Found $($suspiciousMsi.Count) MSI installations during suspicious hours or locations!"
         }
-    } else {
-        $out = "No MSI Installer events found between $StartTime and $EndTime.`r`n"
-    }
+        } else {
+            $out = "No MSI Installer events found in specified time period.`r`n"
+        }
     Write-Host $out
     Write-Output $out
 } catch {
@@ -232,14 +287,16 @@ function Get-PrefetchInfo {
 
 $allPrefetch = Get-PrefetchInfo -PrefetchPath "C:\Windows\Prefetch"
 
-# Filter for last 24 hours
-$last24HoursPrefetch = $allPrefetch | Where-Object { $_.LastRunTime -gt $StartTime }
+# Filter for specified time period and before specified time if set
+$last24HoursPrefetch = $allPrefetch | Where-Object { 
+    $_.LastRunTime -gt $StartTime -and $_.LastRunTime -le $EndTime 
+}
 
 Write-Host "`nTotal prefetch files: $($allPrefetch.Count)" -ForegroundColor Cyan
-Write-Host "Prefetch files active in last 24 hours: $($last24HoursPrefetch.Count)" -ForegroundColor Yellow
+Write-Host "Prefetch files active in specified $Hours-hour period: $($last24HoursPrefetch.Count)" -ForegroundColor Yellow
 
 # Group by hour for timeline analysis
-$out = "`r`nPrefetch Activity Timeline (Last 24 Hours):`r`n"
+$out = "`r`nPrefetch Activity Timeline (Last $Hours Hours):`r`n"
 $out += "=" * 60 + "`r`n"
 $hourlyGroups = $last24HoursPrefetch | Group-Object { $_.LastRunTime.ToString("yyyy-MM-dd HH:00") } | Sort-Object Name
 
@@ -256,7 +313,7 @@ Write-Output $out
 # Suspicious prefetch files
 $suspiciousPrefetch = $last24HoursPrefetch | Where-Object { $_.IsSuspicious }
 if ($suspiciousPrefetch) {
-    Write-Alert "Found $($suspiciousPrefetch.Count) suspicious prefetch entries in last 24 hours!"
+    Write-Alert "Found $($suspiciousPrefetch.Count) suspicious prefetch entries in specified time period!"
     $out = "`r`nSuspicious Prefetch Files Detail:`r`n"
     $out += $suspiciousPrefetch |
         Sort-Object LastRunTime -Descending |
@@ -358,7 +415,7 @@ if (Get-WinEvent -ListLog "Microsoft-Windows-SmartScreen/Operational" -ErrorActi
             Format-Table -Wrap -AutoSize |
             Out-String
     } else {
-        $out = "No SmartScreen events found between $StartTime and $EndTime.`r`n"
+        $out = "No SmartScreen events found in specified time period.`r`n"
     }
 } else {
     $out = "SmartScreen/Operational log not present on this system.`r`n"
@@ -382,7 +439,7 @@ if (Get-WinEvent -ListLog $uacLog -ErrorAction SilentlyContinue) {
             Format-Table -Wrap -AutoSize |
             Out-String
     } else {
-        $out = "No UAC Operational events in time window.`r`n"
+        $out = "No UAC Operational events in specified time window.`r`n"
     }
 } else {
     $out = "UAC Operational log not found.`r`n"
@@ -428,15 +485,18 @@ try {
 
 # B. Scheduled Tasks Analysis
 Write-Host "`nAnalyzing Scheduled Tasks..." -ForegroundColor Yellow
+if ($BeforeTime -ne "") {
+    Write-Host "Filtering for tasks that ran before: $($EndTime.ToString('yyyy-MM-dd HH:mm:ss'))" -ForegroundColor Cyan
+}
 try {
     # Get ALL scheduled tasks
     $allTasks = Get-ScheduledTask -ErrorAction SilentlyContinue
 
-    # Filter for tasks that ran in last 24 hours
+    # Filter for tasks that ran in specified time period
     $last24HoursTasks = @()
     foreach ($task in $allTasks) {
         $taskInfo = $task | Get-ScheduledTaskInfo -ErrorAction SilentlyContinue
-        if ($taskInfo -and $taskInfo.LastRunTime -gt $StartTime) {
+        if ($taskInfo -and $taskInfo.LastRunTime -gt $StartTime -and $taskInfo.LastRunTime -le $EndTime) {
             $last24HoursTasks += [PSCustomObject]@{
                 Task = $task
                 Info = $taskInfo
@@ -446,7 +506,7 @@ try {
     }
 
     if ($last24HoursTasks) {
-        Write-Host "Found $($last24HoursTasks.Count) scheduled tasks that ran in the last 24 hours" -ForegroundColor Yellow
+        Write-Host "Found $($last24HoursTasks.Count) scheduled tasks that ran in the specified time period" -ForegroundColor Yellow
         
         # Group by task path to see patterns
         $out = "`r`nScheduled Tasks by Path:`r`n"
@@ -465,7 +525,7 @@ try {
         $nonMsTasks = $last24HoursTasks | Where-Object { $_.Task.TaskPath -notmatch "^\\Microsoft\\" }
         
         if ($nonMsTasks) {
-            Write-Alert "Found $($nonMsTasks.Count) non-Microsoft tasks that ran in last 24 hours!"
+            Write-Alert "Found $($nonMsTasks.Count) non-Microsoft tasks that ran in specified time period!"
             $out = "`r`nNon-Microsoft Tasks (DETAILED ANALYSIS):`r`n"
             $out += "=" * 100 + "`r`n"
             
@@ -526,7 +586,7 @@ try {
             Write-Output $out
         }
     } else {
-        $out = "No scheduled tasks found that ran in the last 24 hours.`r`n"
+        $out = "No scheduled tasks found that ran in the specified time period.`r`n"
         Write-Host $out
         Write-Output $out
     }
@@ -767,7 +827,7 @@ foreach ($location in $suspiciousLocations) {
     if (Test-Path $location) {
         try {
             $exes = Get-ChildItem -Path $location -Filter "*.exe" -Recurse -ErrorAction SilentlyContinue |
-                Where-Object { $_.LastWriteTime -gt $StartTime }
+                Where-Object { $_.LastWriteTime -gt $StartTime -and $_.LastWriteTime -le $EndTime }
             if ($exes) {
                 $recentExes += $exes
             }
@@ -918,7 +978,8 @@ try {
                 $postBootPrefetch = $allPrefetch | 
                     Where-Object { 
                         $_.LastRunTime -gt $lastBoot.TimeCreated -and 
-                        $_.LastRunTime -lt $lastBoot.TimeCreated.AddMinutes(30)
+                        $_.LastRunTime -lt $lastBoot.TimeCreated.AddMinutes(30) -and
+                        $_.LastRunTime -le $EndTime
                     }
                 
                 if ($postBootPrefetch) {
@@ -933,11 +994,11 @@ try {
                 }
             }
         }
-    } else {
-        $out = "No boot events found in the last 24 hours.`r`n"
-        Write-Host $out
-        Write-Output $out
-    }
+            } else {
+                $out = "No boot events found in the specified time period.`r`n"
+                Write-Host $out
+                Write-Output $out
+            }
 } catch {
     Write-Host "Error analyzing boot sequence: $_" -ForegroundColor Yellow
 }
@@ -1139,7 +1200,7 @@ Write-Output $recommendations
 # ------------------------------------------------------------------------
 Write-Section "CRITICAL FINDINGS SUMMARY" "Red"
 
-$summary = "`r`nAutomated Analysis Summary for past 24 hours:`r`n"
+$summary = "`r`nAutomated Analysis Summary for specified $Hours-hour period:`r`n"
 $summary += "=" * 60 + "`r`n"
 
 # Count suspicious indicators
@@ -1251,4 +1312,14 @@ try {
     Start-Process notepad $OutputPath
 } catch {
     Write-Host "Could not open report automatically. Please open: $OutputPath" -ForegroundColor Yellow
+}
+
+# Display usage examples if running with default parameters
+if ($Hours -eq 24 -and $BeforeTime -eq "") {
+    Write-Host "`r`n" -ForegroundColor Cyan
+    Write-Host "TIP: You can customize the analysis time window:" -ForegroundColor Cyan
+    Write-Host "  .\$($MyInvocation.MyCommand.Name) -Hours 48" -ForegroundColor Green
+    Write-Host "    Analyzes last 48 hours" -ForegroundColor Gray
+    Write-Host "  .\$($MyInvocation.MyCommand.Name) -Hours 72 -BeforeTime '2025-06-26 15:00:00'" -ForegroundColor Green
+    Write-Host "    Analyzes 72 hours back but only events before June 26, 2025 3:00 PM" -ForegroundColor Gray
 }
