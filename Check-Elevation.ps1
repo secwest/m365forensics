@@ -1,7 +1,7 @@
 #requires -RunAsAdministrator
 <#
 .SYNOPSIS
-  Enhanced elevation diagnostics with comprehensive forensic analysis
+  Elevation diagnostics with forensic analysis
   Includes prefetch analysis, persistence checks, and security verification
 
 .DESCRIPTION
@@ -15,7 +15,7 @@
   - Network Connection Analysis
   - File System Checks
   - Time-Based Analysis
-  - Advanced Event Log Analysis
+  - Event Log Analysis
 
 .PARAMETER Hours
   Number of hours to analyze before the end time (default: 24)
@@ -91,19 +91,12 @@ if ($StartTime -ge $EndTime) {
     exit 1
 }
 
-$MaxEvents  = 1000                           # Increased for better coverage
-$OutputPath = "C:\Temp\ElevationAudit_Enhanced_$(Get-Date -Format 'yyyyMMdd_HHmmss').txt"
+$MaxEvents  = 1000
+$OutputPath = "C:\Temp\ElevationAudit_$(Get-Date -Format 'yyyyMMdd_HHmmss').txt"
 $prefetchExportPath = $OutputPath -replace "\.txt$", "_PrefetchData.csv"
 $runOnceExportPath = $OutputPath -replace "\.txt$", "_RunOnceEntries.csv"
 
-# Suspicious process list includes commonly abused/impersonated executables
-# Note: svchost.exe, dllhost.exe, and explorer.exe are legitimate Windows processes
-#       but are also commonly used by malware running from incorrect locations
-# VERIFICATION: 
-#   - svchost.exe legitimate path: C:\Windows\System32\svchost.exe or C:\Windows\SysWOW64\svchost.exe
-#   - dllhost.exe legitimate path: C:\Windows\System32\dllhost.exe or C:\Windows\SysWOW64\dllhost.exe  
-#   - explorer.exe legitimate path: C:\Windows\explorer.exe
-# Any other location = likely malware impersonation
+# Suspicious process list includes commonly abused executables
 $SuspiciousProcesses = @(
     "elevation_service.exe", "runtimebroker.exe", "msiexec.exe", "wusa.exe", 
     "powershell.exe", "cmd.exe", "wscript.exe", "cscript.exe", "rundll32.exe",
@@ -132,24 +125,22 @@ function Write-Output {
 }
 
 # Header
-$header = "`r`n=== Enhanced Elevation Diagnostics Report - $(Get-Date) ===`r`n"
+$header = "`r`n=== Elevation Diagnostics Report - $(Get-Date) ===`r`n"
 $header += "Analyzing $Hours-hour window before $($EndTime.ToString('yyyy-MM-dd HH:mm:ss'))`r`n"
 $header += "Time period: $($StartTime.ToString('yyyy-MM-dd HH:mm:ss')) to $($EndTime.ToString('yyyy-MM-dd HH:mm:ss'))`r`n"
 if ($BeforeTime -ne "") {
     $header += "Analysis end time specified: $($EndTime.ToString('yyyy-MM-dd HH:mm:ss'))`r`n"
 }
 $header += "Output file: $OutputPath`r`n"
-$header += "`r`nIMPORTANT: This tool identifies potentially suspicious patterns that may also`r`n"
-$header += "           occur in legitimate software. Review all findings in context.`r`n"
-$header += "           Pay special attention to svchost.exe, dllhost.exe, and explorer.exe`r`n"
-$header += "           running from non-system directories - common malware technique.`r`n"
+$header += "`r`nNote: This tool identifies potentially suspicious patterns that may also`r`n"
+$header += "      occur in legitimate software. Review all findings in context.`r`n"
 $header += "`r`nThis report includes:`r`n"
-$header += "  - Complete prefetch activity log for specified time period`r`n"
+$header += "  - Prefetch activity log for specified time period`r`n"
 $header += "  - MSI installer events and patterns`r`n"
 $header += "  - Security process creation monitoring`r`n"
 $header += "  - Persistence mechanism checks (including ALL RunOnce entries)`r`n"
 $header += "  - Network connection analysis`r`n"
-$header += "  - Suspicious time period analysis`r`n"
+$header += "  - Time period analysis`r`n"
 $header += "  - Risk assessment and recommendations`r`n"
 $header | Out-File -FilePath $OutputPath -Encoding ASCII
 Write-Host $header -ForegroundColor Cyan
@@ -268,13 +259,13 @@ try {
 }
 
 # ------------------------------------------------------------------------
-# 3) Enhanced Prefetch Analysis
+# 3) Prefetch Analysis
 # ------------------------------------------------------------------------
-Write-Section "Enhanced Prefetch Analysis"
+Write-Section "Prefetch Analysis"
 
-Write-Host "NOTE: Full detailed prefetch log will be provided in the 'COMPLETE PREFETCH ACTIVITY LOG' section" -ForegroundColor Cyan
-Write-Host "      A CSV export will also be created for easy analysis in Excel or other tools`r`n" -ForegroundColor Cyan
-Write-Host "INFO: Windows prefetch files are located in C:\Windows\Prefetch" -ForegroundColor Gray
+Write-Host "Note: Full prefetch log will be provided later in the report" -ForegroundColor Cyan
+Write-Host "      A CSV export will also be created for analysis in Excel or other tools`r`n" -ForegroundColor Cyan
+Write-Host "Info: Windows prefetch files are located in C:\Windows\Prefetch" -ForegroundColor Gray
 Write-Host "      Each .pf file represents a program that has been executed`r`n" -ForegroundColor Gray
 
 function Get-PrefetchInfo {
@@ -322,9 +313,8 @@ function Get-PrefetchInfo {
                 $fileInfo.IsSuspicious = $true
             }
             
-            # Check if it's a Windows process in wrong location (would need full path parsing)
+            # Flag Windows processes for verification
             if ($exeName.ToLower() -in @("svchost.exe", "dllhost.exe", "explorer.exe")) {
-                # These are always flagged for manual verification since we can't check path from prefetch name alone
                 $fileInfo.IsSuspicious = $true
             }
             
@@ -652,7 +642,7 @@ Write-Host "These entries execute once at next logon/reboot and are then deleted
 Write-Host "Often used by installers and malware for persistence" -ForegroundColor Gray
 Write-Host "`r`n" -ForegroundColor Cyan
 Write-Host "================================================================" -ForegroundColor Cyan
-Write-Host "COMPREHENSIVE RUNONCE ANALYSIS - ALL ENTRIES EXPLICITLY LISTED" -ForegroundColor Yellow
+Write-Host "RUNONCE ANALYSIS - ALL ENTRIES LISTED" -ForegroundColor Yellow
 Write-Host "================================================================" -ForegroundColor Cyan
 Write-Host "`r`n" -ForegroundColor Cyan
 
@@ -713,7 +703,7 @@ foreach ($keyInfo in $runOnceKeys) {
 
 if ($runOnceFound) {
     Write-Alert "Found $($allRunOnceEntries.Count) RunOnce entries"
-    $out = "`r`nDETAILED RUNONCE ENTRIES:`r`n"
+    $out = "`r`nRUNONCE ENTRIES:`r`n"
     $out += "=" * 100 + "`r`n`r`n"
     
     # Export all RunOnce entries to CSV
@@ -767,7 +757,7 @@ if ($runOnceFound) {
     if ($suspiciousRunOnce) {
         $script:suspiciousRunOnce = $suspiciousRunOnce  # Make available for summary
         Write-Alert "Found $($suspiciousRunOnce.Count) potentially suspicious RunOnce entries"
-        $out += "`r`nSUSPICIOUS RUNONCE ENTRIES REQUIRING REVIEW:`r`n"
+        $out += "`r`nRUNONCE ENTRIES REQUIRING REVIEW:`r`n"
         $out += "=" * 100 + "`r`n"
         foreach ($entry in $suspiciousRunOnce) {
             $out += "`r`nLocation: $($entry.Location)`r`n"
@@ -795,9 +785,7 @@ if ($runOnceFound) {
 }
 
 # D. Services Analysis
-Write-Host "`nAnalyzing Suspicious Services..." -ForegroundColor Yellow
-Write-Host "Special attention to svchost.exe, dllhost.exe, explorer.exe services" -ForegroundColor Gray
-Write-Host "These should ONLY run from Windows System directories" -ForegroundColor Gray
+Write-Host "`nAnalyzing Services..." -ForegroundColor Yellow
 try {
     $services = Get-Service | Where-Object { $_.Status -eq "Running" }
     $suspiciousServices = @()
@@ -818,15 +806,6 @@ try {
         # Check for numeric service names
         if ($service.Name -match "^\d{4,}") {
             $isSuspicious = $true
-        }
-        
-        # Check for Windows processes from wrong locations
-        if ($service.Name -match "svchost|dllhost|explorer") {
-            # These should only run from System directories
-            $serviceWmi = Get-WmiObject -Class Win32_Service -Filter "Name='$($service.Name)'" -ErrorAction SilentlyContinue
-            if ($serviceWmi -and $serviceWmi.PathName -notmatch "(System32|SysWOW64)") {
-                $isSuspicious = $true
-            }
         }
         
         if ($isSuspicious) {
@@ -865,11 +844,6 @@ try {
         }
     } else {
         $out = "No obviously suspicious services found.`r`n"
-        $out += "`r`nNOTE: Legitimate Windows service paths:`r`n"
-        $out += "  - svchost.exe: C:\\Windows\\System32\\svchost.exe`r`n"
-        $out += "  - dllhost.exe: C:\\Windows\\System32\\dllhost.exe`r`n"
-        $out += "  - explorer.exe: C:\\Windows\\explorer.exe`r`n"
-        $out += "Any other locations for these files indicate potential malware.`r`n"
         Write-Host $out
         Write-Output $out
     }
@@ -883,7 +857,6 @@ try {
 Write-Section "Elevation Service Investigation" "Yellow"
 
 Write-Host "Searching for ELEVATION_SERVICE.EXE..." -ForegroundColor Yellow
-Write-Host "Note: Some legitimate software may use similar naming patterns" -ForegroundColor Gray
 $elevationPaths = @(
     "C:\Windows\System32\elevation_service.exe",
     "C:\Windows\SysWOW64\elevation_service.exe",
@@ -952,7 +925,6 @@ Write-Output $out
 Write-Section "Network Connection Analysis"
 
 Write-Host "Analyzing active network connections..." -ForegroundColor Yellow
-Write-Host "Note: svchost.exe network connections are normal, but verify the process path" -ForegroundColor Gray
 try {
     # Get network connections using netstat
     $netstatOutput = netstat -anob 2>$null
@@ -1001,7 +973,6 @@ Write-Section "File System Checks"
 
 # A. Recently Modified Executables
 Write-Host "Checking recently modified executables..." -ForegroundColor Yellow
-Write-Host "Note: Legitimate svchost.exe should ONLY exist in System32/SysWOW64" -ForegroundColor Gray
 $suspiciousLocations = @(
     "C:\Windows\Temp",
     "$env:TEMP",
@@ -1235,9 +1206,9 @@ try {
 }
 
 # ------------------------------------------------------------------------
-# 10) Advanced Event Log Analysis
+# 10) Event Log Analysis
 # ------------------------------------------------------------------------
-Write-Section "Advanced Event Log Analysis"
+Write-Section "Event Log Analysis"
 
 # A. AppLocker Audit Logs
 Write-Host "Checking AppLocker Audit Logs..." -ForegroundColor Yellow
@@ -1344,13 +1315,12 @@ $recommendations = "Based on the comprehensive analysis:
 
 1. IMMEDIATE ACTIONS:
    - Review findings in context of your system's normal behavior
-   - CRITICAL: Verify any svchost.exe, dllhost.exe, or explorer.exe are running from System32/SysWOW64
    - Run a full antivirus scan with updated definitions
    - Review all non-Microsoft scheduled tasks identified
    - Check all services running from temp/user directories
    - Verify legitimacy of any elevation_service.exe instances
    - Review all startup items and RunOnce entries
-   - IMPORTANT: RunOnce entries execute at next logon - remove suspicious ones immediately
+   - Note: RunOnce entries execute at next logon - remove suspicious ones
 
 2. INVESTIGATION PRIORITIES:
    - Review activities during off-hours (11PM-7AM) for your environment
@@ -1367,13 +1337,6 @@ $recommendations = "Based on the comprehensive analysis:
    - System maintenance tasks
    - Legitimate software installers
    - Corporate management tools
-   
-   IMPORTANT: For svchost.exe, dllhost.exe, explorer.exe:
-   - These are legitimate Windows processes when running from:
-     * C:\Windows\System32\
-     * C:\Windows\SysWOW64\
-   - If found running from ANY other location, investigate immediately
-   - Malware commonly impersonates these process names
 
 4. SECURITY HARDENING:
    - Enable AppLocker to control application execution
@@ -1530,7 +1493,7 @@ $summary += "`r`nFull details available in: $OutputPath`r`n"
 Write-Output $summary
 
 # Footer
-$footer = "`r`n=== End of Enhanced Forensic Report ===`r`n"
+$footer = "`r`n=== End of Forensic Report ===`r`n"
 Write-Host $footer -ForegroundColor Cyan
 Write-Output $footer
 
@@ -1569,15 +1532,15 @@ if ($Hours -eq 24 -and $BeforeTime -eq "") {
 
 Write-Host "`r`n" -ForegroundColor Cyan
 Write-Host "======================================================================" -ForegroundColor Cyan
-Write-Host "IMPORTANT LOCATIONS IN THIS REPORT:" -ForegroundColor Yellow
+Write-Host "KEY LOCATIONS IN THIS REPORT:" -ForegroundColor Yellow
 Write-Host "======================================================================" -ForegroundColor Cyan
 Write-Host "1. RUNONCE REGISTRY ENTRIES: Located in 'Persistence Mechanism Detection'" -ForegroundColor Green
-Write-Host "   - ALL RunOnce entries are explicitly listed with full commands" -ForegroundColor Gray
+Write-Host "   - All RunOnce entries are listed with full commands" -ForegroundColor Gray
 Write-Host "   - Includes 32-bit and 64-bit registry locations" -ForegroundColor Gray
 Write-Host "   - Shows both HKLM and HKCU entries" -ForegroundColor Gray
 Write-Host "`r`n" -ForegroundColor Cyan
-Write-Host "2. COMPLETE PREFETCH LOG: Located near the end of the report" -ForegroundColor Green
-Write-Host "   - Contains EVERY prefetch file from your time window" -ForegroundColor Gray
+Write-Host "2. PREFETCH LOG: Located near the end of the report" -ForegroundColor Green
+Write-Host "   - Contains all prefetch files from your time window" -ForegroundColor Gray
 Write-Host "   - Includes CSV export for Excel analysis" -ForegroundColor Gray
 Write-Host "   - Shows execution timeline and patterns" -ForegroundColor Gray
 Write-Host "======================================================================" -ForegroundColor Cyan
