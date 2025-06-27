@@ -1,15 +1,14 @@
 #requires -RunAsAdministrator
 <#
 .SYNOPSIS
-  Enhanced elevation diagnostics with comprehensive forensic analysis
+  Elevation diagnostics with forensic analysis
   Includes prefetch analysis, persistence checks, and security verification
-  [ENHANCED VERSION - All functions verified and ASCII-clean]
 
 .DESCRIPTION
-  Comprehensive forensic analysis including:
+  Forensic analysis including:
   - MSI Installer Events Analysis
   - Process Creation Monitoring  
-  - Enhanced Prefetch Analysis
+  - Prefetch Analysis
   - UAC and SmartScreen Logs
   - Persistence Mechanism Detection
   - Elevation Service Investigation
@@ -19,23 +18,28 @@
   - Advanced Event Log Analysis
 
 .PARAMETER Hours
-  Number of hours to look back from current time (default: 24)
+  Number of hours to analyze before the end time (default: 24)
 
 .PARAMETER BeforeTime
-  Optional datetime to filter events that occurred before this time
+  Optional end time for analysis. If not specified, uses current time.
+  The script will analyze X hours before this time.
   Format: "yyyy-MM-dd HH:mm:ss" or any valid datetime format
 
 .EXAMPLE
   .\ElevationDiagnostics.ps1
-  Analyzes last 24 hours
+  Analyzes last 24 hours before current time
 
 .EXAMPLE
   .\ElevationDiagnostics.ps1 -Hours 48
-  Analyzes last 48 hours
+  Analyzes last 48 hours before current time
+
+.EXAMPLE
+  .\ElevationDiagnostics.ps1 -BeforeTime "2025-06-26 15:00:00"
+  Analyzes 24 hours before June 26, 2025 3:00 PM (from June 25 3:00 PM to June 26 3:00 PM)
 
 .EXAMPLE
   .\ElevationDiagnostics.ps1 -Hours 72 -BeforeTime "2025-06-26 15:00:00"
-  Analyzes 72 hours back but only events before 3 PM on June 26, 2025
+  Analyzes 72 hours before June 26, 2025 3:00 PM (from June 23 3:00 PM to June 26 3:00 PM)
 #>
 
 param(
@@ -49,28 +53,39 @@ param(
 # ------------------------------------------------------------------------
 # CONFIGURATION
 # ------------------------------------------------------------------------
-$StartTime = (Get-Date).AddHours(-$Hours)    # Configurable time window
-$EndTime = Get-Date                          # Current time by default
+# Set EndTime first - either current time or specified BeforeTime
+$EndTime = Get-Date
 
-# If BeforeTime is specified, parse it and use it as EndTime
 if ($BeforeTime -ne "") {
     try {
         $parsedBeforeTime = [datetime]::Parse($BeforeTime)
-        if ($parsedBeforeTime -lt $EndTime) {
+        if ($parsedBeforeTime -le (Get-Date)) {
             $EndTime = $parsedBeforeTime
-            Write-Host "Filtering for events before: $($EndTime.ToString('yyyy-MM-dd HH:mm:ss'))" -ForegroundColor Cyan
+            Write-Host "Setting analysis end time to: $($EndTime.ToString('yyyy-MM-dd HH:mm:ss'))" -ForegroundColor Cyan
         } else {
-            Write-Host "Warning: BeforeTime is in the future, ignoring filter" -ForegroundColor Yellow
+            Write-Host "Warning: BeforeTime is in the future, using current time instead" -ForegroundColor Yellow
         }
     } catch {
         Write-Host "Error: Invalid BeforeTime format. Use 'yyyy-MM-dd HH:mm:ss'" -ForegroundColor Red
-        Write-Host "Continuing without BeforeTime filter..." -ForegroundColor Yellow
+        Write-Host "Example: '2025-06-26 15:00:00'" -ForegroundColor Yellow
+        Write-Host "Using current time as end time..." -ForegroundColor Yellow
     }
 }
 
-# Ensure StartTime is before EndTime
+# Calculate StartTime by going back specified hours from EndTime
+$StartTime = $EndTime.AddHours(-$Hours)
+
+Write-Host "`r`n" -ForegroundColor Cyan
+Write-Host "======== TIME WINDOW CALCULATION ========" -ForegroundColor Cyan
+Write-Host "End Time:   $($EndTime.ToString('yyyy-MM-dd HH:mm:ss'))" -ForegroundColor Yellow
+Write-Host "Duration:   $Hours hours before end time" -ForegroundColor Yellow
+Write-Host "Start Time: $($StartTime.ToString('yyyy-MM-dd HH:mm:ss'))" -ForegroundColor Yellow
+Write-Host "=========================================" -ForegroundColor Cyan
+Write-Host "`r`n" -ForegroundColor Cyan
+
+# Validate time range
 if ($StartTime -ge $EndTime) {
-    Write-Host "Error: StartTime must be before EndTime" -ForegroundColor Red
+    Write-Host "Error: Invalid time range calculation" -ForegroundColor Red
     Write-Host "StartTime: $($StartTime.ToString('yyyy-MM-dd HH:mm:ss'))" -ForegroundColor Red
     Write-Host "EndTime: $($EndTime.ToString('yyyy-MM-dd HH:mm:ss'))" -ForegroundColor Red
     exit 1
@@ -78,6 +93,7 @@ if ($StartTime -ge $EndTime) {
 
 $MaxEvents  = 1000                           # Increased for better coverage
 $OutputPath = "C:\Temp\ElevationAudit_Enhanced_$(Get-Date -Format 'yyyyMMdd_HHmmss').txt"
+$prefetchExportPath = $OutputPath -replace "\.txt$", "_PrefetchData.csv"
 $SuspiciousProcesses = @(
     "elevation_service.exe", "runtimebroker.exe", "msiexec.exe", "wusa.exe", 
     "powershell.exe", "cmd.exe", "wscript.exe", "cscript.exe", "rundll32.exe",
@@ -107,9 +123,10 @@ function Write-Output {
 
 # Header
 $header = "`r`n=== Enhanced Elevation Diagnostics Report - $(Get-Date) ===`r`n"
-$header += "Analyzing $Hours-hour period: $($StartTime.ToString('yyyy-MM-dd HH:mm:ss')) to $($EndTime.ToString('yyyy-MM-dd HH:mm:ss'))`r`n"
+$header += "Analyzing $Hours-hour window before $($EndTime.ToString('yyyy-MM-dd HH:mm:ss'))`r`n"
+$header += "Time period: $($StartTime.ToString('yyyy-MM-dd HH:mm:ss')) to $($EndTime.ToString('yyyy-MM-dd HH:mm:ss'))`r`n"
 if ($BeforeTime -ne "") {
-    $header += "Filtered for events BEFORE: $($EndTime.ToString('yyyy-MM-dd HH:mm:ss'))`r`n"
+    $header += "Analysis end time specified: $($EndTime.ToString('yyyy-MM-dd HH:mm:ss'))`r`n"
 }
 $header += "Output file: $OutputPath`r`n"
 $header += "`r`nThis report includes:`r`n"
@@ -154,7 +171,7 @@ try {
     Where-Object { $_.Id -in @(1001,11706,11707,11708) }
 
     if ($msi) {
-        Write-Host "Found $($msi.Count) MSI installer events in last $Hours hours" -ForegroundColor Yellow
+        Write-Host "Found $($msi.Count) MSI installer events in the $Hours-hour window before $($EndTime.ToString('yyyy-MM-dd HH:mm'))" -ForegroundColor Yellow
         
         # Group by hour to see patterns
         $msiByHour = $msi | Group-Object { $_.TimeCreated.ToString("yyyy-MM-dd HH:00") } | Sort-Object Name
@@ -240,15 +257,22 @@ try {
 # ------------------------------------------------------------------------
 Write-Section "Enhanced Prefetch Analysis"
 
+Write-Host "NOTE: Full detailed prefetch log will be provided in the 'COMPLETE PREFETCH ACTIVITY LOG' section" -ForegroundColor Cyan
+Write-Host "      A CSV export will also be created for easy analysis in Excel or other tools`r`n" -ForegroundColor Cyan
+Write-Host "INFO: Windows prefetch files are located in C:\Windows\Prefetch" -ForegroundColor Gray
+Write-Host "      Each .pf file represents a program that has been executed`r`n" -ForegroundColor Gray
+
 function Get-PrefetchInfo {
     param([string]$PrefetchPath)
     
     $prefetchFiles = @()
     
     try {
-        Get-ChildItem -Path $PrefetchPath -Filter "*.pf" -ErrorAction SilentlyContinue | ForEach-Object {
-            $file = $_
-            
+        Write-Host "Reading prefetch files from: $PrefetchPath" -ForegroundColor Gray
+        $pfFiles = Get-ChildItem -Path $PrefetchPath -Filter "*.pf" -ErrorAction SilentlyContinue
+        Write-Host "Found $($pfFiles.Count) total prefetch files" -ForegroundColor Gray
+        
+        foreach ($file in $pfFiles) {
             # Extract embedded filename from prefetch name
             $exeName = $file.Name -replace "-[A-F0-9]{8}\.pf$", ""
             
@@ -262,6 +286,8 @@ function Get-PrefetchInfo {
                 FileSize = $file.Length
                 RunCount = 1
                 IsSuspicious = $false
+                FullPath = $file.FullName
+                LastAccessTime = $file.LastAccessTime
             }
             
             # Check for suspicious patterns
@@ -273,6 +299,11 @@ function Get-PrefetchInfo {
             }
             
             if ($exeName -match "(elevation|admin|install|update|patch)" -and $exeName -notmatch "windows") {
+                $fileInfo.IsSuspicious = $true
+            }
+            
+            # Additional suspicious patterns
+            if ($exeName -match "^[a-z]{6,8}\.exe$" -or $exeName -match "^\d{4,}\.exe$") {
                 $fileInfo.IsSuspicious = $true
             }
             
@@ -293,10 +324,10 @@ $last24HoursPrefetch = $allPrefetch | Where-Object {
 }
 
 Write-Host "`nTotal prefetch files: $($allPrefetch.Count)" -ForegroundColor Cyan
-Write-Host "Prefetch files active in specified $Hours-hour period: $($last24HoursPrefetch.Count)" -ForegroundColor Yellow
+Write-Host "Prefetch files active in $Hours-hour window before $($EndTime.ToString('yyyy-MM-dd HH:mm')): $($last24HoursPrefetch.Count)" -ForegroundColor Yellow
 
 # Group by hour for timeline analysis
-$out = "`r`nPrefetch Activity Timeline (Last $Hours Hours):`r`n"
+$out = "`r`nPrefetch Activity Timeline ($Hours hours before $($EndTime.ToString('yyyy-MM-dd HH:mm'))):`r`n"
 $out += "=" * 60 + "`r`n"
 $hourlyGroups = $last24HoursPrefetch | Group-Object { $_.LastRunTime.ToString("yyyy-MM-dd HH:00") } | Sort-Object Name
 
@@ -313,7 +344,7 @@ Write-Output $out
 # Suspicious prefetch files
 $suspiciousPrefetch = $last24HoursPrefetch | Where-Object { $_.IsSuspicious }
 if ($suspiciousPrefetch) {
-    Write-Alert "Found $($suspiciousPrefetch.Count) suspicious prefetch entries in specified time period!"
+    Write-Alert "Found $($suspiciousPrefetch.Count) suspicious prefetch entries in the $Hours-hour window!"
     $out = "`r`nSuspicious Prefetch Files Detail:`r`n"
     $out += $suspiciousPrefetch |
         Sort-Object LastRunTime -Descending |
@@ -485,9 +516,6 @@ try {
 
 # B. Scheduled Tasks Analysis
 Write-Host "`nAnalyzing Scheduled Tasks..." -ForegroundColor Yellow
-if ($BeforeTime -ne "") {
-    Write-Host "Filtering for tasks that ran before: $($EndTime.ToString('yyyy-MM-dd HH:mm:ss'))" -ForegroundColor Cyan
-}
 try {
     # Get ALL scheduled tasks
     $allTasks = Get-ScheduledTask -ErrorAction SilentlyContinue
@@ -506,7 +534,7 @@ try {
     }
 
     if ($last24HoursTasks) {
-        Write-Host "Found $($last24HoursTasks.Count) scheduled tasks that ran in the specified time period" -ForegroundColor Yellow
+        Write-Host "Found $($last24HoursTasks.Count) scheduled tasks that ran in the $Hours-hour window" -ForegroundColor Yellow
         
         # Group by task path to see patterns
         $out = "`r`nScheduled Tasks by Path:`r`n"
@@ -525,7 +553,7 @@ try {
         $nonMsTasks = $last24HoursTasks | Where-Object { $_.Task.TaskPath -notmatch "^\\Microsoft\\" }
         
         if ($nonMsTasks) {
-            Write-Alert "Found $($nonMsTasks.Count) non-Microsoft tasks that ran in specified time period!"
+            Write-Alert "Found $($nonMsTasks.Count) non-Microsoft tasks that ran in the $Hours-hour window!"
             $out = "`r`nNon-Microsoft Tasks (DETAILED ANALYSIS):`r`n"
             $out += "=" * 100 + "`r`n"
             
@@ -1200,7 +1228,7 @@ Write-Output $recommendations
 # ------------------------------------------------------------------------
 Write-Section "CRITICAL FINDINGS SUMMARY" "Red"
 
-$summary = "`r`nAutomated Analysis Summary for specified $Hours-hour period:`r`n"
+$summary = "`r`nAutomated Analysis Summary for $Hours-hour window before $($EndTime.ToString('yyyy-MM-dd HH:mm:ss')):`r`n"
 $summary += "=" * 60 + "`r`n"
 
 # Count suspicious indicators
@@ -1286,7 +1314,8 @@ if ($indicators -eq 0) {
 
 $summary += "`r`nTotal suspicious indicators: $indicators`r`n"
 $summary += "Report generated: $(Get-Date)`r`n"
-$summary += "Time window analyzed: $StartTime to $EndTime`r`n"
+$summary += "Time window analyzed: $($StartTime.ToString('yyyy-MM-dd HH:mm:ss')) to $($EndTime.ToString('yyyy-MM-dd HH:mm:ss'))`r`n"
+$summary += "Duration: $Hours hours before $($EndTime.ToString('yyyy-MM-dd HH:mm:ss'))`r`n"
 
 # List key findings
 if ($suspiciousItems.Count -gt 0) {
@@ -1306,8 +1335,18 @@ $footer = "`r`n=== End of Enhanced Forensic Report ===`r`n"
 Write-Host $footer -ForegroundColor Cyan
 Write-Output $footer
 
+# Summary of output files
+Write-Host "`r`n" -ForegroundColor Green
+Write-Host "======== OUTPUT FILES CREATED ========" -ForegroundColor Green
+Write-Host "Main Report:     $OutputPath" -ForegroundColor Yellow
+if ($prefetchExportPath -and (Test-Path $prefetchExportPath)) {
+    Write-Host "Prefetch Data:   $prefetchExportPath" -ForegroundColor Yellow
+}
+Write-Host "=====================================" -ForegroundColor Green
+Write-Host "`r`n" -ForegroundColor Green
+
 # Open the report
-Write-Host "`r`nOpening report in Notepad..." -ForegroundColor Green
+Write-Host "Opening report in Notepad..." -ForegroundColor Green
 try {
     Start-Process notepad $OutputPath
 } catch {
@@ -1316,10 +1355,12 @@ try {
 
 # Display usage examples if running with default parameters
 if ($Hours -eq 24 -and $BeforeTime -eq "") {
-    Write-Host "`r`n" -ForegroundColor Cyan
     Write-Host "TIP: You can customize the analysis time window:" -ForegroundColor Cyan
     Write-Host "  .\$($MyInvocation.MyCommand.Name) -Hours 48" -ForegroundColor Green
-    Write-Host "    Analyzes last 48 hours" -ForegroundColor Gray
+    Write-Host "    Analyzes 48 hours before current time" -ForegroundColor Gray
+    Write-Host "  .\$($MyInvocation.MyCommand.Name) -BeforeTime '2025-06-26 15:00:00'" -ForegroundColor Green
+    Write-Host "    Analyzes 24 hours before June 26, 2025 3:00 PM" -ForegroundColor Gray
     Write-Host "  .\$($MyInvocation.MyCommand.Name) -Hours 72 -BeforeTime '2025-06-26 15:00:00'" -ForegroundColor Green
-    Write-Host "    Analyzes 72 hours back but only events before June 26, 2025 3:00 PM" -ForegroundColor Gray
+    Write-Host "    Analyzes 72 hours before June 26, 2025 3:00 PM (June 23-26)" -ForegroundColor Gray
+    Write-Host "`r`n" -ForegroundColor Cyan
 }
