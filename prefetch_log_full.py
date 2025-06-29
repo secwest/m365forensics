@@ -1,8 +1,7 @@
 #!/usr/bin/env python3
 """
-Advanced Prefetch Forensic Analyzer
-Extracts ALL forensic information from Windows Prefetch files
-Including file references, directories, volumes, DLLs, and more
+Advanced Prefetch Forensic Analyzer - Enhanced Display Version
+Optimized for wide terminal displays and maximum information density
 """
 
 import os
@@ -35,6 +34,8 @@ class Color:
     CYAN = '\033[96m'
     WHITE = '\033[97m'
     RESET = '\033[0m'
+    BOLD = '\033[1m'
+    DIM = '\033[2m'
     
     @staticmethod
     def enable_windows_ansi():
@@ -537,8 +538,100 @@ class PrefetchForensics:
         except Exception as e:
             self.forensic_data['parsing_errors'].append(f"DLL extraction error: {str(e)}")
 
+def print_forensic_report_compact(forensic_data, log_file=None):
+    """Print a compact forensic report optimized for wide displays"""
+    output = []
+    
+    # Extract process name without extension
+    process_name = forensic_data['process_name']
+    if process_name.upper().endswith('.EXE'):
+        process_name = process_name[:-4]
+    
+    # Header with key info in one line
+    header = f"{Color.CYAN}▶ {process_name:<20}{Color.RESET} "
+    header += f"Hash:{forensic_data['hash'][:8] if forensic_data['hash'] else 'N/A'} "
+    header += f"V:{forensic_data['version']:02X} " if forensic_data['version'] else "V:?? "
+    header += f"Size:{forensic_data['file_size']:,}B "
+    header += f"{'MAM' if forensic_data['mam_compressed'] else 'STD'} "
+    
+    if forensic_data['last_execution']:
+        try:
+            last_exec_dt = datetime.datetime.fromisoformat(forensic_data['last_execution'].replace('T', ' '))
+            header += f"Last: {last_exec_dt.strftime('%Y-%m-%d %H:%M')} "
+        except:
+            header += f"Last: {forensic_data['last_execution'][:16]} "
+    
+    header += f"Runs:{forensic_data['execution_count']}"
+    
+    output.append(header)
+    
+    # Execution timeline on one line
+    if forensic_data['execution_times']:
+        timeline = "  Exec: "
+        for i, exec_time in enumerate(sorted(forensic_data['execution_times'], key=lambda x: x['timestamp'])[-5:]):  # Last 5
+            try:
+                exec_dt = datetime.datetime.fromisoformat(exec_time['timestamp'].replace('T', ' '))
+                timeline += f"{exec_dt.strftime('%m/%d %H:%M')} "
+            except:
+                pass
+        if len(forensic_data['execution_times']) > 5:
+            timeline += f"(+{len(forensic_data['execution_times'])-5} more)"
+        output.append(timeline)
+    
+    # Key DLLs on one line
+    if forensic_data['loaded_dlls']:
+        dll_line = f"  DLLs({len(forensic_data['loaded_dlls'])}): "
+        # Show notable DLLs
+        notable_dlls = [dll for dll in forensic_data['loaded_dlls'] 
+                       if any(x in dll.lower() for x in ['ws2_', 'wininet', 'winhttp', 'crypt', 'bcrypt', 'dpapi'])]
+        if notable_dlls:
+            dll_line += f"{Color.YELLOW}" + ", ".join(notable_dlls[:5]) + f"{Color.RESET} "
+        dll_line += f"+ {len(forensic_data['loaded_dlls']) - len(notable_dlls[:5])} others"
+        output.append(dll_line)
+    
+    # Top accessed files on one line
+    if forensic_data['files_accessed']:
+        files_line = f"  Files({len(forensic_data['files_accessed'])}): "
+        top_files = sorted(forensic_data['files_accessed'], key=lambda x: x['prefetch_count'], reverse=True)[:3]
+        for f in top_files:
+            fname = os.path.basename(f['filename'])
+            files_line += f"{fname}({f['prefetch_count']}x) "
+        if len(forensic_data['files_accessed']) > 3:
+            files_line += f"+ {len(forensic_data['files_accessed'])-3} more"
+        output.append(files_line)
+    
+    # Volumes
+    if forensic_data['volumes']:
+        vol_line = "  Vols: "
+        for vol in forensic_data['volumes'][:2]:
+            vol_line += f"{vol['path']}[{vol['serial_number']}] "
+        output.append(vol_line)
+    
+    # Errors
+    if forensic_data['parsing_errors']:
+        output.append(f"  {Color.RED}Errors: {', '.join(forensic_data['parsing_errors'][:2])}{Color.RESET}")
+    
+    output.append("")  # Blank line between entries
+    
+    # Print to console
+    for line in output:
+        print(line)
+    
+    # Write to log file if specified
+    if log_file:
+        clean_output = []
+        for line in output:
+            clean_line = line
+            for color in [Color.RED, Color.GREEN, Color.YELLOW, Color.BLUE, 
+                         Color.MAGENTA, Color.CYAN, Color.WHITE, Color.RESET, Color.BOLD, Color.DIM]:
+                clean_line = clean_line.replace(color, '')
+            clean_output.append(clean_line)
+        
+        with open(log_file, 'a', encoding='utf-8') as f:
+            f.write('\n'.join(clean_output) + '\n')
+
 def print_forensic_report(forensic_data, detailed=False, log_file=None):
-    """Print a formatted forensic report"""
+    """Print a formatted forensic report (verbose mode)"""
     output = []
     
     output.append(f"\n{Color.CYAN}{'='*80}{Color.RESET}")
@@ -549,7 +642,7 @@ def print_forensic_report(forensic_data, detailed=False, log_file=None):
     output.append(f"Size: {forensic_data['file_size']:,} bytes")
     output.append(f"Created: {forensic_data['created']}")
     output.append(f"Modified: {forensic_data['modified']}")
-    output.append(f"Version: 0x{forensic_data['version']:02X}" if forensic_data['version'] else "Unknown")
+    output.append(f"Version: 0x{forensic_data['version']:02X}" if forensic_data['version'] else "Version: Unknown")
     output.append(f"Compressed: {'Yes (MAM)' if forensic_data['mam_compressed'] else 'No'}")
     
     # Execution information
@@ -641,15 +734,15 @@ def print_forensic_report(forensic_data, detailed=False, log_file=None):
         for line in output:
             clean_line = line
             for color in [Color.RED, Color.GREEN, Color.YELLOW, Color.BLUE, 
-                         Color.MAGENTA, Color.CYAN, Color.WHITE, Color.RESET]:
+                         Color.MAGENTA, Color.CYAN, Color.WHITE, Color.RESET, Color.BOLD, Color.DIM]:
                 clean_line = clean_line.replace(color, '')
             clean_output.append(clean_line)
         
         with open(log_file, 'a', encoding='utf-8') as f:
             f.write('\n'.join(clean_output) + '\n')
 
-def generate_execution_timeline(all_results, log_file=None, start_date=None, end_date=None, off_hours_only=False):
-    """Generate a time-sorted execution timeline with off-hours highlighting"""
+def generate_execution_timeline_enhanced(all_results, log_file=None, start_date=None, end_date=None, off_hours_only=False):
+    """Generate an enhanced time-sorted execution timeline optimized for wide displays"""
     # Define off-hours (11 PM to 6 AM)
     off_hours_start = 23  # 11 PM
     off_hours_end = 6     # 6 AM
@@ -658,6 +751,11 @@ def generate_execution_timeline(all_results, log_file=None, start_date=None, end
     all_executions = []
     
     for result in all_results:
+        # Get short process name without .EXE
+        short_process = result['process_name']
+        if short_process.upper().endswith('.EXE'):
+            short_process = short_process[:-4]
+            
         for exec_time in result['execution_times']:
             try:
                 # Parse timestamp
@@ -681,8 +779,10 @@ def generate_execution_timeline(all_results, log_file=None, start_date=None, end
                 
                 all_executions.append({
                     'timestamp': exec_dt,
-                    'process': result['process_name'],
+                    'process': short_process,
+                    'process_full': result['process_name'],
                     'file': result['file_name'],
+                    'hash': result['hash'][:8] if result['hash'] else 'N/A',
                     'slot': exec_time['slot'],
                     'offset': exec_time['offset']
                 })
@@ -696,9 +796,9 @@ def generate_execution_timeline(all_results, log_file=None, start_date=None, end
         return
     
     output = []
-    output.append(f"\n{Color.CYAN}{'='*100}{Color.RESET}")
-    output.append(f"{Color.CYAN}=== CHRONOLOGICAL EXECUTION TIMELINE ==={Color.RESET}")
-    output.append(f"{Color.CYAN}{'='*100}{Color.RESET}")
+    output.append(f"\n{Color.CYAN}{'='*180}{Color.RESET}")
+    output.append(f"{Color.CYAN}{Color.BOLD}CHRONOLOGICAL EXECUTION TIMELINE - ENHANCED VIEW{Color.RESET}")
+    output.append(f"{Color.CYAN}{'='*180}{Color.RESET}")
     
     # Show filters if applied
     filters = []
@@ -714,226 +814,166 @@ def generate_execution_timeline(all_results, log_file=None, start_date=None, end
         filters.append("Off-hours only (11PM-6AM)")
         
     if filters:
-        output.append(f"{Color.YELLOW}Filters applied: {', '.join(filters)}{Color.RESET}")
+        output.append(f"{Color.YELLOW}Filters: {', '.join(filters)}{Color.RESET}")
     
-    output.append(f"Total executions: {len(all_executions)}")
-    
-    # Time range
+    # Statistics header
     earliest = all_executions[0]['timestamp']
     latest = all_executions[-1]['timestamp']
-    output.append(f"Time range: {earliest.strftime('%Y-%m-%d %H:%M:%S')} to {latest.strftime('%Y-%m-%d %H:%M:%S')}")
-    output.append(f"Duration: {(latest - earliest).days} days, {(latest - earliest).seconds // 3600} hours\n")
     
-    output.append(f"{Color.MAGENTA}Note: Off-hours are defined as 11:00 PM to 6:00 AM{Color.RESET}\n")
-    
-    # Statistics
-    off_hours_count = 0
-    weekend_count = 0
-    suspicious_processes = ['cmd.exe', 'powershell.exe', 'wscript.exe', 'cscript.exe',
-                           'rundll32.exe', 'mshta.exe', 'regsvr32.exe', 'certutil.exe',
-                           'bitsadmin.exe', 'msiexec.exe', 'installutil.exe']
-    suspicious_count = 0
+    stats_line = f"Executions: {Color.GREEN}{len(all_executions)}{Color.RESET} | "
+    stats_line += f"Range: {earliest.strftime('%Y-%m-%d')} to {latest.strftime('%Y-%m-%d')} | "
+    stats_line += f"Duration: {(latest - earliest).days}d {(latest - earliest).seconds // 3600}h"
+    output.append(stats_line)
     
     # Count statistics
-    for exe in all_executions:
-        hour = exe['timestamp'].hour
-        if hour >= off_hours_start or hour <= off_hours_end:
-            off_hours_count += 1
-        if exe['timestamp'].weekday() >= 5:  # Saturday = 5, Sunday = 6
-            weekend_count += 1
-        if any(s in exe['process'].lower() for s in suspicious_processes):
-            suspicious_count += 1
+    off_hours_count = sum(1 for exe in all_executions if exe['timestamp'].hour >= off_hours_start or exe['timestamp'].hour <= off_hours_end)
+    weekend_count = sum(1 for exe in all_executions if exe['timestamp'].weekday() >= 5)
     
-    output.append(f"{Color.YELLOW}Activity Statistics:{Color.RESET}")
-    output.append(f"  Off-hours executions (11PM-6AM): {Color.RED}{off_hours_count}{Color.RESET} ({off_hours_count/len(all_executions)*100:.1f}%)")
-    output.append(f"  Weekend executions: {Color.YELLOW}{weekend_count}{Color.RESET} ({weekend_count/len(all_executions)*100:.1f}%)")
-    output.append(f"  Suspicious process executions: {Color.RED}{suspicious_count}{Color.RESET} ({suspicious_count/len(all_executions)*100:.1f}%)\n")
+    suspicious_processes = ['cmd', 'powershell', 'wscript', 'cscript', 'rundll32', 'mshta', 
+                           'regsvr32', 'certutil', 'bitsadmin', 'msiexec', 'installutil']
+    suspicious_count = sum(1 for exe in all_executions if any(s in exe['process'].lower() for s in suspicious_processes))
+    
+    stats_line2 = f"Off-hours: {Color.RED if off_hours_count > len(all_executions)*0.3 else Color.YELLOW}{off_hours_count}{Color.RESET} ({off_hours_count/len(all_executions)*100:.0f}%) | "
+    stats_line2 += f"Weekends: {Color.YELLOW}{weekend_count}{Color.RESET} ({weekend_count/len(all_executions)*100:.0f}%) | "
+    stats_line2 += f"Suspicious: {Color.RED if suspicious_count > 0 else Color.GREEN}{suspicious_count}{Color.RESET}"
+    output.append(stats_line2)
+    
+    output.append("")
+    
+    # Timeline header
+    header = f"{'Date':<12}{'Time':<9}{'Process':<25}{'Hash':<10}{'Flags':<30}{'Notes':<40}"
+    output.append(f"{Color.DIM}{header}{Color.RESET}")
+    output.append(f"{Color.DIM}{'-'*180}{Color.RESET}")
     
     # Group by date
-    date_groups = defaultdict(list)
+    current_date = None
+    date_exec_count = 0
+    
     for exe in all_executions:
-        date_key = exe['timestamp'].date()
-        date_groups[date_key].append(exe)
-    
-    output.append(f"{Color.GREEN}Execution Timeline by Date:{Color.RESET}")
-    output.append("-" * 100)
-    output.append(f"{'Date':<12} {'Time':<10} {'Day':<4} {'Process':<30} {'Prefetch File':<35} {'Notes':<20}")
-    output.append("-" * 100)
-    
-    # Display timeline
-    for date in sorted(date_groups.keys()):
-        # Add date header
-        day_name = date.strftime('%a')
-        is_weekend = date.weekday() >= 5
+        exe_date = exe['timestamp'].date()
         
-        date_header = f"\n{Color.BLUE}{date.strftime('%Y-%m-%d')} ({day_name})"
-        if is_weekend:
-            date_header += f" [WEEKEND]"
-        date_header += f"{Color.RESET}"
-        output.append(date_header)
-        
-        # Show executions for this date
-        for exe in sorted(date_groups[date], key=lambda x: x['timestamp']):
-            time_str = exe['timestamp'].strftime('%H:%M:%S')
-            hour = exe['timestamp'].hour
-            day_abbr = exe['timestamp'].strftime('%a')
+        # Date separator
+        if current_date != exe_date:
+            if current_date is not None and date_exec_count > 0:
+                output.append(f"{Color.DIM}  └─ {date_exec_count} executions{Color.RESET}\n")
             
-            # Determine if off-hours
-            is_off_hours = hour >= off_hours_start or hour <= off_hours_end
-            is_suspicious = any(s in exe['process'].lower() for s in suspicious_processes)
+            current_date = exe_date
+            date_exec_count = 0
+            day_name = exe_date.strftime('%a')
+            is_weekend = exe_date.weekday() >= 5
             
-            # Build the line with appropriate coloring
-            line_parts = []
-            
-            # Date (already shown in header)
-            line_parts.append(f"{'':12}")
-            
-            # Time with off-hours highlighting
-            if is_off_hours:
-                line_parts.append(f"{Color.RED}{time_str:<10}{Color.RESET}")
-            else:
-                line_parts.append(f"{time_str:<10}")
-            
-            # Day
-            line_parts.append(f"{day_abbr:<4}")
-            
-            # Process name with suspicious highlighting
-            if is_suspicious:
-                line_parts.append(f"{Color.YELLOW}{exe['process']:<30}{Color.RESET}")
-            else:
-                line_parts.append(f"{exe['process']:<30}")
-            
-            # Prefetch file
-            line_parts.append(f"{exe['file']:<35}")
-            
-            # Notes
-            notes = []
-            if is_off_hours:
-                notes.append("[!] OFF-HOURS")
+            date_str = f"{Color.BLUE}{Color.BOLD}{exe_date.strftime('%Y-%m-%d')} ({day_name})"
             if is_weekend:
-                notes.append("[W] WEEKEND")
-            if is_suspicious:
-                notes.append("[S] SUSPICIOUS")
-            if exe['slot'] == 0:
-                notes.append("[F] FALLBACK")
-                
-            note_str = ', '.join(notes)
-            if notes:
-                line_parts.append(f"{Color.MAGENTA}{note_str:<20}{Color.RESET}")
-            else:
-                line_parts.append(f"{'':<20}")
-            
-            output.append(''.join(line_parts))
+                date_str += f" [WEEKEND]"
+            date_str += f"{Color.RESET}"
+            output.append(date_str)
+        
+        date_exec_count += 1
+        
+        # Build execution line
+        time_str = exe['timestamp'].strftime('%H:%M:%S')
+        hour = exe['timestamp'].hour
+        is_off_hours = hour >= off_hours_start or hour <= off_hours_end
+        is_suspicious = any(s in exe['process'].lower() for s in suspicious_processes)
+        
+        # Time coloring
+        if is_off_hours:
+            time_display = f"{Color.RED}{time_str}{Color.RESET}"
+        else:
+            time_display = time_str
+        
+        # Process coloring
+        if is_suspicious:
+            process_display = f"{Color.YELLOW}{exe['process']:<24}{Color.RESET}"
+        else:
+            process_display = f"{exe['process']:<24}"
+        
+        # Build flags
+        flags = []
+        if is_off_hours:
+            flags.append(f"{Color.RED}OFF-HRS{Color.RESET}")
+        if exe['timestamp'].weekday() >= 5:
+            flags.append(f"{Color.YELLOW}WKND{Color.RESET}")
+        if is_suspicious:
+            flags.append(f"{Color.RED}SUSP{Color.RESET}")
+        if exe['slot'] == 0:
+            flags.append(f"{Color.DIM}FBACK{Color.RESET}")
+        
+        flags_str = ' '.join(flags)
+        
+        # Additional context
+        notes = []
+        
+        # Add network DLLs if this process likely used network
+        if any(net in exe['process'].lower() for net in ['browser', 'chrome', 'firefox', 'edge', 'outlook']):
+            notes.append("NET")
+        
+        # Build the line
+        line = f"  {'':<10}{time_display:<9}{process_display} {exe['hash']:<9} {flags_str:<30} {' '.join(notes):<40}"
+        output.append(line)
     
-    # Hourly distribution
-    output.append(f"\n{Color.YELLOW}Hourly Activity Distribution:{Color.RESET}")
-    output.append("-" * 60)
+    # Final date summary
+    if date_exec_count > 0:
+        output.append(f"{Color.DIM}  └─ {date_exec_count} executions{Color.RESET}")
     
-    hourly_counts = Counter(exe['timestamp'].hour for exe in all_executions)
-    max_count = max(hourly_counts.values()) if hourly_counts else 1
+    # Process frequency summary
+    output.append(f"\n{Color.YELLOW}{Color.BOLD}TOP PROCESSES BY EXECUTION COUNT{Color.RESET}")
+    output.append(f"{Color.DIM}{'-'*80}{Color.RESET}")
     
-    for hour in range(24):
-        count = hourly_counts.get(hour, 0)
-        bar_length = int(count * 40 / max_count) if max_count > 0 else 0
+    process_counts = Counter(exe['process'] for exe in all_executions)
+    max_count = max(process_counts.values()) if process_counts else 1
+    
+    for process, count in process_counts.most_common(15):
+        bar_length = int(count * 40 / max_count)
         bar = '█' * bar_length
         
-        # Color based on off-hours
-        if hour >= off_hours_start or hour <= off_hours_end:
-            output.append(f"{Color.RED}{hour:02d}:00-{hour:02d}:59 {count:>4} {bar}{Color.RESET}")
+        # Check if suspicious
+        is_suspicious = any(s in process.lower() for s in suspicious_processes)
+        
+        # Count off-hours executions for this process
+        off_hours_for_process = sum(1 for exe in all_executions 
+                                   if exe['process'] == process and 
+                                   (exe['timestamp'].hour >= off_hours_start or exe['timestamp'].hour <= off_hours_end))
+        
+        if is_suspicious:
+            line = f"{Color.YELLOW}{process:<25}{Color.RESET} {count:>4} "
         else:
-            output.append(f"{hour:02d}:00-{hour:02d}:59 {count:>4} {Color.BLUE}{bar}{Color.RESET}")
-    
-    # Most active hours
-    output.append(f"\n{Color.YELLOW}Most Active Hours:{Color.RESET}")
-    for hour, count in hourly_counts.most_common(5):
-        time_range = f"{hour:02d}:00-{hour:02d}:59"
-        if hour >= off_hours_start or hour <= off_hours_end:
-            output.append(f"  {Color.RED}{time_range}: {count} executions (OFF-HOURS){Color.RESET}")
-        else:
-            output.append(f"  {time_range}: {count} executions")
-    
-    # Suspicious off-hours activity
-    suspicious_off_hours = []
-    for exe in all_executions:
-        hour = exe['timestamp'].hour
-        if (hour >= off_hours_start or hour <= off_hours_end) and \
-           any(s in exe['process'].lower() for s in suspicious_processes):
-            suspicious_off_hours.append(exe)
-    
-    if suspicious_off_hours:
-        output.append(f"\n{Color.RED}[!] SUSPICIOUS OFF-HOURS ACTIVITY DETECTED [!]{Color.RESET}")
-        output.append(f"Found {len(suspicious_off_hours)} suspicious process executions during off-hours:\n")
+            line = f"{process:<25} {count:>4} "
         
-        for exe in sorted(suspicious_off_hours, key=lambda x: x['timestamp'])[:20]:  # Show first 20
-            output.append(f"  {Color.RED}{exe['timestamp'].strftime('%Y-%m-%d %H:%M:%S')} - "
-                         f"{exe['process']} ({exe['timestamp'].strftime('%A')}){Color.RESET}")
+        line += f"{Color.BLUE}{bar}{Color.RESET}"
         
-        if len(suspicious_off_hours) > 20:
-            output.append(f"  ... and {len(suspicious_off_hours) - 20} more")
-    
-    # Daily summary statistics
-    output.append(f"\n{Color.CYAN}Daily Activity Summary:{Color.RESET}")
-    output.append("-" * 80)
-    output.append(f"{'Date':<12} {'Total':<8} {'Off-hrs':<8} {'Suspicious':<12} {'Top Process':<30}")
-    output.append("-" * 80)
-    
-    for date in sorted(date_groups.keys()):
-        day_execs = date_groups[date]
-        day_name = date.strftime('%a')
-        is_weekend = date.weekday() >= 5
-        
-        # Count off-hours
-        off_hrs_count = sum(1 for e in day_execs if e['timestamp'].hour >= off_hours_start or e['timestamp'].hour <= off_hours_end)
-        
-        # Count suspicious
-        susp_count = sum(1 for e in day_execs if any(s in e['process'].lower() for s in suspicious_processes))
-        
-        # Top process
-        process_counts = Counter(e['process'] for e in day_execs)
-        top_process = process_counts.most_common(1)[0] if process_counts else ('', 0)
-        
-        # Format line with proper spacing accounting for color codes
-        if is_weekend:
-            line = f"{Color.YELLOW}{date.strftime('%Y-%m-%d')}{Color.RESET} "
-        else:
-            line = f"{date.strftime('%Y-%m-%d')} "
-        
-        line += f"{len(day_execs):<8} "
-        
-        if off_hrs_count > 10:
-            line += f"{Color.RED}{off_hrs_count:<8}{Color.RESET} "
-        elif off_hrs_count > 0:
-            line += f"{Color.YELLOW}{off_hrs_count:<8}{Color.RESET} "
-        else:
-            line += f"{off_hrs_count:<8} "
-            
-        if susp_count > 0:
-            line += f"{Color.RED}{susp_count:<12}{Color.RESET} "
-        else:
-            line += f"{susp_count:<12} "
-            
-        line += f"{top_process[0]} ({top_process[1]}x)"
+        if off_hours_for_process > 0:
+            line += f" {Color.RED}({off_hours_for_process} off-hrs){Color.RESET}"
         
         output.append(line)
     
-    # Most frequently executed processes during off-hours
-    off_hours_processes = Counter()
-    for exe in all_executions:
-        hour = exe['timestamp'].hour
+    # Hourly heatmap
+    output.append(f"\n{Color.YELLOW}{Color.BOLD}HOURLY ACTIVITY HEATMAP{Color.RESET}")
+    output.append(f"{Color.DIM}{'-'*80}{Color.RESET}")
+    
+    hourly_counts = Counter(exe['timestamp'].hour for exe in all_executions)
+    max_hourly = max(hourly_counts.values()) if hourly_counts else 1
+    
+    # Create visual heatmap
+    for hour in range(24):
+        count = hourly_counts.get(hour, 0)
+        heat_level = int(count * 50 / max_hourly) if max_hourly > 0 else 0
+        
+        # Create heat bar
         if hour >= off_hours_start or hour <= off_hours_end:
-            off_hours_processes[exe['process']] += 1
+            bar_color = Color.RED
+            time_color = Color.RED
+        else:
+            bar_color = Color.GREEN
+            time_color = Color.RESET
+        
+        bar = '▓' * heat_level + '░' * (50 - heat_level)
+        
+        output.append(f"{time_color}{hour:02d}:00{Color.RESET} │{bar_color}{bar}{Color.RESET}│ {count:>3}")
     
-    if off_hours_processes:
-        output.append(f"\n{Color.YELLOW}Top Processes Executed During Off-Hours (11PM-6AM):{Color.RESET}")
-        for process, count in off_hours_processes.most_common(10):
-            is_suspicious = any(s in process.lower() for s in suspicious_processes)
-            if is_suspicious:
-                output.append(f"  {Color.RED}{process}: {count} executions [!]{Color.RESET}")
-            else:
-                output.append(f"  {process}: {count} executions")
-    
-    # Detect rapid execution bursts (5+ executions within 2 minutes)
-    output.append(f"\n{Color.YELLOW}Rapid Execution Bursts Detection:{Color.RESET}")
+    # Rapid burst detection
+    output.append(f"\n{Color.YELLOW}{Color.BOLD}EXECUTION BURST ANALYSIS{Color.RESET}")
+    output.append(f"{Color.DIM}{'-'*80}{Color.RESET}")
     
     bursts = []
     window_minutes = 2
@@ -969,24 +1009,19 @@ def generate_execution_timeline(all_results, log_file=None, start_date=None, end
                 })
     
     if bursts:
-        output.append(f"\n{Color.RED}[!] RAPID EXECUTION BURSTS DETECTED [!]{Color.RESET}")
-        output.append(f"Found {len(bursts)} burst(s) of rapid execution:\n")
+        output.append(f"{Color.RED}Found {len(bursts)} rapid execution burst(s):{Color.RESET}")
         
-        for i, burst in enumerate(sorted(bursts, key=lambda x: x['count'], reverse=True)[:10]):
-            output.append(f"{Color.YELLOW}Burst #{i+1}: {burst['count']} executions in {burst['duration']:.1f} seconds{Color.RESET}")
-            output.append(f"  Time: {burst['start'].strftime('%Y-%m-%d %H:%M:%S')} to {burst['end'].strftime('%H:%M:%S')}")
-            
-            # Show unique processes in burst
+        for i, burst in enumerate(sorted(bursts, key=lambda x: x['count'], reverse=True)[:5]):
             burst_processes = Counter(e['process'] for e in burst['executions'])
-            output.append(f"  Processes: {', '.join(f'{p} ({c}x)' for p, c in burst_processes.most_common())}")
             
-            # Check if burst occurred during off-hours
+            output.append(f"\n  Burst #{i+1}: {Color.RED}{burst['count']} executions in {burst['duration']:.0f}s{Color.RESET}")
+            output.append(f"    Time: {burst['start'].strftime('%Y-%m-%d %H:%M:%S')}")
+            output.append(f"    Processes: {', '.join(f'{p}({c})' for p, c in burst_processes.most_common())}")
+            
             if burst['start'].hour >= off_hours_start or burst['start'].hour <= off_hours_end:
-                output.append(f"  {Color.RED}[!] OCCURRED DURING OFF-HOURS!{Color.RESET}")
-            
-            output.append("")
+                output.append(f"    {Color.RED}⚠ OCCURRED DURING OFF-HOURS{Color.RESET}")
     else:
-        output.append("No rapid execution bursts detected.\n")
+        output.append("No rapid execution bursts detected.")
     
     # Print to console
     for line in output:
@@ -1000,14 +1035,14 @@ def generate_execution_timeline(all_results, log_file=None, start_date=None, end
                 # Strip color codes
                 clean_line = line
                 for color in [Color.RED, Color.GREEN, Color.YELLOW, Color.BLUE, 
-                             Color.MAGENTA, Color.CYAN, Color.WHITE, Color.RESET]:
+                             Color.MAGENTA, Color.CYAN, Color.WHITE, Color.RESET, Color.BOLD, Color.DIM]:
                     clean_line = clean_line.replace(color, '')
                 f.write(clean_line + '\n')
 
 def main():
     Color.enable_windows_ansi()
     
-    parser = argparse.ArgumentParser(description='Advanced Prefetch Forensic Analyzer')
+    parser = argparse.ArgumentParser(description='Advanced Prefetch Forensic Analyzer - Enhanced Display')
     parser.add_argument('prefetch_file', nargs='?', help='Specific prefetch file to analyze')
     parser.add_argument('--all', action='store_true', help='Analyze all prefetch files')
     parser.add_argument('--path', default=r'C:\Windows\Prefetch', help='Prefetch directory path')
@@ -1015,7 +1050,7 @@ def main():
     parser.add_argument('--detailed', action='store_true', help='Show detailed file lists')
     parser.add_argument('--process', help='Filter by process name')
     parser.add_argument('--suspicious', action='store_true', help='Analyze only suspicious processes')
-    parser.add_argument('--verbose', '-v', action='store_true', help='Verbose output for debugging')
+    parser.add_argument('--verbose', '-v', action='store_true', help='Verbose output (original format)')
     parser.add_argument('--summary-only', action='store_true', help='Show only summary statistics')
     parser.add_argument('--log', help='Log all output to file (in addition to console)')
     parser.add_argument('--no-timeline', action='store_true', help='Skip the execution timeline')
@@ -1028,8 +1063,8 @@ def main():
     if not args.prefetch_file and not args.all:
         parser.error("Specify a prefetch file or use --all to analyze all files")
     
-    print(f"{Color.CYAN}=== Advanced Prefetch Forensic Analyzer ==={Color.RESET}")
-    print(f"Extracts execution times, file access, volumes, DLLs, and more\n")
+    print(f"{Color.CYAN}{Color.BOLD}Advanced Prefetch Forensic Analyzer - Enhanced Display{Color.RESET}")
+    print(f"Optimized for wide terminal displays | Use --verbose for detailed output\n")
     
     # Set up log file if specified
     log_file = args.log
@@ -1072,14 +1107,12 @@ def main():
         print(f"Found {len(files_to_analyze)} prefetch files to analyze")
         
         if len(files_to_analyze) > 50 and not args.summary_only and not args.output:
-            print(f"\n{Color.YELLOW}Note: Analyzing {len(files_to_analyze)} files with full output.{Color.RESET}")
-            print("Consider using:")
-            print("  --summary-only  : For summary statistics only")
-            print("  --no-timeline   : Skip the chronological timeline")
-            print("  --suspicious    : To analyze only suspicious processes")
-            print("  --process NAME  : To filter by specific process")
-            print(f"\n{Color.CYAN}Full analysis will be saved to: {log_file if log_file else 'auto-generated file'}{Color.RESET}")
-            print(f"{Color.GREEN}The timeline will highlight off-hours (11PM-6AM) and suspicious activity{Color.RESET}\n")
+            print(f"\n{Color.YELLOW}Analyzing {len(files_to_analyze)} files - using compact display format{Color.RESET}")
+            print("Options:")
+            print("  --verbose       : Use original detailed format")
+            print("  --summary-only  : Show summary statistics only")
+            print("  --suspicious    : Analyze only suspicious processes")
+            print(f"\n{Color.CYAN}Analysis will be saved to: {log_file if log_file else 'auto-generated file'}{Color.RESET}\n")
     else:
         if not os.path.exists(args.prefetch_file):
             print(f"{Color.RED}Error: File not found: {args.prefetch_file}{Color.RESET}")
@@ -1097,19 +1130,18 @@ def main():
     for i, pf_file in enumerate(files_to_analyze):
         if args.summary_only and len(files_to_analyze) > 1:
             print(f"\rProcessing: {i+1}/{len(files_to_analyze)} files...", end='', flush=True)
-        elif not args.summary_only and len(files_to_analyze) > 1:
-            # Show progress for full analysis too
-            print(f"\n{Color.BLUE}[{i+1}/{len(files_to_analyze)}] Analyzing: {os.path.basename(pf_file)}{Color.RESET}")
         
         analyzer = PrefetchForensics(pf_file, verbose=args.verbose)
         forensic_data = analyzer.parse()
         
-        # Show detailed report unless summary-only is specified
+        # Choose display format based on verbose flag
         if not args.summary_only:
-            print_forensic_report(forensic_data, detailed=args.detailed, log_file=log_file)
-        elif len(files_to_analyze) == 1:
-            # Always show report for single file analysis
-            print_forensic_report(forensic_data, detailed=args.detailed, log_file=log_file)
+            if args.verbose or len(files_to_analyze) == 1:
+                # Use original verbose format for single files or when --verbose is specified
+                print_forensic_report(forensic_data, detailed=args.detailed, log_file=log_file)
+            else:
+                # Use new compact format for multiple files
+                print_forensic_report_compact(forensic_data, log_file=log_file)
         
         all_results.append(forensic_data)
         
@@ -1123,58 +1155,47 @@ def main():
     # Summary statistics for multiple files
     if len(files_to_analyze) > 1:
         summary = []
-        summary.append(f"\n{Color.YELLOW}{'='*80}{Color.RESET}")
-        summary.append(f"{Color.YELLOW}=== FINAL SUMMARY STATISTICS ==={Color.RESET}")
+        summary.append(f"\n{Color.YELLOW}{Color.BOLD}{'='*80}{Color.RESET}")
+        summary.append(f"{Color.YELLOW}{Color.BOLD}FINAL SUMMARY STATISTICS{Color.RESET}")
         summary.append(f"{Color.YELLOW}{'='*80}{Color.RESET}")
-        summary.append(f"Total files analyzed: {len(all_results)}")
+        
+        summary.append(f"Total files analyzed: {Color.GREEN}{len(all_results)}{Color.RESET}")
         
         # Count MAM compressed files
         mam_count = sum(1 for r in all_results if r['mam_compressed'])
-        summary.append(f"MAM compressed files: {Color.CYAN}{mam_count}{Color.RESET}")
+        summary.append(f"MAM compressed: {Color.CYAN}{mam_count}{Color.RESET} ({mam_count/len(all_results)*100:.0f}%)")
         
         # Files with successful timestamp extraction
         files_with_times = sum(1 for r in all_results if r['execution_times'])
-        summary.append(f"Files with execution times: {Color.GREEN}{files_with_times}{Color.RESET}")
+        summary.append(f"With timestamps: {Color.GREEN}{files_with_times}{Color.RESET} ({files_with_times/len(all_results)*100:.0f}%)")
+        
+        # Files with DLLs and file references
+        files_with_dlls = sum(1 for r in all_results if r['loaded_dlls'])
+        files_with_refs = sum(1 for r in all_results if r['files_accessed'])
+        summary.append(f"With DLL info: {Color.GREEN}{files_with_dlls}{Color.RESET} | With file refs: {Color.GREEN}{files_with_refs}{Color.RESET}")
         
         total_executions = sum(len(r['execution_times']) for r in all_results)
-        summary.append(f"Total executions found: {Color.GREEN}{total_executions}{Color.RESET}")
+        summary.append(f"Total executions: {Color.GREEN}{total_executions}{Color.RESET}")
         
         total_files_accessed = sum(len(r['files_accessed']) for r in all_results)
-        summary.append(f"Total files accessed: {total_files_accessed}")
+        summary.append(f"Total file refs: {total_files_accessed:,}")
         
         all_dlls = set()
         for r in all_results:
             all_dlls.update(r['loaded_dlls'])
-        summary.append(f"Total unique DLLs loaded: {len(all_dlls)}")
+        summary.append(f"Unique DLLs: {len(all_dlls)}")
         
         parsing_errors = sum(1 for r in all_results if r['parsing_errors'])
-        summary.append(f"Files with parsing errors: {Color.RED}{parsing_errors}{Color.RESET}")
+        if parsing_errors > 0:
+            summary.append(f"Parse errors: {Color.RED}{parsing_errors}{Color.RESET} ({parsing_errors/len(all_results)*100:.0f}%)")
         
-        # Show example errors if verbose
-        if args.verbose and failed_files:
-            summary.append(f"\n{Color.RED}Failed files examples:{Color.RESET}")
-            for f in failed_files[:5]:
-                summary.append(f"  - {f}")
-            if len(failed_files) > 5:
-                summary.append(f"  ... and {len(failed_files) - 5} more")
-                
-        # Show some successfully parsed files
-        successful_examples = [r for r in all_results if r['execution_times'] and not r['parsing_errors']]
-        if successful_examples:
-            summary.append(f"\n{Color.GREEN}Successfully parsed examples:{Color.RESET}")
-            for r in successful_examples[:5]:
-                summary.append(f"  - {r['file_name']}: {len(r['execution_times'])} executions, "
-                      f"last: {r['last_execution'][:19] if r['last_execution'] else 'N/A'}")
-                      
-        # Show advice if all files failed
-        if parsing_errors == len(all_results):
-            summary.append(f"\n{Color.RED}All files failed to parse!{Color.RESET}")
-            summary.append("This might be due to:")
-            summary.append("  1. MAM compression (Windows 11) - decompression may have failed")
-            summary.append("  2. Different prefetch format version")
-            summary.append("  3. Corrupted prefetch files")
-            summary.append("  4. Permission issues")
-            summary.append("\nTry running with --verbose flag for more details")
+        # Top processes by file count
+        process_file_counts = Counter(r['process_name'] for r in all_results)
+        summary.append(f"\n{Color.CYAN}Top Processes by Prefetch Files:{Color.RESET}")
+        for proc, count in process_file_counts.most_common(10):
+            # Get execution count for this process
+            exec_count = sum(len(r['execution_times']) for r in all_results if r['process_name'] == proc)
+            summary.append(f"  {proc:<30} {count:>3} files, {exec_count:>4} executions")
         
         # Print summary to console
         for line in summary:
@@ -1188,11 +1209,11 @@ def main():
                     # Strip color codes
                     clean_line = line
                     for color in [Color.RED, Color.GREEN, Color.YELLOW, Color.BLUE, 
-                                 Color.MAGENTA, Color.CYAN, Color.WHITE, Color.RESET]:
+                                 Color.MAGENTA, Color.CYAN, Color.WHITE, Color.RESET, Color.BOLD, Color.DIM]:
                         clean_line = clean_line.replace(color, '')
                     f.write(clean_line + '\n')
     
-    # Generate execution timeline
+    # Generate execution timeline (enhanced version)
     if all_results and not args.no_timeline:
         # Show timeline for multiple files or single file with multiple executions
         total_execs = sum(len(r['execution_times']) for r in all_results)
@@ -1213,7 +1234,7 @@ def main():
                 except ValueError:
                     print(f"{Color.RED}Invalid end date format. Use YYYY-MM-DD{Color.RESET}")
                     
-            generate_execution_timeline(all_results, log_file, start_date, end_date, args.off_hours_only)
+            generate_execution_timeline_enhanced(all_results, log_file, start_date, end_date, args.off_hours_only)
     
     # Export results
     if args.output:
@@ -1223,8 +1244,8 @@ def main():
     
     # Final message
     if log_file:
-        print(f"\n{Color.GREEN}Complete analysis saved to: {log_file}{Color.RESET}")
-        print(f"File contains all forensic data for {len(all_results)} prefetch files")
+        print(f"\n{Color.GREEN}{Color.BOLD}Complete analysis saved to: {log_file}{Color.RESET}")
+        print(f"Contains forensic data for {len(all_results)} files with {sum(len(r['execution_times']) for r in all_results)} total executions")
 
 if __name__ == "__main__":
     main()
