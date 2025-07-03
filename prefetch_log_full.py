@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Advanced Prefetch Forensic Analyzer - Enhanced Display Version
+Prefetch Analyzer
 Optimized for wide terminal displays and maximum information density
 """
 
@@ -1077,7 +1077,7 @@ def main():
     if log_file:
         # Create/clear the log file
         with open(log_file, 'w', encoding='utf-8') as f:
-            f.write(f"Advanced Prefetch Forensic Analysis Report\n")
+            f.write(f"Prefetch Analysis Report\n")
             f.write(f"Generated: {datetime.datetime.now()}\n")
             f.write(f"{'='*80}\n\n")
         if args.log:  # Only show this if explicitly specified
