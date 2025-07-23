@@ -1,166 +1,92 @@
-# COMPREHENSIVE INCIDENT RESPONSE VIEWER v3.0
-# Combines all features: Event log parsing, JSON formatting, HTML reports, detailed alerts
+# INCIDENT RESPONSE DATA VIEWER v1.0
+# Purpose: View and export data collected by the IR triage script
+# No live data collection - only reads existing incident directories
 # Usage: powershell -ExecutionPolicy Bypass -File .\IR_Viewer.ps1
 
 param(
     [string]$Path = "",
-    [int]$PageSize = 20,
-    [switch]$AutoExport = $false,
-    [switch]$GenerateHTML = $false
+    [int]$PageSize = 25
 )
 
 # Initialize
 $ErrorActionPreference = "SilentlyContinue"
-$ProgressPreference = "SilentlyContinue"
-$Host.UI.RawUI.WindowTitle = "Incident Response Viewer v3.0"
-$global:exportContent = @()
-$global:currentIncident = ""
+$Host.UI.RawUI.WindowTitle = "IR Data Viewer"
 
-# Enhanced color scheme
+# Colors
 $colors = @{
-    Title = "Cyan"
+    Header = "Cyan"
     Critical = "Red"
     High = "Magenta"
-    Medium = "Yellow"
+    Medium = "Yellow" 
     Low = "Green"
-    Success = "Green"
-    Info = "Cyan"
-    Menu = "White"
+    Info = "White"
     Data = "Gray"
-    Header = "Yellow"
-    Progress = "DarkCyan"
-    Alert = "Red"
-    Warning = "DarkYellow"
+    Menu = "DarkCyan"
 }
 
-# Header function with box drawing
+# Display header
 function Show-Header {
-    param([string]$Title = "INCIDENT RESPONSE VIEWER v3.0")
+    param([string]$Title = "INCIDENT RESPONSE DATA VIEWER")
     Clear-Host
-    Write-Host "╔═══════════════════════════════════════════════════════════════════════════════╗" -ForegroundColor $colors.Title
-    Write-Host "║$(' ' * 79)║" -ForegroundColor $colors.Title
-    Write-Host "║$($Title.PadLeft(40 + ($Title.Length / 2)).PadRight(79))║" -ForegroundColor $colors.Title
-    Write-Host "║$(' ' * 79)║" -ForegroundColor $colors.Title
-    Write-Host "╚═══════════════════════════════════════════════════════════════════════════════╝" -ForegroundColor $colors.Title
+    Write-Host ("=" * 80) -ForegroundColor $colors.Header
+    Write-Host $Title.PadLeft(40 + ($Title.Length / 2)) -ForegroundColor $colors.Header
+    Write-Host ("=" * 80) -ForegroundColor $colors.Header
     Write-Host ""
 }
 
-# Enhanced color output helper
-function Write-ColorOutput {
-    param($Message, $Type = "Info", $NoNewLine = $false)
-    
-    $color = switch ($Type) {
-        "Success" { $colors.Success }
-        "Error" { $colors.Critical }
-        "Warning" { $colors.Warning }
-        "Alert" { $colors.Alert }
-        "Info" { $colors.Info }
-        "Progress" { $colors.Progress }
-        "Menu" { $colors.Menu }
-        "Data" { $colors.Data }
-        default { "White" }
-    }
-    
-    if ($NoNewLine) {
-        Write-Host $Message -ForegroundColor $color -NoNewline
-    } else {
-        Write-Host $Message -ForegroundColor $color
-    }
-}
-
-# Find and list incident directories with detailed info
+# Find incident directories
 function Select-IncidentDirectory {
     Show-Header "SELECT INCIDENT DIRECTORY"
     
-    # Search multiple locations
-    $searchPaths = @("C:\", "D:\", "$env:USERPROFILE\Desktop", "$env:USERPROFILE\Documents", "$env:TEMP")
-    $allIncidents = @()
+    # Look for incident directories in current path and common locations
+    $searchPaths = @(
+        (Get-Location).Path,
+        "C:\",
+        "D:\",
+        "$env:USERPROFILE\Desktop",
+        "$env:USERPROFILE\Documents"
+    )
     
-    Write-ColorOutput "Searching for incident directories..." "Progress"
+    $allIncidents = @()
+    Write-Host "Searching for incident directories..." -ForegroundColor $colors.Info
     
     foreach ($searchPath in $searchPaths) {
         if (Test-Path $searchPath) {
-            Write-Host "." -NoNewline -ForegroundColor $colors.Progress
-            $incidents = Get-ChildItem -Path $searchPath -Filter "incident_*" -Directory -ErrorAction SilentlyContinue -Depth 2
+            $incidents = Get-ChildItem -Path $searchPath -Filter "incident_*" -Directory -ErrorAction SilentlyContinue
             if ($incidents) {
                 $allIncidents += $incidents
             }
         }
     }
     
-    Write-Host ""
-    
     if ($allIncidents.Count -eq 0) {
-        Write-ColorOutput "`nNo incident directories found!" "Error"
-        Write-ColorOutput "Searched in: $($searchPaths -join ', ')" "Data"
+        Write-Host "`nNo incident directories found!" -ForegroundColor $colors.Critical
+        Write-Host "Please ensure you're in the correct location or specify path with -Path parameter" -ForegroundColor $colors.Info
         Read-Host "`nPress Enter to exit"
         return $null
     }
     
-    # Sort by date (newest first) and remove duplicates
-    $allIncidents = $allIncidents | Sort-Object CreationTime -Descending | Select-Object -Unique
+    # Remove duplicates and sort by date
+    $allIncidents = $allIncidents | Sort-Object -Property FullName -Unique | Sort-Object CreationTime -Descending
     
-    Write-ColorOutput "`nFound $($allIncidents.Count) incident directories:" "Success"
+    Write-Host "`nFound $($allIncidents.Count) incident directories:" -ForegroundColor $colors.Info
     Write-Host ""
     
-    # Create detailed incident list
-    $incidentDetails = @()
-    
-    foreach ($inc in $allIncidents) {
-        Write-Host "." -NoNewline -ForegroundColor $colors.Progress
+    # Display incidents
+    for ($i = 0; $i -lt $allIncidents.Count; $i++) {
+        $inc = $allIncidents[$i]
         
-        $details = [PSCustomObject]@{
-            Path = $inc.FullName
-            Name = $inc.Name
-            Created = $inc.CreationTime
-            ThreatLevel = "Unknown"
-            AlertCount = 0
-            SizeMB = 0
-            HasAlerts = $false
-            HasNetwork = $false
-            HasLogs = $false
-        }
-        
-        # Get threat level and alerts from summary
+        # Get threat level from summary if available
+        $threatLevel = "Unknown"
         $summaryPath = Join-Path $inc.FullName "SUMMARY.txt"
         if (Test-Path $summaryPath) {
-            $summaryContent = Get-Content $summaryPath -ErrorAction SilentlyContinue
-            $threatLine = $summaryContent | Select-String "THREAT LEVEL:" | Select-Object -First 1
+            $threatLine = Get-Content $summaryPath | Select-String "THREAT LEVEL:" | Select-Object -First 1
             if ($threatLine) {
-                $details.ThreatLevel = $threatLine.Line.Split(":")[1].Trim()
-            }
-            $alertLine = $summaryContent | Select-String "TOTAL ALERTS:" | Select-Object -First 1
-            if ($alertLine) {
-                $details.AlertCount = [int]($alertLine.Line.Split(":")[1].Trim())
+                $threatLevel = $threatLine.Line.Split(":")[1].Trim()
             }
         }
         
-        # Check for key directories
-        $details.HasAlerts = Test-Path (Join-Path $inc.FullName "ALERTS")
-        $details.HasNetwork = Test-Path (Join-Path $inc.FullName "Network")
-        $details.HasLogs = Test-Path (Join-Path $inc.FullName "Logs")
-        
-        # Calculate size
-        try {
-            $details.SizeMB = [Math]::Round((Get-ChildItem $inc.FullName -Recurse -File | Measure-Object Length -Sum).Sum/1MB, 2)
-        } catch {
-            $details.SizeMB = 0
-        }
-        
-        $incidentDetails += $details
-    }
-    
-    Write-Host "`n"
-    
-    # Display incidents with enhanced formatting
-    Write-Host "  #  Incident Name                    Threat     Alerts  Size      Created" -ForegroundColor $colors.Header
-    Write-Host "  ─  ────────────────────────────────  ─────────  ──────  ────────  ────────────────" -ForegroundColor $colors.Menu
-    
-    for ($i = 0; $i -lt $incidentDetails.Count; $i++) {
-        $inc = $incidentDetails[$i]
-        
-        # Determine color based on threat level
-        $threatColor = switch ($inc.ThreatLevel) {
+        $threatColor = switch ($threatLevel) {
             "CRITICAL" { $colors.Critical }
             "HIGH" { $colors.High }
             "MEDIUM" { $colors.Medium }
@@ -168,1082 +94,628 @@ function Select-IncidentDirectory {
             default { $colors.Data }
         }
         
-        # Format line
-        Write-Host ("{0,3}  " -f ($i + 1)) -NoNewline -ForegroundColor $colors.Menu
-        Write-Host ("{0,-32}  " -f $inc.Name) -NoNewline -ForegroundColor $colors.Info
-        Write-Host ("{0,-9}  " -f $inc.ThreatLevel) -NoNewline -ForegroundColor $threatColor
-        Write-Host ("{0,6}  " -f $inc.AlertCount) -NoNewline -ForegroundColor $(if($inc.AlertCount -gt 0){$colors.Warning}else{$colors.Data})
-        Write-Host ("{0,6}MB  " -f $inc.SizeMB) -NoNewline -ForegroundColor $colors.Data
-        Write-Host ("{0}" -f $inc.Created.ToString("yyyy-MM-dd HH:mm")) -ForegroundColor $colors.Data
-        
-        # Show indicators
-        if ($inc.HasAlerts -or $inc.HasNetwork -or $inc.HasLogs) {
-            Write-Host "     └─ " -NoNewline -ForegroundColor $colors.Menu
-            if ($inc.HasAlerts) { Write-Host "[ALERTS]" -NoNewline -ForegroundColor $colors.Alert }
-            if ($inc.HasNetwork) { Write-Host "[NETWORK]" -NoNewline -ForegroundColor $colors.Info }
-            if ($inc.HasLogs) { Write-Host "[LOGS]" -NoNewline -ForegroundColor $colors.Warning }
-            Write-Host ""
-        }
+        Write-Host ("{0,3}. " -f ($i + 1)) -NoNewline
+        Write-Host ("{0,-30}" -f $inc.Name) -NoNewline
+        Write-Host " [$threatLevel]" -ForegroundColor $threatColor
+        Write-Host ("     Path: {0}" -f $inc.FullName) -ForegroundColor $colors.Data
     }
     
-    Write-Host "`n" -NoNewline
-    $selection = Read-Host "Select incident number (1-$($incidentDetails.Count)) or Q to quit"
+    Write-Host ""
+    $selection = Read-Host "Select incident number (1-$($allIncidents.Count)) or Q to quit"
     
-    if ($selection -eq 'Q' -or $selection -eq 'q') {
+    if ($selection -match '^[Qq]') {
         return $null
     }
     
-    $index = 0
-    if ([int]::TryParse($selection, [ref]$index)) {
-        $index--
-        if ($index -ge 0 -and $index -lt $incidentDetails.Count) {
-            return $incidentDetails[$index].Path
+    if ($selection -match '^\d+$') {
+        $index = [int]$selection - 1
+        if ($index -ge 0 -and $index -lt $allIncidents.Count) {
+            return $allIncidents[$index].FullName
         }
     }
     
-    Write-ColorOutput "Invalid selection!" "Error"
+    Write-Host "Invalid selection!" -ForegroundColor $colors.Critical
     Start-Sleep -Seconds 2
     return Select-IncidentDirectory
 }
 
-# Parse event log files with enhanced error handling
-function Get-EventLogData {
-    param([string]$EventFile)
+# Read and format CSV files
+function Show-CsvFile {
+    param([string]$FilePath)
     
     try {
-        $events = @()
-        Write-ColorOutput "Parsing event log: $(Split-Path $EventFile -Leaf)..." "Progress"
+        Write-Host "Loading CSV data..." -ForegroundColor $colors.Info
+        $data = Import-Csv $FilePath
         
-        # Try to read with Get-WinEvent
-        $eventData = Get-WinEvent -Path $EventFile -MaxEvents 200 -ErrorAction Stop
+        if ($data.Count -eq 0) {
+            return @("No data in CSV file")
+        }
         
-        foreach ($event in $eventData) {
-            $msg = if ($event.Message) {
-                if ($event.Message.Length -gt 300) { 
-                    $event.Message.Substring(0, 297) + "..." 
-                } else { 
-                    $event.Message 
-                }
-            } else {
-                "No message available"
-            }
+        $output = @()
+        $output += "CSV File: $(Split-Path $FilePath -Leaf)"
+        $output += "Total Records: $($data.Count)"
+        $output += "Columns: $($data[0].PSObject.Properties.Name -join ', ')"
+        $output += ("=" * 60)
+        $output += ""
+        
+        # Ask if user wants to filter
+        if ($data.Count -gt 50) {
+            Write-Host "Large dataset detected. Options:" -ForegroundColor $colors.Info
+            Write-Host "1. View all records" -ForegroundColor $colors.Menu
+            Write-Host "2. View first 50 records" -ForegroundColor $colors.Menu
+            Write-Host "3. Search/filter records" -ForegroundColor $colors.Menu
+            Write-Host "4. View summary only" -ForegroundColor $colors.Menu
             
-            $events += [PSCustomObject]@{
-                TimeCreated = $event.TimeCreated.ToString("yyyy-MM-dd HH:mm:ss")
-                Id = $event.Id
-                Level = $event.LevelDisplayName
-                Source = $event.ProviderName
-                Message = $msg -replace "`r`n", " " -replace "`n", " "
-                User = if($event.UserId) { $event.UserId.Value } else { "N/A" }
-                Computer = $event.MachineName
+            $viewChoice = Read-Host "Select option (1-4)"
+            
+            switch ($viewChoice) {
+                "2" { $data = $data | Select-Object -First 50 }
+                "3" {
+                    Write-Host "Available columns:" -ForegroundColor $colors.Info
+                    $data[0].PSObject.Properties.Name | ForEach-Object { Write-Host "  - $_" -ForegroundColor $colors.Data }
+                    
+                    $column = Read-Host "Enter column name to search"
+                    $searchValue = Read-Host "Enter search value (supports wildcards)"
+                    
+                    $data = $data | Where-Object { $_.$column -like "*$searchValue*" }
+                    $output += "Filtered Results: $($data.Count) records matching '$searchValue' in column '$column'"
+                    $output += ""
+                }
+                "4" {
+                    # Just show summary statistics
+                    $output += "Summary Statistics:"
+                    foreach ($prop in $data[0].PSObject.Properties.Name) {
+                        $values = $data.$prop | Where-Object { $_ -ne "" }
+                        $unique = $values | Select-Object -Unique
+                        $output += ""
+                        $output += "Column: $prop"
+                        $output += "  - Non-empty values: $($values.Count)"
+                        $output += "  - Unique values: $($unique.Count)"
+                        if ($unique.Count -le 10 -and $unique.Count -gt 0) {
+                            $output += "  - Values: $($unique -join ', ')"
+                        }
+                    }
+                    return $output
+                }
             }
         }
         
-        return $events
+        # Format each record
+        $recordNum = 1
+        foreach ($record in $data) {
+            $output += "───── Record #$recordNum ─────"
+            foreach ($prop in $record.PSObject.Properties) {
+                if ($prop.Value) {
+                    # Truncate long values
+                    $value = if ($prop.Value.Length -gt 100) {
+                        $prop.Value.Substring(0, 97) + "..."
+                    } else {
+                        $prop.Value
+                    }
+                    $output += "  $($prop.Name): $value"
+                }
+            }
+            $output += ""
+            $recordNum++
+        }
+        
+        if ($viewChoice -eq "2") {
+            $output += "... Showing first 50 records of $($data.Count) total"
+        }
+        
+        return $output
     }
     catch {
-        # Try alternative method using wevtutil
-        try {
-            $tempXml = "$env:TEMP\temp_evt_$(Get-Random).xml"
-            $null = wevtutil qe /lf:$EventFile /f:XML /e:Events /c:50 > $tempXml
-            
-            if (Test-Path $tempXml) {
-                [xml]$xmlContent = Get-Content $tempXml
-                Remove-Item $tempXml -Force
-                
-                $events = @()
-                foreach ($evt in $xmlContent.Events.Event) {
-                    $events += [PSCustomObject]@{
-                        TimeCreated = $evt.System.TimeCreated.SystemTime
-                        Id = $evt.System.EventID
-                        Level = $evt.System.Level
-                        Source = $evt.System.Provider.Name
-                        Message = "Event data available in XML format"
-                        User = "N/A"
-                        Computer = $evt.System.Computer
-                    }
-                }
-                return $events
-            }
-        }
-        catch {
-            # Final fallback
-            return @([PSCustomObject]@{
-                TimeCreated = "N/A"
-                Id = "N/A"
-                Level = "Error"
-                Source = "Parser"
-                Message = "Unable to parse event log file. Error: $_"
-                User = "N/A"
-                Computer = "N/A"
-            })
-        }
+        return @("Error reading CSV: $_")
     }
 }
 
-# Format JSON for display with syntax highlighting
-function Format-JsonData {
-    param([string]$JsonFile)
+# Read and format JSON files
+function Show-JsonFile {
+    param([string]$FilePath)
     
     try {
-        $jsonContent = Get-Content $JsonFile -Raw
+        $jsonContent = Get-Content $FilePath -Raw
         $jsonObject = $jsonContent | ConvertFrom-Json
         
-        # Convert to formatted string with proper indentation
-        $formatted = $jsonObject | ConvertTo-Json -Depth 10 | Out-String
-        
-        # Split into lines for paging
+        # Convert to formatted string
+        $formatted = $jsonObject | ConvertTo-Json -Depth 10
         return $formatted -split "`n"
     }
     catch {
-        return @("Error parsing JSON: $_")
+        return @("Error reading JSON: $_")
     }
 }
 
-# Enhanced CSV viewer with sorting and filtering
-function Show-CsvData {
-    param(
-        [string]$FilePath,
-        [string]$Title
-    )
+# Parse event log files (.evtx)
+function Show-EventLog {
+    param([string]$FilePath)
     
-    if (!(Test-Path $FilePath)) {
-        Write-ColorOutput "File not found: $FilePath" "Error"
-        Read-Host "Press Enter to continue"
-        return
-    }
+    Write-Host "Loading event log..." -ForegroundColor $colors.Info
     
-    $data = Import-Csv $FilePath -ErrorAction SilentlyContinue
-    if (!$data -or $data.Count -eq 0) {
-        Write-ColorOutput "No data in file or unable to parse CSV" "Warning"
-        Read-Host "Press Enter to continue"
-        return
-    }
-    
-    # Get column names
-    $columns = $data[0].PSObject.Properties.Name
-    
-    while ($true) {
-        Show-Header "$Title - CSV Viewer"
+    try {
+        # Get total event count first
+        $totalEvents = (Get-WinEvent -Path $FilePath -MaxEvents 1 -Oldest -ErrorAction Stop | Measure-Object).Count
         
-        Write-ColorOutput "Total Records: $($data.Count)" "Info"
-        Write-ColorOutput "Columns: $($columns -join ', ')" "Data"
-        Write-Host ""
+        # Ask user how many events to load
+        Write-Host "Event log contains events. How many would you like to view?" -ForegroundColor $colors.Info
+        Write-Host "1. First 100 events (newest)" -ForegroundColor $colors.Menu
+        Write-Host "2. Last 100 events (oldest)" -ForegroundColor $colors.Menu
+        Write-Host "3. First 500 events" -ForegroundColor $colors.Menu
+        Write-Host "4. All events (may take time for large logs)" -ForegroundColor $colors.Menu
+        Write-Host "5. Custom range" -ForegroundColor $colors.Menu
         
-        # Format for display
-        $formatted = @()
-        $index = 1
-        foreach ($row in $data) {
-            $line = "[$index] "
-            foreach ($col in $columns) {
-                $val = $row.$col
-                if ($val) {
-                    $displayVal = if ($val.Length -gt 30) { $val.Substring(0, 27) + "..." } else { $val }
-                    $line += "$col`: $displayVal | "
+        $choice = Read-Host "Select option (1-5)"
+        
+        $events = switch ($choice) {
+            "1" { Get-WinEvent -Path $FilePath -MaxEvents 100 -ErrorAction Stop }
+            "2" { Get-WinEvent -Path $FilePath -MaxEvents 100 -Oldest -ErrorAction Stop }
+            "3" { Get-WinEvent -Path $FilePath -MaxEvents 500 -ErrorAction Stop }
+            "4" { 
+                Write-Host "WARNING: Loading all events may use significant memory for large logs!" -ForegroundColor $colors.High
+                $confirm = Read-Host "Continue? (Y/N)"
+                if ($confirm -eq 'Y' -or $confirm -eq 'y') {
+                    Write-Host "Loading all events... This may take several minutes." -ForegroundColor $colors.Info
+                    Get-WinEvent -Path $FilePath -ErrorAction Stop 
+                } else {
+                    Get-WinEvent -Path $FilePath -MaxEvents 100 -ErrorAction Stop
                 }
             }
-            $formatted += $line.TrimEnd(" | ")
-            $index++
-        }
-        
-        # Show paged content
-        Show-PagedContent -Content $formatted -Title $Title -NoLineNumbers
-        break
+            "5" {
+                $maxEvents = Read-Host "Enter number of events to load"
+                if ($maxEvents -match '^\d+
+
+# Display file content based on type
+function Show-FileContent {
+    param([string]$FilePath)
+    
+    if (!(Test-Path $FilePath)) {
+        return @("File not found: $FilePath")
+    }
+    
+    $extension = [System.IO.Path]::GetExtension($FilePath).ToLower()
+    
+    switch ($extension) {
+        ".csv" { return Show-CsvFile -FilePath $FilePath }
+        ".json" { return Show-JsonFile -FilePath $FilePath }
+        ".evtx" { return Show-EventLog -FilePath $FilePath }
+        ".txt" { return Get-Content $FilePath }
+        ".log" { return Get-Content $FilePath }
+        default { return @("Cannot display file type: $extension") }
     }
 }
 
-# Enhanced paging function with search and export
+# Paged display
 function Show-PagedContent {
     param(
         [array]$Content,
-        [string]$Title = "Content Viewer",
-        [switch]$NoLineNumbers,
-        [switch]$ColorCode
+        [string]$Title
     )
     
     if ($Content.Count -eq 0) {
-        Write-ColorOutput "No content to display" "Warning"
+        Write-Host "No content to display" -ForegroundColor $colors.Info
         Read-Host "Press Enter to continue"
         return
     }
     
-    $currentPage = 0
     $totalPages = [Math]::Ceiling($Content.Count / $PageSize)
+    $currentPage = 0
     
     while ($true) {
         Show-Header $Title
         
-        Write-ColorOutput "Total items: $($Content.Count) | Page size: $PageSize" "Info"
-        Write-Host ("-" * 80) -ForegroundColor $colors.Menu
-        
         $startIdx = $currentPage * $PageSize
         $endIdx = [Math]::Min($startIdx + $PageSize, $Content.Count)
         
-        # Display content
+        # Display page content
         for ($i = $startIdx; $i -lt $endIdx; $i++) {
-            if (!$NoLineNumbers) {
-                Write-Host ("{0,4}: " -f ($i + 1)) -NoNewline -ForegroundColor $colors.Menu
-            }
-            
-            # Apply color coding based on content
             $line = $Content[$i]
-            if ($ColorCode -or $line -match "CRITICAL|ERROR|FAIL") {
+            $lineNum = "{0,6}: " -f ($i + 1)
+            
+            # Color coding based on content
+            if ($line -match "CRITICAL|ERROR|FAIL") {
+                Write-Host $lineNum -NoNewline -ForegroundColor $colors.Menu
                 Write-Host $line -ForegroundColor $colors.Critical
             }
             elseif ($line -match "WARNING|ALERT|SUSPICIOUS") {
+                Write-Host $lineNum -NoNewline -ForegroundColor $colors.Menu
                 Write-Host $line -ForegroundColor $colors.High
             }
-            elseif ($line -match "SUCCESS|PASS|ENABLED") {
-                Write-Host $line -ForegroundColor $colors.Success
+            elseif ($line -match "SUCCESS|PASS") {
+                Write-Host $lineNum -NoNewline -ForegroundColor $colors.Menu
+                Write-Host $line -ForegroundColor $colors.Low
             }
-            elseif ($line -match "INFO|INFORMATION") {
+            elseif ($line -match "===== Event #\d+ =====") {
+                Write-Host $lineNum -NoNewline -ForegroundColor $colors.Menu
+                Write-Host $line -ForegroundColor $colors.Header
+            }
+            elseif ($line -match "^Time:|^Level:|^Source:|^ID:|^Computer:|^User:") {
+                Write-Host $lineNum -NoNewline -ForegroundColor $colors.Menu
                 Write-Host $line -ForegroundColor $colors.Info
             }
             else {
+                Write-Host $lineNum -NoNewline -ForegroundColor $colors.Menu
                 Write-Host $line -ForegroundColor $colors.Data
             }
         }
         
-        # Navigation bar
+        # Navigation
         Write-Host ""
         Write-Host ("-" * 80) -ForegroundColor $colors.Menu
-        Write-Host "Page $($currentPage + 1) of $totalPages | " -NoNewline -ForegroundColor $colors.Info
-        Write-Host "Showing items $($startIdx + 1)-$endIdx of $($Content.Count)" -ForegroundColor $colors.Info
-        Write-Host "[N]ext [P]rev [F]irst [L]ast [G]oto [S]earch [E]xport [D]etails [Q]uit: " -NoNewline -ForegroundColor $colors.Menu
+        Write-Host "Page $($currentPage + 1) of $totalPages | Showing items $($startIdx + 1)-$endIdx of $($Content.Count)" -ForegroundColor $colors.Info
+        Write-Host "[N]ext [P]rev [F]irst [L]ast [G]oto page [J]ump to line [S]earch [E]xport [Q]uit: " -NoNewline -ForegroundColor $colors.Menu
         
         $key = Read-Host
         
-        switch -Regex ($key.ToUpper()) {
-            "^N" { 
-                if ($currentPage -lt $totalPages - 1) { 
-                    $currentPage++ 
-                } else {
-                    Write-ColorOutput "Already on last page" "Warning"
-                    Start-Sleep -Seconds 1
-                }
-            }
-            "^P" { 
-                if ($currentPage -gt 0) { 
-                    $currentPage-- 
-                } else {
-                    Write-ColorOutput "Already on first page" "Warning"
-                    Start-Sleep -Seconds 1
-                }
-            }
-            "^F" { $currentPage = 0 }
-            "^L" { $currentPage = $totalPages - 1 }
-            "^G" {
-                $goto = Read-Host "Go to page (1-$totalPages)"
-                if ($goto -match '^\d+$') {
-                    $pageNum = [int]$goto - 1
-                    if ($pageNum -ge 0 -and $pageNum -lt $totalPages) {
-                        $currentPage = $pageNum
-                    } else {
-                        Write-ColorOutput "Invalid page number" "Error"
-                        Start-Sleep -Seconds 1
-                    }
-                }
-            }
-            "^S" {
-                $search = Read-Host "Search for (regex supported)"
-                if ($search) {
-                    $matches = @()
-                    for ($i = 0; $i -lt $Content.Count; $i++) {
-                        if ($Content[$i] -match $search) {
-                            $matches += "Line $($i + 1): $($Content[$i])"
-                        }
-                    }
-                    if ($matches.Count -gt 0) {
-                        Show-PagedContent -Content $matches -Title "Search Results for '$search' ($($matches.Count) matches)"
-                    } else {
-                        Write-ColorOutput "No matches found" "Warning"
-                        Read-Host "Press Enter to continue"
-                    }
-                }
-            }
-            "^E" {
-                $exportPath = "$env:TEMP\IR_Export_$(Get-Date -Format 'yyyyMMdd_HHmmss').txt"
-                @"
-$Title
-Exported: $(Get-Date)
-Total Items: $($Content.Count)
-$('='*80)
+        switch ($key.ToUpper()) {
+            "N" { if ($currentPage -lt $totalPages - 1) { $currentPage++ } }
+            "P" { if ($currentPage -gt 0) { $currentPage-- } }
+            "F" { $currentPage = 0 }
+            "L" { $currentPage = $totalPages - 1 }
+            "G" {
+                $goto = Read-Host "Enter page number (1-$totalPages)"
+                if ($goto -match '^\d+
 
-"@ + ($Content -join "`r`n") | Out-File $exportPath -Encoding UTF8
-                Write-ColorOutput "Exported to: $exportPath" "Success"
-                $open = Read-Host "Open in notepad? (Y/N)"
-                if ($open -eq 'Y' -or $open -eq 'y') {
-                    notepad.exe $exportPath
-                }
-            }
-            "^D" {
-                $detail = Read-Host "Enter line number for details"
-                if ($detail -match '^\d+$') {
-                    $lineNum = [int]$detail - 1
-                    if ($lineNum -ge 0 -and $lineNum -lt $Content.Count) {
-                        Show-Header "Line Detail"
-                        Write-ColorOutput "Line $($lineNum + 1):" "Info"
-                        Write-Host ""
-                        Write-Host $Content[$lineNum] -ForegroundColor $colors.Data
-                        Write-Host ""
-                        
-                        # If it's a path, offer to view the file
-                        if ($Content[$lineNum] -match '([A-Z]:\\[^|]+\.(txt|csv|log|json))') {
-                            $filePath = $matches[1]
-                            if (Test-Path $filePath) {
-                                $view = Read-Host "This appears to be a file path. View it? (Y/N)"
-                                if ($view -eq 'Y' -or $view -eq 'y') {
-                                    Show-FileContent -FilePath $filePath -Title "File Content"
-                                    continue
-                                }
-                            }
-                        }
-                        
-                        Read-Host "`nPress Enter to continue"
-                    }
-                }
-            }
-            "^Q" { return }
-            "^\d+$" {
-                # Direct line jump
-                $lineNum = [int]$key - 1
-                if ($lineNum -ge 0 -and $lineNum -lt $Content.Count) {
-                    # Calculate which page this line is on
-                    $targetPage = [Math]::Floor($lineNum / $PageSize)
-                    $currentPage = $targetPage
-                }
-            }
-        }
-    }
-}
-
-# Display file content with appropriate formatting
-function Show-FileContent {
-    param(
-        [string]$FilePath,
-        [string]$Title,
-        [switch]$ReturnContent
-    )
-    
-    if (!(Test-Path $FilePath)) {
-        Write-ColorOutput "File not found: $FilePath" "Error"
-        if (!$ReturnContent) { Read-Host "Press Enter to continue" }
-        return @()
-    }
-    
-    $extension = [System.IO.Path]::GetExtension($FilePath).ToLower()
-    $fileName = [System.IO.Path]::GetFileName($FilePath)
-    $content = @()
-    
-    Write-ColorOutput "Processing $fileName..." "Progress"
-    
-    switch ($extension) {
-        ".csv" {
-            if ($ReturnContent) {
-                # For export, return raw CSV data
-                $content = Get-Content $FilePath
-            } else {
-                # For display, use the enhanced CSV viewer
-                Show-CsvData -FilePath $FilePath -Title $Title
-                return
-            }
-        }
-        
-        ".json" {
-            $content = Format-JsonData -JsonFile $FilePath
-        }
-        
-        ".evtx" {
-            $events = Get-EventLogData -EventFile $FilePath
-            $content = @()
-            $content += "Event Log: $fileName"
-            $content += "Total Events Shown: $($events.Count) (limited to most recent)"
-            $content += "="*80
-            $content += ""
-            
-            foreach ($evt in $events) {
-                $content += "Time: $($evt.TimeCreated) | ID: $($evt.Id) | Level: $($evt.Level)"
-                $content += "Source: $($evt.Source) | Computer: $($evt.Computer)"
-                if ($evt.User -ne "N/A") {
-                    $content += "User: $($evt.User)"
-                }
-                $content += "Message: $($evt.Message)"
-                $content += "-"*60
-            }
-        }
-        
-        ".txt", ".log" {
-            $content = Get-Content $FilePath -ErrorAction SilentlyContinue
-        }
-        
-        ".xml" {
-            try {
-                [xml]$xmlContent = Get-Content $FilePath
-                $content = $xmlContent.OuterXml -split "`n"
-            } catch {
-                $content = Get-Content $FilePath
-            }
-        }
-        
-        default {
-            $content = @("Binary or unsupported file type: $extension")
-            if (!$ReturnContent) {
-                $size = (Get-Item $FilePath).Length
-                $content += "File size: $([Math]::Round($size/1KB, 2)) KB"
-            }
-        }
-    }
-    
-    if ($ReturnContent) {
-        return $content
-    }
-    
-    Show-PagedContent -Content $content -Title "$Title [$fileName]" -ColorCode
-}
-
-# Main incident browser with all features
-function Browse-IncidentData {
+# Main menu for incident data
+function Show-IncidentMenu {
     param([string]$IncidentPath)
-    
-    $global:currentIncident = $IncidentPath
-    $incidentName = Split-Path $IncidentPath -Leaf
-    
-    # Load incident details once
-    $incidentInfo = Get-IncidentInfo -Path $IncidentPath
     
     while ($true) {
         Show-Header "INCIDENT DATA BROWSER"
         
-        # Display incident summary
-        Write-Host "┌─ Incident Information ─────────────────────────────────────────────────────┐" -ForegroundColor $colors.Menu
-        Write-Host "│ " -NoNewline -ForegroundColor $colors.Menu
-        Write-ColorOutput "Name: $incidentName" "Info" -NoNewLine
-        Write-Host (" " * (75 - $incidentName.Length)) -NoNewline
-        Write-Host "│" -ForegroundColor $colors.Menu
+        # Display incident info
+        $incidentName = Split-Path $IncidentPath -Leaf
+        Write-Host "Incident: $incidentName" -ForegroundColor $colors.Info
+        Write-Host "Path: $IncidentPath" -ForegroundColor $colors.Data
         
-        Write-Host "│ " -NoNewline -ForegroundColor $colors.Menu
-        Write-ColorOutput "Threat Level: " "Menu" -NoNewLine
-        $threatColor = switch ($incidentInfo.ThreatLevel) {
-            "CRITICAL" { $colors.Critical }
-            "HIGH" { $colors.High }
-            "MEDIUM" { $colors.Medium }
-            "LOW" { $colors.Low }
-            default { $colors.Data }
-        }
-        Write-Host "$($incidentInfo.ThreatLevel)" -ForegroundColor $threatColor -NoNewline
-        Write-Host (" " * (63 - $incidentInfo.ThreatLevel.Length)) -NoNewline
-        Write-Host "│" -ForegroundColor $colors.Menu
-        
-        Write-Host "│ " -NoNewline -ForegroundColor $colors.Menu
-        Write-ColorOutput "Total Alerts: $($incidentInfo.AlertCount)" "Data" -NoNewLine
-        Write-Host (" " * (63 - $incidentInfo.AlertCount.ToString().Length)) -NoNewline
-        Write-Host "│" -ForegroundColor $colors.Menu
-        
-        Write-Host "│ " -NoNewline -ForegroundColor $colors.Menu
-        Write-ColorOutput "Collection Time: $($incidentInfo.CollectionTime)" "Data" -NoNewLine
-        Write-Host (" " * (59 - $incidentInfo.CollectionTime.Length)) -NoNewline
-        Write-Host "│" -ForegroundColor $colors.Menu
-        
-        Write-Host "└─────────────────────────────────────────────────────────────────────────────┘" -ForegroundColor $colors.Menu
-        Write-Host ""
-        
-        # Key findings if available
-        if ($incidentInfo.KeyFindings.Count -gt 0) {
-            Write-ColorOutput "Key Findings:" "Warning"
-            $incidentInfo.KeyFindings | Select-Object -First 5 | ForEach-Object {
-                Write-Host "  • $_" -ForegroundColor $colors.High
+        # Get summary info if available
+        $summaryPath = Join-Path $IncidentPath "SUMMARY.txt"
+        if (Test-Path $summaryPath) {
+            $summaryLines = Get-Content $summaryPath | Select-String "THREAT LEVEL:|TOTAL ALERTS:"
+            foreach ($line in $summaryLines) {
+                if ($line -match "THREAT LEVEL:") {
+                    $level = $line.Line.Split(":")[1].Trim()
+                    $color = switch ($level) {
+                        "CRITICAL" { $colors.Critical }
+                        "HIGH" { $colors.High }
+                        "MEDIUM" { $colors.Medium }
+                        "LOW" { $colors.Low }
+                        default { $colors.Data }
+                    }
+                    Write-Host $line.Line -ForegroundColor $color
+                }
+                else {
+                    Write-Host $line.Line -ForegroundColor $colors.Info
+                }
             }
-            Write-Host ""
         }
         
-        # Main menu
-        Write-ColorOutput "MAIN MENU" "Header"
-        Write-Host ("-" * 40) -ForegroundColor $colors.Menu
-        Write-Host " 1. " -NoNewline -ForegroundColor $colors.Menu
-        Write-ColorOutput "View Summary Report" "Menu"
-        
-        Write-Host " 2. " -NoNewline -ForegroundColor $colors.Menu
-        Write-ColorOutput "Browse ALERTS " "Critical" -NoNewLine
-        Write-ColorOutput "(Critical Findings)" "Menu"
-        
-        Write-Host " 3. " -NoNewline -ForegroundColor $colors.Menu
-        Write-ColorOutput "Network Analysis" "Menu"
-        
-        Write-Host " 4. " -NoNewline -ForegroundColor $colors.Menu
-        Write-ColorOutput "Process Information" "Menu"
-        
-        Write-Host " 5. " -NoNewline -ForegroundColor $colors.Menu
-        Write-ColorOutput "Persistence Mechanisms" "Menu"
-        
-        Write-Host " 6. " -NoNewline -ForegroundColor $colors.Menu
-        Write-ColorOutput "Event Logs" "Menu"
-        
-        Write-Host " 7. " -NoNewline -ForegroundColor $colors.Menu
-        Write-ColorOutput "System Information" "Menu"
-        
-        Write-Host " 8. " -NoNewline -ForegroundColor $colors.Menu
-        Write-ColorOutput "IOCs (Indicators of Compromise)" "Menu"
-        
-        Write-Host " 9. " -NoNewline -ForegroundColor $colors.Menu
-        Write-ColorOutput "Browse All Files" "Menu"
-        
-        Write-Host "10. " -NoNewline -ForegroundColor $colors.Menu
-        Write-ColorOutput "Search Across All Files" "Menu"
-        
-        Write-Host "11. " -NoNewline -ForegroundColor $colors.Menu
-        Write-ColorOutput "Export Complete Report (Text)" "Success"
-        
-        Write-Host "12. " -NoNewline -ForegroundColor $colors.Menu
-        Write-ColorOutput "Generate HTML Report" "Success"
-        
-        Write-Host " Q. " -NoNewline -ForegroundColor $colors.Menu
-        Write-ColorOutput "Back to Directory Selection" "Menu"
+        Write-Host ""
+        Write-Host "MAIN MENU" -ForegroundColor $colors.Header
+        Write-Host "1. View Summary" -ForegroundColor $colors.Menu
+        Write-Host "2. View Alerts" -ForegroundColor $colors.Menu
+        Write-Host "3. Network Data" -ForegroundColor $colors.Menu
+        Write-Host "4. Process Data" -ForegroundColor $colors.Menu
+        Write-Host "5. Persistence Data" -ForegroundColor $colors.Menu
+        Write-Host "6. System Information" -ForegroundColor $colors.Menu
+        Write-Host "7. Event Logs" -ForegroundColor $colors.Menu
+        Write-Host "8. View IOCs (if available)" -ForegroundColor $colors.Menu
+        Write-Host "9. Browse All Files" -ForegroundColor $colors.Menu
+        Write-Host "0. Export All to Text" -ForegroundColor $colors.Menu
+        Write-Host "Q. Back to Directory Selection" -ForegroundColor $colors.Menu
         Write-Host ""
         
         $choice = Read-Host "Select option"
         
         switch ($choice) {
             "1" { Show-Summary -IncidentPath $IncidentPath }
-            "2" { Browse-Alerts -IncidentPath $IncidentPath }
-            "3" { Browse-NetworkData -IncidentPath $IncidentPath }
-            "4" { Browse-ProcessData -IncidentPath $IncidentPath }
-            "5" { Browse-Persistence -IncidentPath $IncidentPath }
-            "6" { Browse-EventLogs -IncidentPath $IncidentPath }
-            "7" { Browse-SystemInfo -IncidentPath $IncidentPath }
+            "2" { Show-Alerts -IncidentPath $IncidentPath }
+            "3" { Show-NetworkData -IncidentPath $IncidentPath }
+            "4" { Show-ProcessData -IncidentPath $IncidentPath }
+            "5" { Show-PersistenceData -IncidentPath $IncidentPath }
+            "6" { Show-SystemInfo -IncidentPath $IncidentPath }
+            "7" { Show-EventLogs -IncidentPath $IncidentPath }
             "8" { Show-IOCs -IncidentPath $IncidentPath }
-            "9" { Browse-AllFiles -RootPath $IncidentPath }
-            "10" { Search-AllFiles -RootPath $IncidentPath }
-            "11" { Export-AllData -IncidentPath $IncidentPath }
-            "12" { Export-HtmlReport -IncidentPath $IncidentPath }
+            "9" { Browse-Files -IncidentPath $IncidentPath }
+            "0" { Export-AllData -IncidentPath $IncidentPath }
             "Q" { return }
             "q" { return }
-            default {
-                Write-ColorOutput "Invalid option" "Error"
-                Start-Sleep -Seconds 1
-            }
         }
     }
 }
 
-# Get incident information
-function Get-IncidentInfo {
-    param([string]$Path)
-    
-    $info = [PSCustomObject]@{
-        ThreatLevel = "Unknown"
-        AlertCount = 0
-        CollectionTime = "Unknown"
-        KeyFindings = @()
-        RemoteAccess = $false
-        SuspiciousProcesses = 0
-        NetworkConnections = 0
-    }
-    
-    # Parse summary
-    $summaryPath = Join-Path $Path "SUMMARY.txt"
-    if (Test-Path $summaryPath) {
-        $summary = Get-Content $summaryPath
-        
-        # Extract threat level
-        $threatLine = $summary | Select-String "THREAT LEVEL:"
-        if ($threatLine) {
-            $info.ThreatLevel = $threatLine.Line.Split(":")[1].Trim()
-        }
-        
-        # Extract alert count
-        $alertLine = $summary | Select-String "TOTAL ALERTS:"
-        if ($alertLine) {
-            $info.AlertCount = [int]($alertLine.Line.Split(":")[1].Trim())
-        }
-        
-        # Extract collection time
-        $timeLine = $summary | Select-String "Collection Time:"
-        if ($timeLine) {
-            $info.CollectionTime = $timeLine.Line.Split(":", 2)[1].Trim()
-        }
-        
-        # Extract key findings
-        $findingsStart = ($summary | Select-String -Pattern "KEY FINDINGS:").LineNumber
-        if ($findingsStart) {
-            $findings = $summary[$findingsStart..($findingsStart + 20)] | Where-Object { $_ -match "^>" }
-            $info.KeyFindings = $findings | ForEach-Object { $_.TrimStart(">").Trim() }
-        }
-    }
-    
-    return $info
-}
-
-# Show detailed summary
+# Show summary
 function Show-Summary {
     param([string]$IncidentPath)
     
     $summaryFile = Join-Path $IncidentPath "SUMMARY.txt"
     if (Test-Path $summaryFile) {
         $content = Get-Content $summaryFile
-        
-        # Color-code the summary
-        $coloredContent = @()
-        foreach ($line in $content) {
-            $coloredContent += $line
-        }
-        
-        Show-PagedContent -Content $coloredContent -Title "INCIDENT SUMMARY" -ColorCode
-    } else {
-        Write-ColorOutput "Summary file not found" "Error"
+        Show-PagedContent -Content $content -Title "INCIDENT SUMMARY"
+    }
+    else {
+        Write-Host "Summary file not found" -ForegroundColor $colors.Critical
         Read-Host "Press Enter to continue"
     }
 }
 
-# Browse alerts with categorization
-function Browse-Alerts {
+# Show alerts
+function Show-Alerts {
     param([string]$IncidentPath)
     
     $alertsPath = Join-Path $IncidentPath "ALERTS"
     if (!(Test-Path $alertsPath)) {
-        Write-ColorOutput "No alerts directory found" "Warning"
+        Write-Host "No alerts directory found" -ForegroundColor $colors.Info
         Read-Host "Press Enter to continue"
         return
     }
     
     while ($true) {
-        Show-Header "CRITICAL ALERTS AND FINDINGS"
+        Show-Header "ALERTS"
         
-        $alertFiles = Get-ChildItem -Path $alertsPath -File -ErrorAction SilentlyContinue | Sort-Object Name
-        
-        if ($alertFiles.Count -eq 0) {
-            Write-ColorOutput "No alert files found" "Warning"
-            Read-Host "Press Enter to return"
+        $files = Get-ChildItem $alertsPath -File | Sort-Object Name
+        if ($files.Count -eq 0) {
+            Write-Host "No alert files found" -ForegroundColor $colors.Info
+            Read-Host "Press Enter to continue"
             return
         }
         
-        # Categorize alerts
-        $categories = @{
-            "Suspicious Processes" = @()
-            "Network Alerts" = @()
-            "Persistence" = @()
-            "Remote Access" = @()
-            "IOCs" = @()
-            "Other" = @()
-        }
-        
-        foreach ($file in $alertFiles) {
-            if ($file.Name -match "process|proc") { $categories["Suspicious Processes"] += $file }
-            elseif ($file.Name -match "network|connection|ip") { $categories["Network Alerts"] += $file }
-            elseif ($file.Name -match "persistence|autorun|service|task") { $categories["Persistence"] += $file }
-            elseif ($file.Name -match "remote|rdp|teamviewer") { $categories["Remote Access"] += $file }
-            elseif ($file.Name -match "ioc") { $categories["IOCs"] += $file }
-            else { $categories["Other"] += $file }
-        }
-        
-        # Display categorized alerts
-        $fileIndex = 1
-        $fileMap = @{}
-        
-        foreach ($category in $categories.Keys | Sort-Object) {
-            if ($categories[$category].Count -gt 0) {
-                Write-Host ""
-                Write-ColorOutput "═══ $category ═══" "High"
-                
-                foreach ($file in $categories[$category]) {
-                    $sizeKB = [Math]::Round($file.Length / 1KB, 2)
-                    
-                    Write-Host ("{0,3}. " -f $fileIndex) -NoNewline -ForegroundColor $colors.Menu
-                    Write-Host ("{0,-40}" -f $file.Name) -NoNewline -ForegroundColor $colors.Alert
-                    Write-Host (" {0,8} KB" -f $sizeKB) -ForegroundColor $colors.Data
-                    
-                    $fileMap[$fileIndex] = $file
-                    $fileIndex++
-                }
-            }
+        Write-Host "Alert Files:" -ForegroundColor $colors.Header
+        for ($i = 0; $i -lt $files.Count; $i++) {
+            Write-Host ("{0,3}. {1}" -f ($i + 1), $files[$i].Name) -ForegroundColor $colors.High
         }
         
         Write-Host ""
-        Write-Host "Enter file number to view (1-$($fileIndex-1)), A for all, or Q to go back: " -NoNewline -ForegroundColor $colors.Menu
-        $selection = Read-Host
+        Write-Host "Enter file number to view or Q to go back: " -NoNewline
+        $choice = Read-Host
         
-        if ($selection -eq 'Q' -or $selection -eq 'q') {
-            return
-        }
-        elseif ($selection -eq 'A' -or $selection -eq 'a') {
-            # View all alerts in sequence
-            foreach ($file in $alertFiles) {
-                Show-FileContent -FilePath $file.FullName -Title "ALERT: $($file.Name)"
-            }
-        }
-        elseif ($selection -match '^\d+$') {
-            $index = [int]$selection
-            if ($fileMap.ContainsKey($index)) {
-                Show-FileContent -FilePath $fileMap[$index].FullName -Title "ALERT FILE"
+        if ($choice -match '^[Qq]') { return }
+        
+        if ($choice -match '^\d+$') {
+            $index = [int]$choice - 1
+            if ($index -ge 0 -and $index -lt $files.Count) {
+                $content = Show-FileContent -FilePath $files[$index].FullName
+                Show-PagedContent -Content $content -Title "ALERT: $($files[$index].Name)"
             }
         }
     }
 }
 
-# Browse network data with analysis
-function Browse-NetworkData {
+# Show network data
+function Show-NetworkData {
     param([string]$IncidentPath)
     
     $networkPath = Join-Path $IncidentPath "Network"
     if (!(Test-Path $networkPath)) {
-        Write-ColorOutput "No network data found" "Warning"
+        Write-Host "No network data found" -ForegroundColor $colors.Info
         Read-Host "Press Enter to continue"
         return
     }
     
     while ($true) {
-        Show-Header "NETWORK ANALYSIS"
+        Show-Header "NETWORK DATA"
         
-        # Quick network summary
-        $connFile = Join-Path $networkPath "connections_basic.csv"
-        if (Test-Path $connFile) {
-            $connections = Import-Csv $connFile -ErrorAction SilentlyContinue
-            if ($connections) {
-                $established = @($connections | Where-Object {$_.State -eq "Established"})
-                $listening = @($connections | Where-Object {$_.State -eq "Listen"})
-                $external = @($established | Where-Object {
-                    $_.RemoteAddress -notmatch "^(10\.|172\.(1[6-9]|2[0-9]|3[01])\.|192\.168\.|127\.|::1|fe80:)"
-                })
-                
-                Write-ColorOutput "Network Summary:" "Info"
-                Write-Host "  Total Connections: $($connections.Count)" -ForegroundColor $colors.Data
-                Write-Host "  Established: $($established.Count)" -ForegroundColor $colors.Data
-                Write-Host "  Listening: $($listening.Count)" -ForegroundColor $colors.Data
-                Write-Host "  External: $($external.Count)" -ForegroundColor $(if($external.Count -gt 0){$colors.Warning}else{$colors.Data})
-                Write-Host ""
-            }
+        $files = Get-ChildItem $networkPath -File | Sort-Object Name
+        
+        Write-Host "Network Files:" -ForegroundColor $colors.Header
+        for ($i = 0; $i -lt $files.Count; $i++) {
+            Write-Host ("{0,3}. {1}" -f ($i + 1), $files[$i].Name) -ForegroundColor $colors.Menu
         }
         
-        Write-ColorOutput "Available Data:" "Header"
-        Write-Host " 1. Network Connections (CSV)" -ForegroundColor $colors.Menu
-        Write-Host " 2. External IPs List" -ForegroundColor $colors.Menu
-        Write-Host " 3. DNS Cache" -ForegroundColor $colors.Menu
-        Write-Host " 4. Active Sessions" -ForegroundColor $colors.Menu
-        Write-Host " 5. Network Configuration" -ForegroundColor $colors.Menu
-        Write-Host " 6. ARP Table" -ForegroundColor $colors.Menu
-        Write-Host " 7. Routing Table" -ForegroundColor $colors.Menu
-        Write-Host " 8. Open Ports (netstat)" -ForegroundColor $colors.Menu
-        Write-Host " 9. View All Network Files" -ForegroundColor $colors.Menu
-        Write-Host " Q. Back to Main Menu" -ForegroundColor $colors.Menu
         Write-Host ""
+        Write-Host "Enter file number to view or Q to go back: " -NoNewline
+        $choice = Read-Host
         
-        $choice = Read-Host "Select option"
+        if ($choice -match '^[Qq]') { return }
         
-        switch ($choice) {
-            "1" { Show-FileContent -FilePath (Join-Path $networkPath "connections_basic.csv") -Title "Network Connections" }
-            "2" { Show-FileContent -FilePath (Join-Path $networkPath "external_ips.txt") -Title "External IPs" }
-            "3" { Show-FileContent -FilePath (Join-Path $networkPath "dns_cache.csv") -Title "DNS Cache" }
-            "4" { Show-FileContent -FilePath (Join-Path $networkPath "active_sessions.txt") -Title "Active Sessions" }
-            "5" { Show-FileContent -FilePath (Join-Path $networkPath "ipconfig.txt") -Title "Network Configuration" }
-            "6" { Show-FileContent -FilePath (Join-Path $networkPath "arp.txt") -Title "ARP Table" }
-            "7" { Show-FileContent -FilePath (Join-Path $networkPath "routes.txt") -Title "Routing Table" }
-            "8" { Show-FileContent -FilePath (Join-Path $networkPath "netstat_full.txt") -Title "Open Ports (netstat)" }
-            "9" { Browse-Directory -Path $networkPath -Title "ALL NETWORK FILES" }
-            "Q" { return }
-            "q" { return }
+        if ($choice -match '^\d+$') {
+            $index = [int]$choice - 1
+            if ($index -ge 0 -and $index -lt $files.Count) {
+                $content = Show-FileContent -FilePath $files[$index].FullName
+                Show-PagedContent -Content $content -Title "NETWORK: $($files[$index].Name)"
+            }
         }
     }
 }
 
-# Browse process data
-function Browse-ProcessData {
+# Show process data
+function Show-ProcessData {
     param([string]$IncidentPath)
     
     $processPath = Join-Path $IncidentPath "Processes"
+    $files = @()
     
-    while ($true) {
-        Show-Header "PROCESS ANALYSIS"
-        
-        # Check for process data in both locations
-        $processFiles = @()
-        if (Test-Path $processPath) {
-            $processFiles += Get-ChildItem -Path $processPath -Filter "*.csv" -ErrorAction SilentlyContinue
-        }
-        
-        # Also check ALERTS for process-related files
-        $alertsPath = Join-Path $IncidentPath "ALERTS"
-        if (Test-Path $alertsPath) {
-            $processFiles += Get-ChildItem -Path $alertsPath -Filter "*process*.csv" -ErrorAction SilentlyContinue
-            $processFiles += Get-ChildItem -Path $alertsPath -Filter "*shell*.csv" -ErrorAction SilentlyContinue
-            $processFiles += Get-ChildItem -Path $alertsPath -Filter "*pid*.csv" -ErrorAction SilentlyContinue
-        }
-        
-        if ($processFiles.Count -eq 0) {
-            Write-ColorOutput "No process data found" "Warning"
-            Read-Host "Press Enter to return"
-            return
-        }
-        
-        Write-ColorOutput "Available Process Data:" "Header"
-        for ($i = 0; $i -lt $processFiles.Count; $i++) {
-            $file = $processFiles[$i]
-            $location = if ($file.DirectoryName -match "ALERTS") { "[ALERT]" } else { "[DATA]" }
-            
-            Write-Host ("{0,3}. " -f ($i + 1)) -NoNewline -ForegroundColor $colors.Menu
-            Write-Host ("{0,-40}" -f $file.Name) -NoNewline
-            Write-Host (" {0}" -f $location) -ForegroundColor $(if($location -eq "[ALERT]"){$colors.Alert}else{$colors.Info})
-        }
-        
-        Write-Host ""
-        Write-Host "Enter file number to view or Q to go back: " -NoNewline -ForegroundColor $colors.Menu
-        $selection = Read-Host
-        
-        if ($selection -eq 'Q' -or $selection -eq 'q') {
-            return
-        }
-        elseif ($selection -match '^\d+$') {
-            $index = [int]$selection - 1
-            if ($index -ge 0 -and $index -lt $processFiles.Count) {
-                Show-FileContent -FilePath $processFiles[$index].FullName -Title "PROCESS DATA"
-            }
-        }
+    # Check both Processes folder and ALERTS for process files
+    if (Test-Path $processPath) {
+        $files += Get-ChildItem $processPath -File
     }
-}
-
-# Browse persistence mechanisms
-function Browse-Persistence {
-    param([string]$IncidentPath)
     
-    $persistPath = Join-Path $IncidentPath "Persistence"
-    
-    while ($true) {
-        Show-Header "PERSISTENCE MECHANISMS"
-        
-        $persFiles = @()
-        
-        # Check main persistence folder
-        if (Test-Path $persistPath) {
-            $persFiles += Get-ChildItem -Path $persistPath -File -ErrorAction SilentlyContinue
-        }
-        
-        # Check alerts for persistence-related files
-        $alertsPath = Join-Path $IncidentPath "ALERTS"
-        if (Test-Path $alertsPath) {
-            $persFiles += Get-ChildItem -Path $alertsPath -Filter "*autorun*.csv" -ErrorAction SilentlyContinue
-            $persFiles += Get-ChildItem -Path $alertsPath -Filter "*task*.csv" -ErrorAction SilentlyContinue
-            $persFiles += Get-ChildItem -Path $alertsPath -Filter "*service*.csv" -ErrorAction SilentlyContinue
-        }
-        
-        if ($persFiles.Count -eq 0) {
-            Write-ColorOutput "No persistence data found" "Warning"
-            Read-Host "Press Enter to return"
-            return
-        }
-        
-        # Categorize persistence mechanisms
-        Write-ColorOutput "Detected Persistence Mechanisms:" "Header"
-        Write-Host ""
-        
-        $categories = @{
-            "Registry Autoruns" = $persFiles | Where-Object {$_.Name -match "autorun|registry"}
-            "Scheduled Tasks" = $persFiles | Where-Object {$_.Name -match "task"}
-            "Services" = $persFiles | Where-Object {$_.Name -match "service"}
-            "Other" = $persFiles | Where-Object {$_.Name -notmatch "autorun|registry|task|service"}
-        }
-        
-        $fileIndex = 1
-        $fileMap = @{}
-        
-        foreach ($cat in $categories.Keys | Sort-Object) {
-            if ($categories[$cat].Count -gt 0) {
-                Write-ColorOutput "─ $cat ─" "Warning"
-                foreach ($file in $categories[$cat]) {
-                    Write-Host ("{0,3}. " -f $fileIndex) -NoNewline -ForegroundColor $colors.Menu
-                    Write-Host $file.Name -ForegroundColor $colors.High
-                    $fileMap[$fileIndex] = $file
-                    $fileIndex++
-                }
-                Write-Host ""
-            }
-        }
-        
-        Write-Host "Enter file number to view or Q to go back: " -NoNewline -ForegroundColor $colors.Menu
-        $selection = Read-Host
-        
-        if ($selection -eq 'Q' -or $selection -eq 'q') {
-            return
-        }
-        elseif ($selection -match '^\d+$') {
-            $index = [int]$selection
-            if ($fileMap.ContainsKey($index)) {
-                Show-FileContent -FilePath $fileMap[$index].FullName -Title "PERSISTENCE DATA"
-            }
-        }
+    $alertsPath = Join-Path $IncidentPath "ALERTS"
+    if (Test-Path $alertsPath) {
+        $files += Get-ChildItem $alertsPath -Filter "*process*" -File
+        $files += Get-ChildItem $alertsPath -Filter "*pid*" -File
     }
-}
-
-# Browse event logs
-function Browse-EventLogs {
-    param([string]$IncidentPath)
     
-    $logsPath = Join-Path $IncidentPath "Logs"
-    if (!(Test-Path $logsPath)) {
-        Write-ColorOutput "No event logs found" "Warning"
+    if ($files.Count -eq 0) {
+        Write-Host "No process data found" -ForegroundColor $colors.Info
         Read-Host "Press Enter to continue"
         return
     }
     
     while ($true) {
-        Show-Header "EVENT LOG ANALYSIS"
+        Show-Header "PROCESS DATA"
         
-        $logFiles = Get-ChildItem -Path $logsPath -Filter "*.evtx" -ErrorAction SilentlyContinue | Sort-Object Name
-        
-        if ($logFiles.Count -eq 0) {
-            Write-ColorOutput "No event log files found" "Warning"
-            Read-Host "Press Enter to return"
-            return
-        }
-        
-        Write-ColorOutput "Available Event Logs:" "Header"
-        Write-Host ""
-        
-        for ($i = 0; $i -lt $logFiles.Count; $i++) {
-            $file = $logFiles[$i]
-            $sizeMB = [Math]::Round($file.Length / 1MB, 2)
-            
-            Write-Host ("{0,3}. " -f ($i + 1)) -NoNewline -ForegroundColor $colors.Menu
-            Write-Host ("{0,-30}" -f $file.Name) -NoNewline
-            
-            # Color based on log type
-            $color = switch ($file.Name) {
-                "Security.evtx" { $colors.High }
-                "System.evtx" { $colors.Warning }
-                "Application.evtx" { $colors.Info }
-                "PowerShell.evtx" { $colors.Alert }
-                default { $colors.Data }
-            }
-            
-            Write-Host (" {0,8} MB" -f $sizeMB) -ForegroundColor $color
+        Write-Host "Process Files:" -ForegroundColor $colors.Header
+        for ($i = 0; $i -lt $files.Count; $i++) {
+            $color = if ($files[$i].DirectoryName -match "ALERTS") { $colors.High } else { $colors.Menu }
+            Write-Host ("{0,3}. {1}" -f ($i + 1), $files[$i].Name) -ForegroundColor $color
         }
         
         Write-Host ""
-        Write-Host "Enter log number to view, A for analysis summary, or Q to go back: " -NoNewline -ForegroundColor $colors.Menu
-        $selection = Read-Host
+        Write-Host "Enter file number to view or Q to go back: " -NoNewline
+        $choice = Read-Host
         
-        if ($selection -eq 'Q' -or $selection -eq 'q') {
-            return
-        }
-        elseif ($selection -eq 'A' -or $selection -eq 'a') {
-            # Quick analysis of all logs
-            Show-EventLogSummary -LogsPath $logsPath
-        }
-        elseif ($selection -match '^\d+$') {
-            $index = [int]$selection - 1
-            if ($index -ge 0 -and $index -lt $logFiles.Count) {
-                Show-FileContent -FilePath $logFiles[$index].FullName -Title "EVENT LOG"
+        if ($choice -match '^[Qq]') { return }
+        
+        if ($choice -match '^\d+$') {
+            $index = [int]$choice - 1
+            if ($index -ge 0 -and $index -lt $files.Count) {
+                $content = Show-FileContent -FilePath $files[$index].FullName
+                Show-PagedContent -Content $content -Title "PROCESS: $($files[$index].Name)"
             }
         }
     }
 }
 
-# Show event log summary
-function Show-EventLogSummary {
-    param([string]$LogsPath)
+# Show persistence data
+function Show-PersistenceData {
+    param([string]$IncidentPath)
     
-    Show-Header "EVENT LOG SUMMARY ANALYSIS"
-    Write-ColorOutput "Analyzing event logs..." "Progress"
+    $persistPath = Join-Path $IncidentPath "Persistence"
+    $files = @()
     
-    $summary = @()
-    $logFiles = Get-ChildItem -Path $LogsPath -Filter "*.evtx"
-    
-    foreach ($logFile in $logFiles) {
-        Write-Host "." -NoNewline -ForegroundColor $colors.Progress
-        
-        $events = Get-EventLogData -EventFile $logFile.FullName
-        
-        $summary += ""
-        $summary += "═══ $($logFile.Name) ═══"
-        $summary += "Total Events Analyzed: $($events.Count)"
-        
-        # Group by level
-        $levels = $events | Group-Object Level | Sort-Object Name
-        $summary += "Event Levels:"
-        foreach ($level in $levels) {
-            $summary += "  - $($level.Name): $($level.Count)"
-        }
-        
-        # Find critical events
-        $critical = $events | Where-Object {$_.Level -match "Error|Critical|Warning"}
-        if ($critical) {
-            $summary += ""
-            $summary += "Critical Events (last 5):"
-            $critical | Select-Object -Last 5 | ForEach-Object {
-                $summary += "  [$($_.TimeCreated)] $($_.Source): $($_.Message.Substring(0, [Math]::Min(80, $_.Message.Length)))"
-            }
-        }
-        
-        # Security specific analysis
-        if ($logFile.Name -eq "Security.evtx") {
-            $logons = $events | Where-Object {$_.Id -eq 4624}
-            $failedLogons = $events | Where-Object {$_.Id -eq 4625}
-            $summary += ""
-            $summary += "Security Analysis:"
-            $summary += "  - Successful Logons: $($logons.Count)"
-            $summary += "  - Failed Logons: $($failedLogons.Count)"
-        }
+    if (Test-Path $persistPath) {
+        $files += Get-ChildItem $persistPath -File
     }
     
-    Write-Host ""
-    Show-PagedContent -Content $summary -Title "EVENT LOG SUMMARY" -ColorCode
+    # Also check ALERTS for persistence files
+    $alertsPath = Join-Path $IncidentPath "ALERTS"
+    if (Test-Path $alertsPath) {
+        $files += Get-ChildItem $alertsPath -Filter "*autorun*" -File
+        $files += Get-ChildItem $alertsPath -Filter "*service*" -File
+        $files += Get-ChildItem $alertsPath -Filter "*task*" -File
+    }
+    
+    if ($files.Count -eq 0) {
+        Write-Host "No persistence data found" -ForegroundColor $colors.Info
+        Read-Host "Press Enter to continue"
+        return
+    }
+    
+    while ($true) {
+        Show-Header "PERSISTENCE DATA"
+        
+        Write-Host "Persistence Files:" -ForegroundColor $colors.Header
+        for ($i = 0; $i -lt $files.Count; $i++) {
+            $color = if ($files[$i].DirectoryName -match "ALERTS") { $colors.High } else { $colors.Menu }
+            Write-Host ("{0,3}. {1}" -f ($i + 1), $files[$i].Name) -ForegroundColor $color
+        }
+        
+        Write-Host ""
+        Write-Host "Enter file number to view or Q to go back: " -NoNewline
+        $choice = Read-Host
+        
+        if ($choice -match '^[Qq]') { return }
+        
+        if ($choice -match '^\d+$') {
+            $index = [int]$choice - 1
+            if ($index -ge 0 -and $index -lt $files.Count) {
+                $content = Show-FileContent -FilePath $files[$index].FullName
+                Show-PagedContent -Content $content -Title "PERSISTENCE: $($files[$index].Name)"
+            }
+        }
+    }
 }
 
-# Browse system information
-function Browse-SystemInfo {
+# Show system info
+function Show-SystemInfo {
     param([string]$IncidentPath)
     
     $systemPath = Join-Path $IncidentPath "System"
+    if (!(Test-Path $systemPath)) {
+        Write-Host "No system data found" -ForegroundColor $colors.Info
+        Read-Host "Press Enter to continue"
+        return
+    }
     
     while ($true) {
         Show-Header "SYSTEM INFORMATION"
         
-        $sysFiles = @()
-        if (Test-Path $systemPath) {
-            $sysFiles = Get-ChildItem -Path $systemPath -File -ErrorAction SilentlyContinue | Sort-Object Name
-        }
+        $files = Get-ChildItem $systemPath -File | Sort-Object Name
         
-        if ($sysFiles.Count -eq 0) {
-            Write-ColorOutput "No system information found" "Warning"
-            Read-Host "Press Enter to return"
-            return
-        }
-        
-        Write-ColorOutput "Available System Information:" "Header"
-        Write-Host ""
-        
-        for ($i = 0; $i -lt $sysFiles.Count; $i++) {
-            $file = $sysFiles[$i]
-            
-            Write-Host ("{0,3}. " -f ($i + 1)) -NoNewline -ForegroundColor $colors.Menu
-            
-            # Add descriptions
-            $description = switch -Wildcard ($file.Name) {
-                "basic_info.txt" { "System Overview" }
-                "defender_status.csv" { "Windows Defender Status" }
-                "firewall_status.csv" { "Firewall Configuration" }
-                default { "" }
-            }
-            
-            Write-Host ("{0,-30}" -f $file.Name) -NoNewline
-            if ($description) {
-                Write-Host (" - $description") -ForegroundColor $colors.Data
-            } else {
-                Write-Host ""
-            }
+        Write-Host "System Files:" -ForegroundColor $colors.Header
+        for ($i = 0; $i -lt $files.Count; $i++) {
+            Write-Host ("{0,3}. {1}" -f ($i + 1), $files[$i].Name) -ForegroundColor $colors.Menu
         }
         
         Write-Host ""
-        Write-Host "Enter file number to view or Q to go back: " -NoNewline -ForegroundColor $colors.Menu
-        $selection = Read-Host
+        Write-Host "Enter file number to view or Q to go back: " -NoNewline
+        $choice = Read-Host
         
-        if ($selection -eq 'Q' -or $selection -eq 'q') {
-            return
-        }
-        elseif ($selection -match '^\d+$') {
-            $index = [int]$selection - 1
-            if ($index -ge 0 -and $index -lt $sysFiles.Count) {
-                Show-FileContent -FilePath $sysFiles[$index].FullName -Title "SYSTEM INFO"
+        if ($choice -match '^[Qq]') { return }
+        
+        if ($choice -match '^\d+$') {
+            $index = [int]$choice - 1
+            if ($index -ge 0 -and $index -lt $files.Count) {
+                $content = Show-FileContent -FilePath $files[$index].FullName
+                Show-PagedContent -Content $content -Title "SYSTEM: $($files[$index].Name)"
             }
         }
     }
+}
+
+# Show event logs
+function Show-EventLogs {
+    param([string]$IncidentPath)
+    
+    $logsPath = Join-Path $IncidentPath "Logs"
+    if (!(Test-Path $logsPath)) {
+        Write-Host "No event logs found" -ForegroundColor $colors.Info
+        Read-Host "Press Enter to continue"
+        return
+    }
+    
+    while ($true) {
+        Show-Header "EVENT LOGS"
+        
+        $files = Get-ChildItem $logsPath -File | Sort-Object Name
+        
+        Write-Host "Event Log Files:" -ForegroundColor $colors.Header
+        Write-Host "(Note: .evtx files can only be parsed on Windows systems)" -ForegroundColor $colors.Data
+        Write-Host ""
+        
+        for ($i = 0; $i -lt $files.Count; $i++) {
+            $color = if ($files[$i].Extension -eq ".evtx") { $colors.High } else { $colors.Menu }
+            Write-Host ("{0,3}. {1} ({2:N2} MB)" -f ($i + 1), $files[$i].Name, ($files[$i].Length/1MB)) -ForegroundColor $color
+        }
+        
+        Write-Host ""
+        Write-Host "Enter file number to view, A for analysis summary, or Q to go back: " -NoNewline
+        $choice = Read-Host
+        
+        if ($choice -match '^[Qq]') { return }
+        
+        if ($choice -match '^[Aa]') {
+            # Quick analysis of all event logs
+            Show-EventLogSummary -LogsPath $logsPath
+        }
+        elseif ($choice -match '^\d+
+
+# Browse all files
+function Browse-Files {
+    param([string]$IncidentPath)
+    
+    Show-Header "FILE BROWSER"
+    
+    Write-Host "Building file list..." -ForegroundColor $colors.Info
+    $allFiles = Get-ChildItem $IncidentPath -Recurse -File | Sort-Object DirectoryName, Name
+    
+    $fileList = @()
+    $currentDir = ""
+    
+    foreach ($file in $allFiles) {
+        $relPath = $file.DirectoryName.Replace($IncidentPath, "").TrimStart("\")
+        
+        if ($relPath -ne $currentDir) {
+            $fileList += ""
+            $fileList += "[$relPath]"
+            $currentDir = $relPath
+        }
+        
+        $fileList += "  $($file.Name) ($([Math]::Round($file.Length/1KB, 2)) KB)"
+    }
+    
+    Show-PagedContent -Content $fileList -Title "ALL FILES ($($allFiles.Count) total)"
 }
 
 # Show IOCs
@@ -1253,1026 +725,14947 @@ function Show-IOCs {
     $iocFile = Join-Path $IncidentPath "ALERTS\quick_iocs.json"
     
     if (!(Test-Path $iocFile)) {
-        Write-ColorOutput "No IOC file found" "Warning"
+        Write-Host "No IOC file found (quick_iocs.json)" -ForegroundColor $colors.Info
         Read-Host "Press Enter to continue"
         return
     }
     
-    Show-Header "INDICATORS OF COMPROMISE (IOCs)"
-    
     try {
-        $iocs = Get-Content $iocFile | ConvertFrom-Json
-        $content = @()
+        $iocContent = Get-Content $iocFile -Raw
+        $iocs = $iocContent | ConvertFrom-Json
+        
+        $output = @()
+        $output += "INDICATORS OF COMPROMISE (IOCs)"
+        $output += "="*60
+        $output += ""
         
         if ($iocs.SuspiciousIPs -and $iocs.SuspiciousIPs.Count -gt 0) {
-            $content += "═══ SUSPICIOUS IP ADDRESSES ═══"
+            $output += "SUSPICIOUS IP ADDRESSES:"
+            $output += "-"*40
             foreach ($ip in $iocs.SuspiciousIPs) {
-                $content += "  • $ip"
+                $output += "  • $ip"
             }
-            $content += ""
+            $output += ""
         }
         
         if ($iocs.SuspiciousProcesses -and $iocs.SuspiciousProcesses.Count -gt 0) {
-            $content += "═══ SUSPICIOUS PROCESSES ═══"
+            $output += "SUSPICIOUS PROCESSES:"
+            $output += "-"*40
             foreach ($proc in $iocs.SuspiciousProcesses) {
-                $content += "  • $proc"
+                $output += "  • $proc"
             }
-            $content += ""
+            $output += ""
         }
         
         if ($iocs.SuspiciousFiles -and $iocs.SuspiciousFiles.Count -gt 0) {
-            $content += "═══ SUSPICIOUS FILES ═══"
+            $output += "SUSPICIOUS FILES:"
+            $output += "-"*40
             foreach ($file in $iocs.SuspiciousFiles) {
-                $content += "  • $file"
+                $output += "  • $file"
             }
-            $content += ""
+            $output += ""
         }
         
         if ($iocs.PersistenceLocations -and $iocs.PersistenceLocations.Count -gt 0) {
-            $content += "═══ PERSISTENCE LOCATIONS ═══"
+            $output += "PERSISTENCE LOCATIONS:"
+            $output += "-"*40
             foreach ($pers in $iocs.PersistenceLocations) {
-                $content += "  • $($pers.Name) at $($pers.Location)"
-                if ($pers.Value) {
-                    $content += "    Value: $($pers.Value)"
+                if ($pers.Location -and $pers.Name) {
+                    $output += "  • Location: $($pers.Location)"
+                    $output += "    Name: $($pers.Name)"
+                    if ($pers.Value) {
+                        $output += "    Value: $($pers.Value)"
+                    }
+                    $output += ""
                 }
             }
-            $content += ""
         }
         
-        Show-PagedContent -Content $content -Title "INDICATORS OF COMPROMISE" -ColorCode
-        
-    } catch {
-        Write-ColorOutput "Error parsing IOC file: $_" "Error"
+        Show-PagedContent -Content $output -Title "IOCs"
+    }
+    catch {
+        Write-Host "Error parsing IOC file: $_" -ForegroundColor $colors.Critical
         Read-Host "Press Enter to continue"
     }
 }
 
-# Browse all files recursively
-function Browse-AllFiles {
-    param([string]$RootPath)
-    
-    Show-Header "FILE BROWSER"
-    Write-ColorOutput "Building file tree..." "Progress"
-    
-    $allFiles = Get-ChildItem -Path $RootPath -Recurse -File -ErrorAction SilentlyContinue | 
-                Sort-Object DirectoryName, Name
-    
-    $fileList = @()
-    $currentDir = ""
-    
-    foreach ($file in $allFiles) {
-        $dir = $file.DirectoryName.Replace($RootPath, "").TrimStart("\")
-        if ($dir -ne $currentDir) {
-            $fileList += ""
-            $fileList += "[$dir]"
-            $currentDir = $dir
-        }
-        
-        $sizeKB = [Math]::Round($file.Length / 1KB, 2)
-        $fileList += "  $($file.Name) ($sizeKB KB)"
-    }
-    
-    Show-PagedContent -Content $fileList -Title "ALL FILES ($($allFiles.Count) total)"
-}
-
-# Enhanced search across all files
-function Search-AllFiles {
-    param([string]$RootPath)
-    
-    Show-Header "SEARCH ALL FILES"
-    
-    Write-Host "Search Options:" -ForegroundColor $colors.Header
-    Write-Host "1. Search file contents (text files only)" -ForegroundColor $colors.Menu
-    Write-Host "2. Search file names" -ForegroundColor $colors.Menu
-    Write-Host "3. Search by file extension" -ForegroundColor $colors.Menu
-    Write-Host "4. Search by date modified" -ForegroundColor $colors.Menu
-    Write-Host "Q. Cancel" -ForegroundColor $colors.Menu
-    Write-Host ""
-    
-    $searchType = Read-Host "Select search type"
-    
-    switch ($searchType) {
-        "1" {
-            $searchTerm = Read-Host "Enter search term (regex supported)"
-            if (!$searchTerm) { return }
-            
-            Write-ColorOutput "Searching file contents..." "Progress"
-            $results = @()
-            $fileCount = 0
-            
-            Get-ChildItem -Path $RootPath -Recurse -File -ErrorAction SilentlyContinue | ForEach-Object {
-                $file = $_
-                $fileCount++
-                
-                if ($fileCount % 10 -eq 0) {
-                    Write-Host "." -NoNewline -ForegroundColor $colors.Progress
-                }
-                
-                # Skip binary files
-                if ($file.Extension -match "\.(exe|dll|sys|evtx|bin|zip)$") { return }
-                
-                try {
-                    $matches = Select-String -Path $file.FullName -Pattern $searchTerm -ErrorAction Stop
-                    foreach ($match in $matches) {
-                        $relativePath = $file.FullName.Replace($RootPath, "").TrimStart("\")
-                        $results += "$relativePath : Line $($match.LineNumber) : $($match.Line.Trim())"
-                    }
-                }
-                catch {
-                    # Skip files that can't be read
-                }
-            }
-            
-            Write-Host ""
-            
-            if ($results.Count -eq 0) {
-                Write-ColorOutput "No matches found" "Warning"
-                Read-Host "Press Enter to continue"
-            } else {
-                Show-PagedContent -Content $results -Title "SEARCH RESULTS: '$searchTerm' ($($results.Count) matches)"
-            }
-        }
-        
-        "2" {
-            $searchTerm = Read-Host "Enter file name pattern (wildcards supported)"
-            if (!$searchTerm) { return }
-            
-            $files = Get-ChildItem -Path $RootPath -Recurse -Filter $searchTerm -File -ErrorAction SilentlyContinue
-            
-            if ($files.Count -eq 0) {
-                Write-ColorOutput "No files found matching '$searchTerm'" "Warning"
-                Read-Host "Press Enter to continue"
-            } else {
-                $results = $files | ForEach-Object {
-                    $relativePath = $_.FullName.Replace($RootPath, "").TrimStart("\")
-                    "$relativePath ($([Math]::Round($_.Length/1KB, 2)) KB) - Modified: $($_.LastWriteTime)"
-                }
-                Show-PagedContent -Content $results -Title "FILES MATCHING: '$searchTerm' ($($files.Count) found)"
-            }
-        }
-        
-        "3" {
-            $extension = Read-Host "Enter file extension (e.g., csv, txt, log)"
-            if (!$extension) { return }
-            
-            $extension = if ($extension.StartsWith(".")) { $extension } else { ".$extension" }
-            
-            $files = Get-ChildItem -Path $RootPath -Recurse -Filter "*$extension" -File -ErrorAction SilentlyContinue
-            
-            if ($files.Count -eq 0) {
-                Write-ColorOutput "No files found with extension '$extension'" "Warning"
-                Read-Host "Press Enter to continue"
-            } else {
-                $results = $files | ForEach-Object {
-                    $relativePath = $_.FullName.Replace($RootPath, "").TrimStart("\")
-                    "$relativePath ($([Math]::Round($_.Length/1KB, 2)) KB)"
-                }
-                Show-PagedContent -Content $results -Title "FILES WITH EXTENSION: '$extension' ($($files.Count) found)"
-            }
-        }
-        
-        "4" {
-            $days = Read-Host "Files modified in the last X days"
-            if (!$days -or !($days -match '^\d+$')) { return }
-            
-            $cutoffDate = (Get-Date).AddDays(-[int]$days)
-            
-            $files = Get-ChildItem -Path $RootPath -Recurse -File -ErrorAction SilentlyContinue | 
-                     Where-Object { $_.LastWriteTime -gt $cutoffDate }
-            
-            if ($files.Count -eq 0) {
-                Write-ColorOutput "No files modified in the last $days days" "Warning"
-                Read-Host "Press Enter to continue"
-            } else {
-                $results = $files | Sort-Object LastWriteTime -Descending | ForEach-Object {
-                    $relativePath = $_.FullName.Replace($RootPath, "").TrimStart("\")
-                    "$($_.LastWriteTime.ToString('yyyy-MM-dd HH:mm')) - $relativePath"
-                }
-                Show-PagedContent -Content $results -Title "FILES MODIFIED IN LAST $days DAYS ($($files.Count) found)"
-            }
-        }
-        
-        "Q", "q" { return }
-    }
-}
-
-# Export all data to comprehensive text file
+# Export all data to text
 function Export-AllData {
     param([string]$IncidentPath)
     
-    Show-Header "EXPORT COMPLETE REPORT"
+    Show-Header "EXPORT ALL DATA"
     
-    Write-ColorOutput "This will export all readable incident data to a comprehensive text report." "Info"
-    Write-ColorOutput "The process may take several minutes for large incidents." "Warning"
+    Write-Host "This will export all readable data to a comprehensive text file." -ForegroundColor $colors.Info
+    Write-Host "Large event logs will be summarized to prevent excessive file size." -ForegroundColor $colors.Info
     Write-Host ""
     
-    $confirm = Read-Host "Continue with export? (Y/N)"
+    $confirm = Read-Host "Continue? (Y/N)"
+    
     if ($confirm -ne 'Y' -and $confirm -ne 'y') { return }
     
-    $exportFile = Join-Path $IncidentPath "IR_Complete_Report_$(Get-Date -Format 'yyyyMMdd_HHmmss').txt"
-    $exportContent = @()
+    $exportFile = Join-Path $IncidentPath "Export_$(Get-Date -Format 'yyyyMMdd_HHmmss').txt"
+    $output = @()
     
     # Header
-    $exportContent += "="*80
-    $exportContent += "COMPREHENSIVE INCIDENT RESPONSE REPORT"
-    $exportContent += "="*80
-    $exportContent += "Generated: $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')"
-    $exportContent += "Incident: $(Split-Path $IncidentPath -Leaf)"
-    $exportContent += "Full Path: $IncidentPath"
-    $exportContent += "Report Generator: IR Viewer v3.0"
-    $exportContent += "="*80
-    $exportContent += ""
+    $output += "="*80
+    $output += "INCIDENT RESPONSE DATA EXPORT"
+    $output += "="*80
+    $output += "Generated: $(Get-Date)"
+    $output += "Incident: $(Split-Path $IncidentPath -Leaf)"
+    $output += "Path: $IncidentPath"
+    $output += "Export Tool: IR Data Viewer v1.0"
+    $output += "="*80
+    $output += ""
     
-    # Progress tracking
-    $totalSteps = 10
-    $currentStep = 0
+    Write-Host "Exporting data..." -ForegroundColor $colors.Info
     
-    # Function to update progress
-    $updateProgress = {
-        param($step, $message)
-        $script:currentStep++
-        $percent = [Math]::Round(($script:currentStep / $totalSteps) * 100)
-        Write-Host "`r[$percent%] $message" -NoNewline -ForegroundColor $colors.Progress
-    }
-    
-    # 1. Summary
-    & $updateProgress 1 "Exporting summary..."
-    $summaryFile = Join-Path $IncidentPath "SUMMARY.txt"
-    if (Test-Path $summaryFile) {
-        $exportContent += ""
-        $exportContent += "="*80
-        $exportContent += "EXECUTIVE SUMMARY"
-        $exportContent += "="*80
-        $exportContent += Get-Content $summaryFile
-    }
-    
-    # 2. Critical Alerts
-    & $updateProgress 2 "Exporting alerts..."
-    $alertsPath = Join-Path $IncidentPath "ALERTS"
-    if (Test-Path $alertsPath) {
-        $exportContent += ""
-        $exportContent += "="*80
-        $exportContent += "CRITICAL ALERTS AND FINDINGS"
-        $exportContent += "="*80
-        
-        $alertFiles = Get-ChildItem -Path $alertsPath -File -ErrorAction SilentlyContinue | Sort-Object Name
-        foreach ($file in $alertFiles) {
-            $exportContent += ""
-            $exportContent += "-"*60
-            $exportContent += "ALERT FILE: $($file.Name)"
-            $exportContent += "-"*60
-            
-            $content = Show-FileContent -FilePath $file.FullName -Title "Export" -ReturnContent
-            $exportContent += $content
-        }
-    }
-    
-    # 3. Network Analysis
-    & $updateProgress 3 "Exporting network data..."
-    $networkPath = Join-Path $IncidentPath "Network"
-    if (Test-Path $networkPath) {
-        $exportContent += ""
-        $exportContent += "="*80
-        $exportContent += "NETWORK ANALYSIS"
-        $exportContent += "="*80
-        
-        # Key network files
-        $netFiles = @(
-            @{Name="connections_basic.csv"; Title="Network Connections"},
-            @{Name="external_ips.txt"; Title="External IP Addresses"},
-            @{Name="dns_cache.csv"; Title="DNS Cache"},
-            @{Name="active_sessions.txt"; Title="Active Sessions"},
-            @{Name="ipconfig.txt"; Title="Network Configuration"}
-        )
-        
-        foreach ($netFile in $netFiles) {
-            $filePath = Join-Path $networkPath $netFile.Name
-            if (Test-Path $filePath) {
-                $exportContent += ""
-                $exportContent += "-"*60
-                $exportContent += $netFile.Title
-                $exportContent += "-"*60
-                $content = Show-FileContent -FilePath $filePath -Title "Export" -ReturnContent
-                $exportContent += $content
-            }
-        }
-    }
-    
-    # 4. Process Information
-    & $updateProgress 4 "Exporting process data..."
-    $processPath = Join-Path $IncidentPath "Processes"
-    if (Test-Path $processPath) {
-        $exportContent += ""
-        $exportContent += "="*80
-        $exportContent += "PROCESS ANALYSIS"
-        $exportContent += "="*80
-        
-        $procFiles = Get-ChildItem -Path $processPath -File -ErrorAction SilentlyContinue
-        foreach ($file in $procFiles) {
-            $exportContent += ""
-            $exportContent += "-"*60
-            $exportContent += "PROCESS FILE: $($file.Name)"
-            $exportContent += "-"*60
-            $content = Show-FileContent -FilePath $file.FullName -Title "Export" -ReturnContent
-            $exportContent += $content
-        }
-    }
-    
-    # 5. Persistence Mechanisms
-    & $updateProgress 5 "Exporting persistence data..."
-    $persistPath = Join-Path $IncidentPath "Persistence"
-    if (Test-Path $persistPath) {
-        $exportContent += ""
-        $exportContent += "="*80
-        $exportContent += "PERSISTENCE MECHANISMS"
-        $exportContent += "="*80
-        
-        $persFiles = Get-ChildItem -Path $persistPath -File -ErrorAction SilentlyContinue
-        foreach ($file in $persFiles) {
-            $exportContent += ""
-            $exportContent += "-"*60
-            $exportContent += "PERSISTENCE: $($file.Name)"
-            $exportContent += "-"*60
-            $content = Show-FileContent -FilePath $file.FullName -Title "Export" -ReturnContent
-            $exportContent += $content
-        }
-    }
-    
-    # 6. System Information
-    & $updateProgress 6 "Exporting system info..."
-    $systemPath = Join-Path $IncidentPath "System"
-    if (Test-Path $systemPath) {
-        $exportContent += ""
-        $exportContent += "="*80
-        $exportContent += "SYSTEM INFORMATION"
-        $exportContent += "="*80
-        
-        $sysFiles = Get-ChildItem -Path $systemPath -File -ErrorAction SilentlyContinue
-        foreach ($file in $sysFiles) {
-            $exportContent += ""
-            $exportContent += "-"*60
-            $exportContent += "SYSTEM: $($file.Name)"
-            $exportContent += "-"*60
-            $content = Show-FileContent -FilePath $file.FullName -Title "Export" -ReturnContent
-            $exportContent += $content
-        }
-    }
-    
-    # 7. Event Logs Summary
-    & $updateProgress 7 "Parsing event logs..."
-    $logsPath = Join-Path $IncidentPath "Logs"
-    if (Test-Path $logsPath) {
-        $exportContent += ""
-        $exportContent += "="*80
-        $exportContent += "EVENT LOG ANALYSIS"
-        $exportContent += "="*80
-        
-        $logFiles = Get-ChildItem -Path $logsPath -Filter "*.evtx" -ErrorAction SilentlyContinue
-        foreach ($logFile in $logFiles) {
-            Write-Host "." -NoNewline -ForegroundColor $colors.Progress
-            
-            $exportContent += ""
-            $exportContent += "-"*60
-            $exportContent += "EVENT LOG: $($logFile.Name)"
-            $exportContent += "-"*60
-            
-            $events = Get-EventLogData -EventFile $logFile.FullName
-            $exportContent += "Total Events Parsed: $($events.Count) (showing most recent)"
-            $exportContent += ""
-            
-            # Group by criticality
-            $critical = $events | Where-Object {$_.Level -match "Error|Critical"}
-            $warning = $events | Where-Object {$_.Level -eq "Warning"}
-            
-            if ($critical) {
-                $exportContent += "CRITICAL/ERROR Events:"
-                $critical | Select-Object -First 20 | ForEach-Object {
-                    $exportContent += "[$($_.TimeCreated)] ID:$($_.Id) - $($_.Source): $($_.Message)"
-                }
-                $exportContent += ""
-            }
-            
-            if ($warning) {
-                $exportContent += "WARNING Events:"
-                $warning | Select-Object -First 10 | ForEach-Object {
-                    $exportContent += "[$($_.TimeCreated)] ID:$($_.Id) - $($_.Source): $($_.Message)"
-                }
-            }
-        }
-    }
-    
-    # 8. IOCs
-    & $updateProgress 8 "Exporting IOCs..."
-    $iocFile = Join-Path $IncidentPath "ALERTS\quick_iocs.json"
-    if (Test-Path $iocFile) {
-        $exportContent += ""
-        $exportContent += "="*80
-        $exportContent += "INDICATORS OF COMPROMISE (IOCs)"
-        $exportContent += "="*80
-        
-        try {
-            $iocs = Get-Content $iocFile | ConvertFrom-Json
-            $exportContent += $iocs | ConvertTo-Json -Depth 10
-        }
-        catch {
-            $exportContent += "Error parsing IOCs: $_"
-        }
-    }
-    
-    # 9. File listing
-    & $updateProgress 9 "Creating file inventory..."
-    $exportContent += ""
-    $exportContent += "="*80
-    $exportContent += "COMPLETE FILE INVENTORY"
-    $exportContent += "="*80
-    
-    $allFiles = Get-ChildItem -Path $IncidentPath -Recurse -File -ErrorAction SilentlyContinue | 
-                Sort-Object DirectoryName, Name
-    
-    $exportContent += "Total Files Collected: $($allFiles.Count)"
-    $exportContent += "Total Size: $([Math]::Round((($allFiles | Measure-Object Length -Sum).Sum / 1MB), 2)) MB"
-    $exportContent += ""
-    
-    $currentDir = ""
-    foreach ($file in $allFiles) {
-        $dir = $file.DirectoryName.Replace($IncidentPath, "").TrimStart("\")
-        if ($dir -ne $currentDir) {
-            $exportContent += ""
-            $exportContent += "[$dir]"
-            $currentDir = $dir
-        }
-        $exportContent += "  $($file.Name) ($([Math]::Round($file.Length/1KB, 2)) KB) - Modified: $($file.LastWriteTime)"
-    }
-    
-    # 10. Save the export
-    & $updateProgress 10 "Saving report..."
-    Write-Host ""
-    
-    $exportContent | Out-File -FilePath $exportFile -Encoding UTF8
-    
-    # Summary
-    $fileInfo = Get-Item $exportFile
-    Write-Host ""
-    Write-ColorOutput "Export completed successfully!" "Success"
-    Write-ColorOutput "Report saved to: $exportFile" "Info"
-    Write-ColorOutput "Report size: $([Math]::Round($fileInfo.Length / 1MB, 2)) MB" "Info"
-    Write-ColorOutput "Total lines: $($exportContent.Count)" "Info"
-    Write-Host ""
-    
-    $open = Read-Host "Open the report now? (Y/N)"
-    if ($open -eq 'Y' -or $open -eq 'y') {
-        notepad.exe $exportFile
-    }
-    
-    $compress = Read-Host "Create compressed archive? (Y/N)"
-    if ($compress -eq 'Y' -or $compress -eq 'y') {
-        $zipPath = "$exportFile.zip"
-        Compress-Archive -Path $exportFile -DestinationPath $zipPath -Force
-        Write-ColorOutput "Archive created: $zipPath" "Success"
-    }
-    
-    Read-Host "`nPress Enter to continue"
-}
-
-# Generate HTML report
-function Export-HtmlReport {
-    param([string]$IncidentPath)
-    
-    Show-Header "GENERATE HTML REPORT"
-    
-    Write-ColorOutput "Generating interactive HTML report..." "Progress"
-    
-    $reportPath = Join-Path $IncidentPath "IR_Report_$(Get-Date -Format 'yyyyMMdd_HHmmss').html"
-    
-    # Load incident info
-    $info = Get-IncidentInfo -Path $IncidentPath
-    $summary = Get-Content (Join-Path $IncidentPath "SUMMARY.txt") -Raw -ErrorAction SilentlyContinue
-    
-    # Determine threat color
-    $threatColor = switch ($info.ThreatLevel) {
-        "CRITICAL" { "#f44747" }
-        "HIGH" { "#c586c0" }
-        "MEDIUM" { "#dcdcaa" }
-        "LOW" { "#4ec9b0" }
-        default { "#d4d4d4" }
-    }
-    
-    $html = @"
-<!DOCTYPE html>
-<html lang="en">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Incident Response Report - $(Split-Path $IncidentPath -Leaf)</title>
-    <style>
-        :root {
-            --bg-primary: #1e1e1e;
-            --bg-secondary: #252526;
-            --bg-tertiary: #2d2d30;
-            --text-primary: #d4d4d4;
-            --text-secondary: #969696;
-            --border: #464647;
-            --critical: #f44747;
-            --high: #c586c0;
-            --medium: #dcdcaa;
-            --low: #4ec9b0;
-            --info: #569cd6;
-            --success: #4ec9b0;
-        }
-        
-        * {
-            margin: 0;
-            padding: 0;
-            box-sizing: border-box;
-        }
-        
-        body {
-            font-family: 'Consolas', 'Courier New', monospace;
-            background: var(--bg-primary);
-            color: var(--text-primary);
-            line-height: 1.6;
-            padding: 20px;
-        }
-        
-        .container {
-            max-width: 1200px;
-            margin: 0 auto;
-        }
-        
-        h1, h2, h3 {
-            color: var(--info);
-            margin-bottom: 15px;
-        }
-        
-        h1 {
-            font-size: 2.5em;
-            text-align: center;
-            padding: 20px 0;
-            border-bottom: 2px solid var(--border);
-            margin-bottom: 30px;
-        }
-        
-        .threat-badge {
-            display: inline-block;
-            padding: 5px 15px;
-            border-radius: 20px;
-            font-weight: bold;
-            margin-left: 20px;
-            background: $threatColor;
-            color: #000;
-        }
-        
-        .summary-box {
-            background: var(--bg-secondary);
-            border: 1px solid var(--border);
-            border-radius: 8px;
-            padding: 20px;
-            margin-bottom: 30px;
-        }
-        
-        .stats-grid {
-            display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
-            gap: 20px;
-            margin: 20px 0;
-        }
-        
-        .stat-card {
-            background: var(--bg-tertiary);
-            border: 1px solid var(--border);
-            border-radius: 8px;
-            padding: 15px;
-            text-align: center;
-            transition: transform 0.2s;
-        }
-        
-        .stat-card:hover {
-            transform: translateY(-2px);
-            border-color: var(--info);
-        }
-        
-        .stat-number {
-            font-size: 2em;
-            font-weight: bold;
-            color: var(--info);
-        }
-        
-        .section {
-            background: var(--bg-secondary);
-            border: 1px solid var(--border);
-            border-radius: 8px;
-            padding: 20px;
-            margin-bottom: 20px;
-        }
-        
-        .section h2 {
-            border-bottom: 1px solid var(--border);
-            padding-bottom: 10px;
-            margin-bottom: 20px;
-        }
-        
-        table {
-            width: 100%;
-            border-collapse: collapse;
-            margin: 15px 0;
-        }
-        
-        th, td {
-            text-align: left;
-            padding: 10px;
-            border: 1px solid var(--border);
-        }
-        
-        th {
-            background: var(--bg-tertiary);
-            color: var(--info);
-            font-weight: bold;
-        }
-        
-        tr:nth-child(even) {
-            background: var(--bg-tertiary);
-        }
-        
-        .alert-box {
-            background: rgba(244, 71, 71, 0.1);
-            border: 2px solid var(--critical);
-            border-radius: 8px;
-            padding: 15px;
-            margin: 15px 0;
-        }
-        
-        .alert-box h3 {
-            color: var(--critical);
-        }
-        
-        pre {
-            background: var(--bg-primary);
-            border: 1px solid var(--border);
-            border-radius: 4px;
-            padding: 15px;
-            overflow-x: auto;
-            font-size: 0.9em;
-        }
-        
-        .collapsible {
-            cursor: pointer;
-            user-select: none;
-            position: relative;
-            padding-left: 25px;
-        }
-        
-        .collapsible:before {
-            content: '▼';
-            position: absolute;
-            left: 0;
-            transition: transform 0.2s;
-        }
-        
-        .collapsible.collapsed:before {
-            transform: rotate(-90deg);
-        }
-        
-        .collapsible-content {
-            margin-top: 15px;
-            padding-left: 25px;
-        }
-        
-        .collapsed + .collapsible-content {
-            display: none;
-        }
-        
-        .critical { color: var(--critical); }
-        .high { color: var(--high); }
-        .medium { color: var(--medium); }
-        .low { color: var(--low); }
-        .info { color: var(--info); }
-        .success { color: var(--success); }
-        
-        .footer {
-            text-align: center;
-            margin-top: 50px;
-            padding: 20px;
-            border-top: 1px solid var(--border);
-            color: var(--text-secondary);
-        }
-        
-        @media (max-width: 768px) {
-            body {
-                padding: 10px;
-            }
-            
-            .stats-grid {
-                grid-template-columns: 1fr;
-            }
-        }
-    </style>
-</head>
-<body>
-    <div class="container">
-        <h1>
-            Incident Response Report
-            <span class="threat-badge">$($info.ThreatLevel)</span>
-        </h1>
-        
-        <div class="summary-box">
-            <h2>Executive Summary</h2>
-            <p><strong>Incident ID:</strong> $(Split-Path $IncidentPath -Leaf)</p>
-            <p><strong>Collection Time:</strong> $($info.CollectionTime)</p>
-            <p><strong>Threat Level:</strong> <span class="$($info.ThreatLevel.ToLower())">$($info.ThreatLevel)</span></p>
-            <p><strong>Total Alerts:</strong> $($info.AlertCount)</p>
-        </div>
-        
-        <div class="stats-grid">
-"@
-
-    # Add statistics
-    $stats = @(
-        @{Name="Total Alerts"; Value=$info.AlertCount; Icon="⚠️"},
-        @{Name="Suspicious Processes"; Value=(Get-ChildItem "$IncidentPath\ALERTS\*process*.csv" -ErrorAction SilentlyContinue).Count; Icon="🔍"},
-        @{Name="Network Connections"; Value="Check"; Icon="🌐"},
-        @{Name="Persistence Items"; Value=(Get-ChildItem "$IncidentPath\Persistence" -ErrorAction SilentlyContinue).Count; Icon="🔒"}
+    # Process each directory
+    $directories = @(
+        @{Name="SUMMARY"; Path="SUMMARY.txt"; Type="File"},
+        @{Name="ALERTS"; Path="ALERTS"; Type="Directory"},
+        @{Name="NETWORK"; Path="Network"; Type="Directory"},
+        @{Name="PROCESSES"; Path="Processes"; Type="Directory"},
+        @{Name="PERSISTENCE"; Path="Persistence"; Type="Directory"},
+        @{Name="SYSTEM"; Path="System"; Type="Directory"},
+        @{Name="LOGS"; Path="Logs"; Type="Directory"}
     )
     
-    foreach ($stat in $stats) {
-        $html += @"
-            <div class="stat-card">
-                <div style="font-size: 2em;">$($stat.Icon)</div>
-                <div class="stat-number">$($stat.Value)</div>
-                <div>$($stat.Name)</div>
-            </div>
-"@
-    }
+    $totalFiles = 0
+    $skippedFiles = 0
     
-    $html += @"
-        </div>
+    foreach ($dir in $directories) {
+        Write-Host "  Exporting $($dir.Name)..." -ForegroundColor $colors.Data
         
-        <div class="section">
-            <h2>Summary Details</h2>
-            <pre>$([System.Web.HttpUtility]::HtmlEncode($summary))</pre>
-        </div>
-"@
-
-    # Add alerts section
-    $alertFiles = Get-ChildItem "$IncidentPath\ALERTS" -Filter "*.csv" -ErrorAction SilentlyContinue
-    if ($alertFiles) {
-        $html += @"
-        <div class="section alert-box">
-            <h2 class="collapsible">Critical Alerts ($($alertFiles.Count) files)</h2>
-            <div class="collapsible-content">
-"@
+        $fullPath = Join-Path $IncidentPath $dir.Path
         
-        foreach ($file in $alertFiles | Select-Object -First 10) {
-            $data = Import-Csv $file.FullName -ErrorAction SilentlyContinue | Select-Object -First 5
-            if ($data) {
-                $html += "<h3>$($file.BaseName)</h3><table>"
-                
-                # Headers
-                $html += "<tr>"
-                $data[0].PSObject.Properties.Name | ForEach-Object { 
-                    $html += "<th>$([System.Web.HttpUtility]::HtmlEncode($_))</th>" 
-                }
-                $html += "</tr>"
-                
-                # Data rows
-                foreach ($row in $data) {
-                    $html += "<tr>"
-                    $row.PSObject.Properties.Value | ForEach-Object { 
-                        $val = if ($_ -and $_.ToString().Length -gt 100) { 
-                            $_.ToString().Substring(0,97) + "..." 
-                        } else { 
-                            $_ 
-                        }
-                        $html += "<td>$([System.Web.HttpUtility]::HtmlEncode($val))</td>" 
+        if (Test-Path $fullPath) {
+            $output += ""
+            $output += "="*80
+            $output += $dir.Name
+            $output += "="*80
+            
+            if ($dir.Type -eq "File") {
+                $output += Get-Content $fullPath
+                $totalFiles++
+            }
+            else {
+                $files = Get-ChildItem $fullPath -File | Sort-Object Name
+                foreach ($file in $files) {
+                    $output += ""
+                    $output += "-"*60
+                    $output += "FILE: $($file.Name)"
+                    $output += "SIZE: $([Math]::Round($file.Length/1KB, 2)) KB"
+                    $output += "-"*60
+                    
+                    # Special handling for event logs
+                    if ($file.Extension -eq ".evtx") {
+                        $output += "Event log file - Summary only (full parsing requires Windows Event Log service)"
+                        $output += "To view full events, use the interactive viewer on a Windows system"
+                        $skippedFiles++
                     }
-                    $html += "</tr>"
+                    else {
+                        $content = Show-FileContent -FilePath $file.FullName
+                        $output += $content
+                        $totalFiles++
+                    }
                 }
-                
-                $html += "</table>"
             }
         }
-        
-        $html += @"
-            </div>
-        </div>
-"@
     }
-
-    # Add network section
-    $netFile = "$IncidentPath\Network\connections_basic.csv"
-    if (Test-Path $netFile) {
-        $connections = Import-Csv $netFile -ErrorAction SilentlyContinue
-        $external = @($connections | Where-Object {
-            $_.RemoteAddress -notmatch "^(10\.|172\.(1[6-9]|2[0-9]|3[01])\.|192\.168\.|127\.|::1|fe80:)"
-        })
-        
-        $html += @"
-        <div class="section">
-            <h2 class="collapsible">Network Analysis</h2>
-            <div class="collapsible-content">
-                <p><strong>Total Connections:</strong> $($connections.Count)</p>
-                <p><strong>External Connections:</strong> <span class="$(if($external.Count -gt 0){'high'}else{'success'})">$($external.Count)</span></p>
-                
-                $(if($external.Count -gt 0) {
-                    "<h3>External IP Addresses</h3><ul>" + 
-                    ($external | Select-Object -ExpandProperty RemoteAddress -Unique | Select-Object -First 10 | ForEach-Object {
-                        "<li>$_</li>"
-                    }) -join "" +
-                    "</ul>"
-                })
-            </div>
-        </div>
-"@
-    }
-
-    # Add IOCs
-    $iocFile = "$IncidentPath\ALERTS\quick_iocs.json"
-    if (Test-Path $iocFile) {
-        try {
-            $iocs = Get-Content $iocFile | ConvertFrom-Json
-            $html += @"
-        <div class="section">
-            <h2 class="collapsible">Indicators of Compromise (IOCs)</h2>
-            <div class="collapsible-content">
-"@
-            
-            if ($iocs.SuspiciousIPs) {
-                $html += "<h3>Suspicious IPs</h3><ul>"
-                $iocs.SuspiciousIPs | ForEach-Object { $html += "<li>$_</li>" }
-                $html += "</ul>"
-            }
-            
-            if ($iocs.SuspiciousProcesses) {
-                $html += "<h3>Suspicious Processes</h3><ul>"
-                $iocs.SuspiciousProcesses | ForEach-Object { $html += "<li>$_</li>" }
-                $html += "</ul>"
-            }
-            
-            $html += @"
-            </div>
-        </div>
-"@
-        }
-        catch {
-            # Skip if can't parse
-        }
-    }
-
-    # Footer
-    $html += @"
-        <div class="footer">
-            <p>Generated by IR Viewer v3.0 on $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')</p>
-            <p>Full evidence location: <code>$IncidentPath</code></p>
-        </div>
-    </div>
     
-    <script>
-        // Collapsible sections
-        document.querySelectorAll('.collapsible').forEach(el => {
-            el.addEventListener('click', function() {
-                this.classList.toggle('collapsed');
-            });
-        });
-        
-        // Auto-expand critical sections
-        document.querySelectorAll('.alert-box .collapsible').forEach(el => {
-            el.classList.remove('collapsed');
-        });
-    </script>
-</body>
-</html>
-"@
-
-    # Save report
-    $html | Out-File $reportPath -Encoding UTF8
+    # Add file inventory
+    $output += ""
+    $output += "="*80
+    $output += "FILE INVENTORY"
+    $output += "="*80
+    
+    $allFiles = Get-ChildItem $IncidentPath -Recurse -File | Sort-Object DirectoryName, Name
+    $output += "Total Files: $($allFiles.Count)"
+    $output += "Total Size: $([Math]::Round((($allFiles | Measure-Object Length -Sum).Sum/1MB), 2)) MB"
+    $output += ""
+    
+    foreach ($file in $allFiles) {
+        $relPath = $file.FullName.Replace($IncidentPath, "").TrimStart("\")
+        $output += "$relPath ($([Math]::Round($file.Length/1KB, 2)) KB)"
+    }
+    
+    # Save export
+    $output | Out-File $exportFile -Encoding UTF8
     
     Write-Host ""
-    Write-ColorOutput "HTML report generated successfully!" "Success"
-    Write-ColorOutput "Report saved to: $reportPath" "Info"
+    Write-Host "Export complete!" -ForegroundColor $colors.Low
+    Write-Host "Files exported: $totalFiles" -ForegroundColor $colors.Info
+    Write-Host "Files skipped: $skippedFiles (event logs)" -ForegroundColor $colors.Info
+    Write-Host "Export saved to: $exportFile" -ForegroundColor $colors.Info
+    Write-Host "Export size: $([Math]::Round((Get-Item $exportFile).Length/1MB, 2)) MB" -ForegroundColor $colors.Data
     Write-Host ""
     
-    $open = Read-Host "Open in browser? (Y/N)"
+    $open = Read-Host "Open file now? (Y/N)"
     if ($open -eq 'Y' -or $open -eq 'y') {
-        Start-Process $reportPath
+        notepad.exe $exportFile
     }
     
     Read-Host "Press Enter to continue"
 }
 
-# Browse directory helper
-function Browse-Directory {
-    param(
-        [string]$Path,
-        [string]$Title,
-        [string]$Filter = "*.*"
-    )
-    
-    if (!(Test-Path $Path)) {
-        Write-ColorOutput "Directory not found: $Path" "Error"
-        Read-Host "Press Enter to continue"
-        return
-    }
-    
-    while ($true) {
-        Show-Header $Title
-        
-        $files = Get-ChildItem -Path $Path -Filter $Filter -File -ErrorAction SilentlyContinue | Sort-Object Name
-        
-        if ($files.Count -eq 0) {
-            Write-ColorOutput "No files found in this directory" "Warning"
-            Read-Host "Press Enter to return"
-            return
-        }
-        
-        Write-ColorOutput "Files in directory:" "Info"
-        Write-Host ""
-        
-        for ($i = 0; $i -lt $files.Count; $i++) {
-            $file = $files[$i]
-            $sizeKB = [Math]::Round($file.Length / 1KB, 2)
-            
-            Write-Host ("{0,3}. " -f ($i + 1)) -NoNewline -ForegroundColor $colors.Menu
-            Write-Host ("{0,-40}" -f $file.Name) -NoNewline
-            
-            # Color based on file type
-            $color = switch ($file.Extension.ToLower()) {
-                ".csv" { $colors.Info }
-                ".txt" { $colors.Data }
-                ".log" { $colors.Data }
-                ".json" { $colors.Success }
-                ".evtx" { $colors.High }
-                ".xml" { $colors.Warning }
-                default { $colors.Menu }
-            }
-            
-            Write-Host (" {0,10} KB" -f $sizeKB) -ForegroundColor $color
-        }
-        
-        Write-Host ""
-        Write-Host "Enter file number to view, A for all, or Q to go back: " -NoNewline -ForegroundColor $colors.Menu
-        $selection = Read-Host
-        
-        if ($selection -eq 'Q' -or $selection -eq 'q') {
-            return
-        }
-        elseif ($selection -eq 'A' -or $selection -eq 'a') {
-            # View all files in sequence
-            foreach ($file in $files) {
-                Show-FileContent -FilePath $file.FullName -Title "$Title - $($file.Name)"
-                
-                $continue = Read-Host "`nContinue to next file? (Y/N)"
-                if ($continue -ne 'Y' -and $continue -ne 'y') {
-                    break
-                }
-            }
-        }
-        elseif ($selection -match '^\d+$') {
-            $index = [int]$selection - 1
-            if ($index -ge 0 -and $index -lt $files.Count) {
-                Show-FileContent -FilePath $files[$index].FullName -Title $Title
-            }
-        }
-    }
-}
-
 # Main execution
-Show-Header "INCIDENT RESPONSE VIEWER v3.0"
+Show-Header
 
-Write-ColorOutput "Welcome to the Comprehensive Incident Response Viewer" "Info"
-Write-ColorOutput "This tool helps analyze and export incident response data" "Info"
+Write-Host "This viewer displays data collected by the Incident Response Triage Script" -ForegroundColor $colors.Info
+Write-Host "No live data collection will be performed" -ForegroundColor $colors.Info
 Write-Host ""
-
-# Check for admin rights
-$isAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
-if (!$isAdmin) {
-    Write-ColorOutput "Note: Running without admin rights. Some event logs may not be accessible." "Warning"
-    Write-Host ""
-}
 
 # Main loop
 while ($true) {
-    # Select incident directory
     $incidentPath = $Path
+    
     if (!$incidentPath -or !(Test-Path $incidentPath)) {
         $incidentPath = Select-IncidentDirectory
     }
     
     if (!$incidentPath) {
-        Write-Host "`nNo incident selected. Exiting..." -ForegroundColor $colors.Info
+        Write-Host "Exiting..." -ForegroundColor $colors.Info
         break
     }
     
-    # Auto-export if specified
-    if ($AutoExport) {
-        Export-AllData -IncidentPath $incidentPath
-        break
-    }
+    Show-IncidentMenu -IncidentPath $incidentPath
     
-    # Browse the selected incident
-    Browse-IncidentData -IncidentPath $incidentPath
-    
-    # Clear the path so we go back to selection
+    # Reset path to show selection menu again
     $Path = ""
 }
 
-Write-ColorOutput "`nThank you for using IR Viewer!" "Success"
-Write-ColorOutput "Stay vigilant, stay secure." "Info"
+Write-Host ""
+Write-Host "Thank you for using IR Data Viewer" -ForegroundColor $colors.Info
+Write-Host ""
+Write-Host "Features used:" -ForegroundColor $colors.Header
+Write-Host "  • View collected incident response data" -ForegroundColor $colors.Data
+Write-Host "  • Parse CSV, JSON, TXT, and LOG files" -ForegroundColor $colors.Data
+Write-Host "  • Navigate event logs (Windows systems)" -ForegroundColor $colors.Data
+Write-Host "  • Search and filter large datasets" -ForegroundColor $colors.Data
+Write-Host "  • Export comprehensive text reports" -ForegroundColor $colors.Data
+Write-Host "") {
+                    Get-WinEvent -Path $FilePath -MaxEvents ([int]$maxEvents) -ErrorAction Stop
+                } else {
+                    Get-WinEvent -Path $FilePath -MaxEvents 100 -ErrorAction Stop
+                }
+            }
+            default { Get-WinEvent -Path $FilePath -MaxEvents 100 -ErrorAction Stop }
+        }
+        
+        Write-Host "Processing $($events.Count) events..." -ForegroundColor $colors.Info
+        
+        $output = @()
+        $output += "Event Log: $(Split-Path $FilePath -Leaf)"
+        $output += "Total Events Loaded: $($events.Count)"
+        $output += ("=" * 60)
+        $output += ""
+        
+        # Add filter option
+        Write-Host "Filter events? (Y/N)" -NoNewline -ForegroundColor $colors.Info
+        $filter = Read-Host
+        
+        if ($filter -eq 'Y' -or $filter -eq 'y') {
+            Write-Host "Filter by:" -ForegroundColor $colors.Menu
+            Write-Host "1. Error/Critical only" -ForegroundColor $colors.Menu
+            Write-Host "2. Specific Event ID" -ForegroundColor $colors.Menu
+            Write-Host "3. Time range" -ForegroundColor $colors.Menu
+            Write-Host "4. No filter" -ForegroundColor $colors.Menu
+            
+            $filterChoice = Read-Host "Select filter (1-4)"
+            
+            $events = switch ($filterChoice) {
+                "1" { $events | Where-Object { $_.Level -le 2 } }
+                "2" {
+                    $eventId = Read-Host "Enter Event ID"
+                    if ($eventId -match '^\d+
+
+# Display file content based on type
+function Show-FileContent {
+    param([string]$FilePath)
+    
+    if (!(Test-Path $FilePath)) {
+        return @("File not found: $FilePath")
+    }
+    
+    $extension = [System.IO.Path]::GetExtension($FilePath).ToLower()
+    
+    switch ($extension) {
+        ".csv" { return Show-CsvFile -FilePath $FilePath }
+        ".json" { return Show-JsonFile -FilePath $FilePath }
+        ".evtx" { return Show-EventLog -FilePath $FilePath }
+        ".txt" { return Get-Content $FilePath }
+        ".log" { return Get-Content $FilePath }
+        default { return @("Cannot display file type: $extension") }
+    }
+}
+
+# Paged display
+function Show-PagedContent {
+    param(
+        [array]$Content,
+        [string]$Title
+    )
+    
+    if ($Content.Count -eq 0) {
+        Write-Host "No content to display" -ForegroundColor $colors.Info
+        Read-Host "Press Enter to continue"
+        return
+    }
+    
+    $totalPages = [Math]::Ceiling($Content.Count / $PageSize)
+    $currentPage = 0
+    
+    while ($true) {
+        Show-Header $Title
+        
+        $startIdx = $currentPage * $PageSize
+        $endIdx = [Math]::Min($startIdx + $PageSize, $Content.Count)
+        
+        # Display page content
+        for ($i = $startIdx; $i -lt $endIdx; $i++) {
+            $line = $Content[$i]
+            
+            # Color coding based on content
+            if ($line -match "CRITICAL|ERROR|FAIL") {
+                Write-Host $line -ForegroundColor $colors.Critical
+            }
+            elseif ($line -match "WARNING|ALERT|SUSPICIOUS") {
+                Write-Host $line -ForegroundColor $colors.High
+            }
+            elseif ($line -match "SUCCESS|PASS") {
+                Write-Host $line -ForegroundColor $colors.Low
+            }
+            else {
+                Write-Host $line -ForegroundColor $colors.Data
+            }
+        }
+        
+        # Navigation
+        Write-Host ""
+        Write-Host ("-" * 80) -ForegroundColor $colors.Menu
+        Write-Host "Page $($currentPage + 1) of $totalPages | Showing items $($startIdx + 1)-$endIdx of $($Content.Count)" -ForegroundColor $colors.Info
+        Write-Host "[N]ext [P]revious [F]irst [L]ast [Q]uit: " -NoNewline -ForegroundColor $colors.Menu
+        
+        $key = Read-Host
+        
+        switch ($key.ToUpper()) {
+            "N" { if ($currentPage -lt $totalPages - 1) { $currentPage++ } }
+            "P" { if ($currentPage -gt 0) { $currentPage-- } }
+            "F" { $currentPage = 0 }
+            "L" { $currentPage = $totalPages - 1 }
+            "Q" { return }
+        }
+    }
+}
+
+# Main menu for incident data
+function Show-IncidentMenu {
+    param([string]$IncidentPath)
+    
+    while ($true) {
+        Show-Header "INCIDENT DATA BROWSER"
+        
+        # Display incident info
+        $incidentName = Split-Path $IncidentPath -Leaf
+        Write-Host "Incident: $incidentName" -ForegroundColor $colors.Info
+        Write-Host "Path: $IncidentPath" -ForegroundColor $colors.Data
+        
+        # Get summary info if available
+        $summaryPath = Join-Path $IncidentPath "SUMMARY.txt"
+        if (Test-Path $summaryPath) {
+            $summaryLines = Get-Content $summaryPath | Select-String "THREAT LEVEL:|TOTAL ALERTS:"
+            foreach ($line in $summaryLines) {
+                if ($line -match "THREAT LEVEL:") {
+                    $level = $line.Line.Split(":")[1].Trim()
+                    $color = switch ($level) {
+                        "CRITICAL" { $colors.Critical }
+                        "HIGH" { $colors.High }
+                        "MEDIUM" { $colors.Medium }
+                        "LOW" { $colors.Low }
+                        default { $colors.Data }
+                    }
+                    Write-Host $line.Line -ForegroundColor $color
+                }
+                else {
+                    Write-Host $line.Line -ForegroundColor $colors.Info
+                }
+            }
+        }
+        
+        Write-Host ""
+        Write-Host "MAIN MENU" -ForegroundColor $colors.Header
+        Write-Host "1. View Summary" -ForegroundColor $colors.Menu
+        Write-Host "2. View Alerts" -ForegroundColor $colors.Menu
+        Write-Host "3. Network Data" -ForegroundColor $colors.Menu
+        Write-Host "4. Process Data" -ForegroundColor $colors.Menu
+        Write-Host "5. Persistence Data" -ForegroundColor $colors.Menu
+        Write-Host "6. System Information" -ForegroundColor $colors.Menu
+        Write-Host "7. Event Logs" -ForegroundColor $colors.Menu
+        Write-Host "8. Browse All Files" -ForegroundColor $colors.Menu
+        Write-Host "9. Export All to Text" -ForegroundColor $colors.Menu
+        Write-Host "Q. Back to Directory Selection" -ForegroundColor $colors.Menu
+        Write-Host ""
+        
+        $choice = Read-Host "Select option"
+        
+        switch ($choice) {
+            "1" { Show-Summary -IncidentPath $IncidentPath }
+            "2" { Show-Alerts -IncidentPath $IncidentPath }
+            "3" { Show-NetworkData -IncidentPath $IncidentPath }
+            "4" { Show-ProcessData -IncidentPath $IncidentPath }
+            "5" { Show-PersistenceData -IncidentPath $IncidentPath }
+            "6" { Show-SystemInfo -IncidentPath $IncidentPath }
+            "7" { Show-EventLogs -IncidentPath $IncidentPath }
+            "8" { Browse-Files -IncidentPath $IncidentPath }
+            "9" { Export-AllData -IncidentPath $IncidentPath }
+            "Q" { return }
+            "q" { return }
+        }
+    }
+}
+
+# Show summary
+function Show-Summary {
+    param([string]$IncidentPath)
+    
+    $summaryFile = Join-Path $IncidentPath "SUMMARY.txt"
+    if (Test-Path $summaryFile) {
+        $content = Get-Content $summaryFile
+        Show-PagedContent -Content $content -Title "INCIDENT SUMMARY"
+    }
+    else {
+        Write-Host "Summary file not found" -ForegroundColor $colors.Critical
+        Read-Host "Press Enter to continue"
+    }
+}
+
+# Show alerts
+function Show-Alerts {
+    param([string]$IncidentPath)
+    
+    $alertsPath = Join-Path $IncidentPath "ALERTS"
+    if (!(Test-Path $alertsPath)) {
+        Write-Host "No alerts directory found" -ForegroundColor $colors.Info
+        Read-Host "Press Enter to continue"
+        return
+    }
+    
+    while ($true) {
+        Show-Header "ALERTS"
+        
+        $files = Get-ChildItem $alertsPath -File | Sort-Object Name
+        if ($files.Count -eq 0) {
+            Write-Host "No alert files found" -ForegroundColor $colors.Info
+            Read-Host "Press Enter to continue"
+            return
+        }
+        
+        Write-Host "Alert Files:" -ForegroundColor $colors.Header
+        for ($i = 0; $i -lt $files.Count; $i++) {
+            Write-Host ("{0,3}. {1}" -f ($i + 1), $files[$i].Name) -ForegroundColor $colors.High
+        }
+        
+        Write-Host ""
+        Write-Host "Enter file number to view or Q to go back: " -NoNewline
+        $choice = Read-Host
+        
+        if ($choice -match '^[Qq]') { return }
+        
+        if ($choice -match '^\d+$') {
+            $index = [int]$choice - 1
+            if ($index -ge 0 -and $index -lt $files.Count) {
+                $content = Show-FileContent -FilePath $files[$index].FullName
+                Show-PagedContent -Content $content -Title "ALERT: $($files[$index].Name)"
+            }
+        }
+    }
+}
+
+# Show network data
+function Show-NetworkData {
+    param([string]$IncidentPath)
+    
+    $networkPath = Join-Path $IncidentPath "Network"
+    if (!(Test-Path $networkPath)) {
+        Write-Host "No network data found" -ForegroundColor $colors.Info
+        Read-Host "Press Enter to continue"
+        return
+    }
+    
+    while ($true) {
+        Show-Header "NETWORK DATA"
+        
+        $files = Get-ChildItem $networkPath -File | Sort-Object Name
+        
+        Write-Host "Network Files:" -ForegroundColor $colors.Header
+        for ($i = 0; $i -lt $files.Count; $i++) {
+            Write-Host ("{0,3}. {1}" -f ($i + 1), $files[$i].Name) -ForegroundColor $colors.Menu
+        }
+        
+        Write-Host ""
+        Write-Host "Enter file number to view or Q to go back: " -NoNewline
+        $choice = Read-Host
+        
+        if ($choice -match '^[Qq]') { return }
+        
+        if ($choice -match '^\d+$') {
+            $index = [int]$choice - 1
+            if ($index -ge 0 -and $index -lt $files.Count) {
+                $content = Show-FileContent -FilePath $files[$index].FullName
+                Show-PagedContent -Content $content -Title "NETWORK: $($files[$index].Name)"
+            }
+        }
+    }
+}
+
+# Show process data
+function Show-ProcessData {
+    param([string]$IncidentPath)
+    
+    $processPath = Join-Path $IncidentPath "Processes"
+    $files = @()
+    
+    # Check both Processes folder and ALERTS for process files
+    if (Test-Path $processPath) {
+        $files += Get-ChildItem $processPath -File
+    }
+    
+    $alertsPath = Join-Path $IncidentPath "ALERTS"
+    if (Test-Path $alertsPath) {
+        $files += Get-ChildItem $alertsPath -Filter "*process*" -File
+        $files += Get-ChildItem $alertsPath -Filter "*pid*" -File
+    }
+    
+    if ($files.Count -eq 0) {
+        Write-Host "No process data found" -ForegroundColor $colors.Info
+        Read-Host "Press Enter to continue"
+        return
+    }
+    
+    while ($true) {
+        Show-Header "PROCESS DATA"
+        
+        Write-Host "Process Files:" -ForegroundColor $colors.Header
+        for ($i = 0; $i -lt $files.Count; $i++) {
+            $color = if ($files[$i].DirectoryName -match "ALERTS") { $colors.High } else { $colors.Menu }
+            Write-Host ("{0,3}. {1}" -f ($i + 1), $files[$i].Name) -ForegroundColor $color
+        }
+        
+        Write-Host ""
+        Write-Host "Enter file number to view or Q to go back: " -NoNewline
+        $choice = Read-Host
+        
+        if ($choice -match '^[Qq]') { return }
+        
+        if ($choice -match '^\d+$') {
+            $index = [int]$choice - 1
+            if ($index -ge 0 -and $index -lt $files.Count) {
+                $content = Show-FileContent -FilePath $files[$index].FullName
+                Show-PagedContent -Content $content -Title "PROCESS: $($files[$index].Name)"
+            }
+        }
+    }
+}
+
+# Show persistence data
+function Show-PersistenceData {
+    param([string]$IncidentPath)
+    
+    $persistPath = Join-Path $IncidentPath "Persistence"
+    $files = @()
+    
+    if (Test-Path $persistPath) {
+        $files += Get-ChildItem $persistPath -File
+    }
+    
+    # Also check ALERTS for persistence files
+    $alertsPath = Join-Path $IncidentPath "ALERTS"
+    if (Test-Path $alertsPath) {
+        $files += Get-ChildItem $alertsPath -Filter "*autorun*" -File
+        $files += Get-ChildItem $alertsPath -Filter "*service*" -File
+        $files += Get-ChildItem $alertsPath -Filter "*task*" -File
+    }
+    
+    if ($files.Count -eq 0) {
+        Write-Host "No persistence data found" -ForegroundColor $colors.Info
+        Read-Host "Press Enter to continue"
+        return
+    }
+    
+    while ($true) {
+        Show-Header "PERSISTENCE DATA"
+        
+        Write-Host "Persistence Files:" -ForegroundColor $colors.Header
+        for ($i = 0; $i -lt $files.Count; $i++) {
+            $color = if ($files[$i].DirectoryName -match "ALERTS") { $colors.High } else { $colors.Menu }
+            Write-Host ("{0,3}. {1}" -f ($i + 1), $files[$i].Name) -ForegroundColor $color
+        }
+        
+        Write-Host ""
+        Write-Host "Enter file number to view or Q to go back: " -NoNewline
+        $choice = Read-Host
+        
+        if ($choice -match '^[Qq]') { return }
+        
+        if ($choice -match '^\d+$') {
+            $index = [int]$choice - 1
+            if ($index -ge 0 -and $index -lt $files.Count) {
+                $content = Show-FileContent -FilePath $files[$index].FullName
+                Show-PagedContent -Content $content -Title "PERSISTENCE: $($files[$index].Name)"
+            }
+        }
+    }
+}
+
+# Show system info
+function Show-SystemInfo {
+    param([string]$IncidentPath)
+    
+    $systemPath = Join-Path $IncidentPath "System"
+    if (!(Test-Path $systemPath)) {
+        Write-Host "No system data found" -ForegroundColor $colors.Info
+        Read-Host "Press Enter to continue"
+        return
+    }
+    
+    while ($true) {
+        Show-Header "SYSTEM INFORMATION"
+        
+        $files = Get-ChildItem $systemPath -File | Sort-Object Name
+        
+        Write-Host "System Files:" -ForegroundColor $colors.Header
+        for ($i = 0; $i -lt $files.Count; $i++) {
+            Write-Host ("{0,3}. {1}" -f ($i + 1), $files[$i].Name) -ForegroundColor $colors.Menu
+        }
+        
+        Write-Host ""
+        Write-Host "Enter file number to view or Q to go back: " -NoNewline
+        $choice = Read-Host
+        
+        if ($choice -match '^[Qq]') { return }
+        
+        if ($choice -match '^\d+$') {
+            $index = [int]$choice - 1
+            if ($index -ge 0 -and $index -lt $files.Count) {
+                $content = Show-FileContent -FilePath $files[$index].FullName
+                Show-PagedContent -Content $content -Title "SYSTEM: $($files[$index].Name)"
+            }
+        }
+    }
+}
+
+# Show event logs
+function Show-EventLogs {
+    param([string]$IncidentPath)
+    
+    $logsPath = Join-Path $IncidentPath "Logs"
+    if (!(Test-Path $logsPath)) {
+        Write-Host "No event logs found" -ForegroundColor $colors.Info
+        Read-Host "Press Enter to continue"
+        return
+    }
+    
+    while ($true) {
+        Show-Header "EVENT LOGS"
+        
+        $files = Get-ChildItem $logsPath -File | Sort-Object Name
+        
+        Write-Host "Event Log Files:" -ForegroundColor $colors.Header
+        Write-Host "(Note: .evtx files can only be parsed on Windows systems)" -ForegroundColor $colors.Data
+        Write-Host ""
+        
+        for ($i = 0; $i -lt $files.Count; $i++) {
+            $color = if ($files[$i].Extension -eq ".evtx") { $colors.High } else { $colors.Menu }
+            Write-Host ("{0,3}. {1} ({2:N2} MB)" -f ($i + 1), $files[$i].Name, ($files[$i].Length/1MB)) -ForegroundColor $color
+        }
+        
+        Write-Host ""
+        Write-Host "Enter file number to view or Q to go back: " -NoNewline
+        $choice = Read-Host
+        
+        if ($choice -match '^[Qq]') { return }
+        
+        if ($choice -match '^\d+$') {
+            $index = [int]$choice - 1
+            if ($index -ge 0 -and $index -lt $files.Count) {
+                $content = Show-FileContent -FilePath $files[$index].FullName
+                Show-PagedContent -Content $content -Title "LOG: $($files[$index].Name)"
+            }
+        }
+    }
+}
+
+# Browse all files
+function Browse-Files {
+    param([string]$IncidentPath)
+    
+    Show-Header "FILE BROWSER"
+    
+    Write-Host "Building file list..." -ForegroundColor $colors.Info
+    $allFiles = Get-ChildItem $IncidentPath -Recurse -File | Sort-Object DirectoryName, Name
+    
+    $fileList = @()
+    $currentDir = ""
+    
+    foreach ($file in $allFiles) {
+        $relPath = $file.DirectoryName.Replace($IncidentPath, "").TrimStart("\")
+        
+        if ($relPath -ne $currentDir) {
+            $fileList += ""
+            $fileList += "[$relPath]"
+            $currentDir = $relPath
+        }
+        
+        $fileList += "  $($file.Name) ($([Math]::Round($file.Length/1KB, 2)) KB)"
+    }
+    
+    Show-PagedContent -Content $fileList -Title "ALL FILES ($($allFiles.Count) total)"
+}
+
+# Export all data to text
+function Export-AllData {
+    param([string]$IncidentPath)
+    
+    Show-Header "EXPORT ALL DATA"
+    
+    Write-Host "This will export all data to a single text file." -ForegroundColor $colors.Info
+    $confirm = Read-Host "Continue? (Y/N)"
+    
+    if ($confirm -ne 'Y' -and $confirm -ne 'y') { return }
+    
+    $exportFile = Join-Path $IncidentPath "Export_$(Get-Date -Format 'yyyyMMdd_HHmmss').txt"
+    $output = @()
+    
+    # Header
+    $output += "="*80
+    $output += "INCIDENT RESPONSE DATA EXPORT"
+    $output += "="*80
+    $output += "Generated: $(Get-Date)"
+    $output += "Incident: $(Split-Path $IncidentPath -Leaf)"
+    $output += "Path: $IncidentPath"
+    $output += "="*80
+    $output += ""
+    
+    Write-Host "Exporting data..." -ForegroundColor $colors.Info
+    
+    # Process each directory
+    $directories = @(
+        @{Name="SUMMARY"; Path="SUMMARY.txt"; Type="File"},
+        @{Name="ALERTS"; Path="ALERTS"; Type="Directory"},
+        @{Name="NETWORK"; Path="Network"; Type="Directory"},
+        @{Name="PROCESSES"; Path="Processes"; Type="Directory"},
+        @{Name="PERSISTENCE"; Path="Persistence"; Type="Directory"},
+        @{Name="SYSTEM"; Path="System"; Type="Directory"},
+        @{Name="LOGS"; Path="Logs"; Type="Directory"}
+    )
+    
+    foreach ($dir in $directories) {
+        Write-Host "  Exporting $($dir.Name)..." -ForegroundColor $colors.Data
+        
+        $fullPath = Join-Path $IncidentPath $dir.Path
+        
+        if (Test-Path $fullPath) {
+            $output += ""
+            $output += "="*80
+            $output += $dir.Name
+            $output += "="*80
+            
+            if ($dir.Type -eq "File") {
+                $output += Get-Content $fullPath
+            }
+            else {
+                $files = Get-ChildItem $fullPath -File | Sort-Object Name
+                foreach ($file in $files) {
+                    $output += ""
+                    $output += "-"*60
+                    $output += "FILE: $($file.Name)"
+                    $output += "-"*60
+                    
+                    $content = Show-FileContent -FilePath $file.FullName
+                    $output += $content
+                }
+            }
+        }
+    }
+    
+    # Save export
+    $output | Out-File $exportFile -Encoding UTF8
+    
+    Write-Host ""
+    Write-Host "Export complete!" -ForegroundColor $colors.Low
+    Write-Host "File saved to: $exportFile" -ForegroundColor $colors.Info
+    Write-Host "Size: $([Math]::Round((Get-Item $exportFile).Length/1MB, 2)) MB" -ForegroundColor $colors.Data
+    Write-Host ""
+    
+    $open = Read-Host "Open file now? (Y/N)"
+    if ($open -eq 'Y' -or $open -eq 'y') {
+        notepad.exe $exportFile
+    }
+    
+    Read-Host "Press Enter to continue"
+}
+
+# Main execution
+Show-Header
+
+Write-Host "This viewer displays data collected by the Incident Response Triage Script" -ForegroundColor $colors.Info
+Write-Host "No live data collection will be performed" -ForegroundColor $colors.Info
+Write-Host ""
+
+# Main loop
+while ($true) {
+    $incidentPath = $Path
+    
+    if (!$incidentPath -or !(Test-Path $incidentPath)) {
+        $incidentPath = Select-IncidentDirectory
+    }
+    
+    if (!$incidentPath) {
+        Write-Host "Exiting..." -ForegroundColor $colors.Info
+        break
+    }
+    
+    Show-IncidentMenu -IncidentPath $incidentPath
+    
+    # Reset path to show selection menu again
+    $Path = ""
+}
+
+Write-Host ""
+Write-Host "Thank you for using IR Data Viewer" -ForegroundColor $colors.Info) {
+                        $events | Where-Object { $_.Id -eq [int]$eventId }
+                    } else { $events }
+                }
+                "3" {
+                    $hours = Read-Host "Events from last X hours"
+                    if ($hours -match '^\d+
+
+# Display file content based on type
+function Show-FileContent {
+    param([string]$FilePath)
+    
+    if (!(Test-Path $FilePath)) {
+        return @("File not found: $FilePath")
+    }
+    
+    $extension = [System.IO.Path]::GetExtension($FilePath).ToLower()
+    
+    switch ($extension) {
+        ".csv" { return Show-CsvFile -FilePath $FilePath }
+        ".json" { return Show-JsonFile -FilePath $FilePath }
+        ".evtx" { return Show-EventLog -FilePath $FilePath }
+        ".txt" { return Get-Content $FilePath }
+        ".log" { return Get-Content $FilePath }
+        default { return @("Cannot display file type: $extension") }
+    }
+}
+
+# Paged display
+function Show-PagedContent {
+    param(
+        [array]$Content,
+        [string]$Title
+    )
+    
+    if ($Content.Count -eq 0) {
+        Write-Host "No content to display" -ForegroundColor $colors.Info
+        Read-Host "Press Enter to continue"
+        return
+    }
+    
+    $totalPages = [Math]::Ceiling($Content.Count / $PageSize)
+    $currentPage = 0
+    
+    while ($true) {
+        Show-Header $Title
+        
+        $startIdx = $currentPage * $PageSize
+        $endIdx = [Math]::Min($startIdx + $PageSize, $Content.Count)
+        
+        # Display page content
+        for ($i = $startIdx; $i -lt $endIdx; $i++) {
+            $line = $Content[$i]
+            
+            # Color coding based on content
+            if ($line -match "CRITICAL|ERROR|FAIL") {
+                Write-Host $line -ForegroundColor $colors.Critical
+            }
+            elseif ($line -match "WARNING|ALERT|SUSPICIOUS") {
+                Write-Host $line -ForegroundColor $colors.High
+            }
+            elseif ($line -match "SUCCESS|PASS") {
+                Write-Host $line -ForegroundColor $colors.Low
+            }
+            else {
+                Write-Host $line -ForegroundColor $colors.Data
+            }
+        }
+        
+        # Navigation
+        Write-Host ""
+        Write-Host ("-" * 80) -ForegroundColor $colors.Menu
+        Write-Host "Page $($currentPage + 1) of $totalPages | Showing items $($startIdx + 1)-$endIdx of $($Content.Count)" -ForegroundColor $colors.Info
+        Write-Host "[N]ext [P]revious [F]irst [L]ast [Q]uit: " -NoNewline -ForegroundColor $colors.Menu
+        
+        $key = Read-Host
+        
+        switch ($key.ToUpper()) {
+            "N" { if ($currentPage -lt $totalPages - 1) { $currentPage++ } }
+            "P" { if ($currentPage -gt 0) { $currentPage-- } }
+            "F" { $currentPage = 0 }
+            "L" { $currentPage = $totalPages - 1 }
+            "Q" { return }
+        }
+    }
+}
+
+# Main menu for incident data
+function Show-IncidentMenu {
+    param([string]$IncidentPath)
+    
+    while ($true) {
+        Show-Header "INCIDENT DATA BROWSER"
+        
+        # Display incident info
+        $incidentName = Split-Path $IncidentPath -Leaf
+        Write-Host "Incident: $incidentName" -ForegroundColor $colors.Info
+        Write-Host "Path: $IncidentPath" -ForegroundColor $colors.Data
+        
+        # Get summary info if available
+        $summaryPath = Join-Path $IncidentPath "SUMMARY.txt"
+        if (Test-Path $summaryPath) {
+            $summaryLines = Get-Content $summaryPath | Select-String "THREAT LEVEL:|TOTAL ALERTS:"
+            foreach ($line in $summaryLines) {
+                if ($line -match "THREAT LEVEL:") {
+                    $level = $line.Line.Split(":")[1].Trim()
+                    $color = switch ($level) {
+                        "CRITICAL" { $colors.Critical }
+                        "HIGH" { $colors.High }
+                        "MEDIUM" { $colors.Medium }
+                        "LOW" { $colors.Low }
+                        default { $colors.Data }
+                    }
+                    Write-Host $line.Line -ForegroundColor $color
+                }
+                else {
+                    Write-Host $line.Line -ForegroundColor $colors.Info
+                }
+            }
+        }
+        
+        Write-Host ""
+        Write-Host "MAIN MENU" -ForegroundColor $colors.Header
+        Write-Host "1. View Summary" -ForegroundColor $colors.Menu
+        Write-Host "2. View Alerts" -ForegroundColor $colors.Menu
+        Write-Host "3. Network Data" -ForegroundColor $colors.Menu
+        Write-Host "4. Process Data" -ForegroundColor $colors.Menu
+        Write-Host "5. Persistence Data" -ForegroundColor $colors.Menu
+        Write-Host "6. System Information" -ForegroundColor $colors.Menu
+        Write-Host "7. Event Logs" -ForegroundColor $colors.Menu
+        Write-Host "8. Browse All Files" -ForegroundColor $colors.Menu
+        Write-Host "9. Export All to Text" -ForegroundColor $colors.Menu
+        Write-Host "Q. Back to Directory Selection" -ForegroundColor $colors.Menu
+        Write-Host ""
+        
+        $choice = Read-Host "Select option"
+        
+        switch ($choice) {
+            "1" { Show-Summary -IncidentPath $IncidentPath }
+            "2" { Show-Alerts -IncidentPath $IncidentPath }
+            "3" { Show-NetworkData -IncidentPath $IncidentPath }
+            "4" { Show-ProcessData -IncidentPath $IncidentPath }
+            "5" { Show-PersistenceData -IncidentPath $IncidentPath }
+            "6" { Show-SystemInfo -IncidentPath $IncidentPath }
+            "7" { Show-EventLogs -IncidentPath $IncidentPath }
+            "8" { Browse-Files -IncidentPath $IncidentPath }
+            "9" { Export-AllData -IncidentPath $IncidentPath }
+            "Q" { return }
+            "q" { return }
+        }
+    }
+}
+
+# Show summary
+function Show-Summary {
+    param([string]$IncidentPath)
+    
+    $summaryFile = Join-Path $IncidentPath "SUMMARY.txt"
+    if (Test-Path $summaryFile) {
+        $content = Get-Content $summaryFile
+        Show-PagedContent -Content $content -Title "INCIDENT SUMMARY"
+    }
+    else {
+        Write-Host "Summary file not found" -ForegroundColor $colors.Critical
+        Read-Host "Press Enter to continue"
+    }
+}
+
+# Show alerts
+function Show-Alerts {
+    param([string]$IncidentPath)
+    
+    $alertsPath = Join-Path $IncidentPath "ALERTS"
+    if (!(Test-Path $alertsPath)) {
+        Write-Host "No alerts directory found" -ForegroundColor $colors.Info
+        Read-Host "Press Enter to continue"
+        return
+    }
+    
+    while ($true) {
+        Show-Header "ALERTS"
+        
+        $files = Get-ChildItem $alertsPath -File | Sort-Object Name
+        if ($files.Count -eq 0) {
+            Write-Host "No alert files found" -ForegroundColor $colors.Info
+            Read-Host "Press Enter to continue"
+            return
+        }
+        
+        Write-Host "Alert Files:" -ForegroundColor $colors.Header
+        for ($i = 0; $i -lt $files.Count; $i++) {
+            Write-Host ("{0,3}. {1}" -f ($i + 1), $files[$i].Name) -ForegroundColor $colors.High
+        }
+        
+        Write-Host ""
+        Write-Host "Enter file number to view or Q to go back: " -NoNewline
+        $choice = Read-Host
+        
+        if ($choice -match '^[Qq]') { return }
+        
+        if ($choice -match '^\d+$') {
+            $index = [int]$choice - 1
+            if ($index -ge 0 -and $index -lt $files.Count) {
+                $content = Show-FileContent -FilePath $files[$index].FullName
+                Show-PagedContent -Content $content -Title "ALERT: $($files[$index].Name)"
+            }
+        }
+    }
+}
+
+# Show network data
+function Show-NetworkData {
+    param([string]$IncidentPath)
+    
+    $networkPath = Join-Path $IncidentPath "Network"
+    if (!(Test-Path $networkPath)) {
+        Write-Host "No network data found" -ForegroundColor $colors.Info
+        Read-Host "Press Enter to continue"
+        return
+    }
+    
+    while ($true) {
+        Show-Header "NETWORK DATA"
+        
+        $files = Get-ChildItem $networkPath -File | Sort-Object Name
+        
+        Write-Host "Network Files:" -ForegroundColor $colors.Header
+        for ($i = 0; $i -lt $files.Count; $i++) {
+            Write-Host ("{0,3}. {1}" -f ($i + 1), $files[$i].Name) -ForegroundColor $colors.Menu
+        }
+        
+        Write-Host ""
+        Write-Host "Enter file number to view or Q to go back: " -NoNewline
+        $choice = Read-Host
+        
+        if ($choice -match '^[Qq]') { return }
+        
+        if ($choice -match '^\d+$') {
+            $index = [int]$choice - 1
+            if ($index -ge 0 -and $index -lt $files.Count) {
+                $content = Show-FileContent -FilePath $files[$index].FullName
+                Show-PagedContent -Content $content -Title "NETWORK: $($files[$index].Name)"
+            }
+        }
+    }
+}
+
+# Show process data
+function Show-ProcessData {
+    param([string]$IncidentPath)
+    
+    $processPath = Join-Path $IncidentPath "Processes"
+    $files = @()
+    
+    # Check both Processes folder and ALERTS for process files
+    if (Test-Path $processPath) {
+        $files += Get-ChildItem $processPath -File
+    }
+    
+    $alertsPath = Join-Path $IncidentPath "ALERTS"
+    if (Test-Path $alertsPath) {
+        $files += Get-ChildItem $alertsPath -Filter "*process*" -File
+        $files += Get-ChildItem $alertsPath -Filter "*pid*" -File
+    }
+    
+    if ($files.Count -eq 0) {
+        Write-Host "No process data found" -ForegroundColor $colors.Info
+        Read-Host "Press Enter to continue"
+        return
+    }
+    
+    while ($true) {
+        Show-Header "PROCESS DATA"
+        
+        Write-Host "Process Files:" -ForegroundColor $colors.Header
+        for ($i = 0; $i -lt $files.Count; $i++) {
+            $color = if ($files[$i].DirectoryName -match "ALERTS") { $colors.High } else { $colors.Menu }
+            Write-Host ("{0,3}. {1}" -f ($i + 1), $files[$i].Name) -ForegroundColor $color
+        }
+        
+        Write-Host ""
+        Write-Host "Enter file number to view or Q to go back: " -NoNewline
+        $choice = Read-Host
+        
+        if ($choice -match '^[Qq]') { return }
+        
+        if ($choice -match '^\d+$') {
+            $index = [int]$choice - 1
+            if ($index -ge 0 -and $index -lt $files.Count) {
+                $content = Show-FileContent -FilePath $files[$index].FullName
+                Show-PagedContent -Content $content -Title "PROCESS: $($files[$index].Name)"
+            }
+        }
+    }
+}
+
+# Show persistence data
+function Show-PersistenceData {
+    param([string]$IncidentPath)
+    
+    $persistPath = Join-Path $IncidentPath "Persistence"
+    $files = @()
+    
+    if (Test-Path $persistPath) {
+        $files += Get-ChildItem $persistPath -File
+    }
+    
+    # Also check ALERTS for persistence files
+    $alertsPath = Join-Path $IncidentPath "ALERTS"
+    if (Test-Path $alertsPath) {
+        $files += Get-ChildItem $alertsPath -Filter "*autorun*" -File
+        $files += Get-ChildItem $alertsPath -Filter "*service*" -File
+        $files += Get-ChildItem $alertsPath -Filter "*task*" -File
+    }
+    
+    if ($files.Count -eq 0) {
+        Write-Host "No persistence data found" -ForegroundColor $colors.Info
+        Read-Host "Press Enter to continue"
+        return
+    }
+    
+    while ($true) {
+        Show-Header "PERSISTENCE DATA"
+        
+        Write-Host "Persistence Files:" -ForegroundColor $colors.Header
+        for ($i = 0; $i -lt $files.Count; $i++) {
+            $color = if ($files[$i].DirectoryName -match "ALERTS") { $colors.High } else { $colors.Menu }
+            Write-Host ("{0,3}. {1}" -f ($i + 1), $files[$i].Name) -ForegroundColor $color
+        }
+        
+        Write-Host ""
+        Write-Host "Enter file number to view or Q to go back: " -NoNewline
+        $choice = Read-Host
+        
+        if ($choice -match '^[Qq]') { return }
+        
+        if ($choice -match '^\d+$') {
+            $index = [int]$choice - 1
+            if ($index -ge 0 -and $index -lt $files.Count) {
+                $content = Show-FileContent -FilePath $files[$index].FullName
+                Show-PagedContent -Content $content -Title "PERSISTENCE: $($files[$index].Name)"
+            }
+        }
+    }
+}
+
+# Show system info
+function Show-SystemInfo {
+    param([string]$IncidentPath)
+    
+    $systemPath = Join-Path $IncidentPath "System"
+    if (!(Test-Path $systemPath)) {
+        Write-Host "No system data found" -ForegroundColor $colors.Info
+        Read-Host "Press Enter to continue"
+        return
+    }
+    
+    while ($true) {
+        Show-Header "SYSTEM INFORMATION"
+        
+        $files = Get-ChildItem $systemPath -File | Sort-Object Name
+        
+        Write-Host "System Files:" -ForegroundColor $colors.Header
+        for ($i = 0; $i -lt $files.Count; $i++) {
+            Write-Host ("{0,3}. {1}" -f ($i + 1), $files[$i].Name) -ForegroundColor $colors.Menu
+        }
+        
+        Write-Host ""
+        Write-Host "Enter file number to view or Q to go back: " -NoNewline
+        $choice = Read-Host
+        
+        if ($choice -match '^[Qq]') { return }
+        
+        if ($choice -match '^\d+$') {
+            $index = [int]$choice - 1
+            if ($index -ge 0 -and $index -lt $files.Count) {
+                $content = Show-FileContent -FilePath $files[$index].FullName
+                Show-PagedContent -Content $content -Title "SYSTEM: $($files[$index].Name)"
+            }
+        }
+    }
+}
+
+# Show event logs
+function Show-EventLogs {
+    param([string]$IncidentPath)
+    
+    $logsPath = Join-Path $IncidentPath "Logs"
+    if (!(Test-Path $logsPath)) {
+        Write-Host "No event logs found" -ForegroundColor $colors.Info
+        Read-Host "Press Enter to continue"
+        return
+    }
+    
+    while ($true) {
+        Show-Header "EVENT LOGS"
+        
+        $files = Get-ChildItem $logsPath -File | Sort-Object Name
+        
+        Write-Host "Event Log Files:" -ForegroundColor $colors.Header
+        Write-Host "(Note: .evtx files can only be parsed on Windows systems)" -ForegroundColor $colors.Data
+        Write-Host ""
+        
+        for ($i = 0; $i -lt $files.Count; $i++) {
+            $color = if ($files[$i].Extension -eq ".evtx") { $colors.High } else { $colors.Menu }
+            Write-Host ("{0,3}. {1} ({2:N2} MB)" -f ($i + 1), $files[$i].Name, ($files[$i].Length/1MB)) -ForegroundColor $color
+        }
+        
+        Write-Host ""
+        Write-Host "Enter file number to view or Q to go back: " -NoNewline
+        $choice = Read-Host
+        
+        if ($choice -match '^[Qq]') { return }
+        
+        if ($choice -match '^\d+$') {
+            $index = [int]$choice - 1
+            if ($index -ge 0 -and $index -lt $files.Count) {
+                $content = Show-FileContent -FilePath $files[$index].FullName
+                Show-PagedContent -Content $content -Title "LOG: $($files[$index].Name)"
+            }
+        }
+    }
+}
+
+# Browse all files
+function Browse-Files {
+    param([string]$IncidentPath)
+    
+    Show-Header "FILE BROWSER"
+    
+    Write-Host "Building file list..." -ForegroundColor $colors.Info
+    $allFiles = Get-ChildItem $IncidentPath -Recurse -File | Sort-Object DirectoryName, Name
+    
+    $fileList = @()
+    $currentDir = ""
+    
+    foreach ($file in $allFiles) {
+        $relPath = $file.DirectoryName.Replace($IncidentPath, "").TrimStart("\")
+        
+        if ($relPath -ne $currentDir) {
+            $fileList += ""
+            $fileList += "[$relPath]"
+            $currentDir = $relPath
+        }
+        
+        $fileList += "  $($file.Name) ($([Math]::Round($file.Length/1KB, 2)) KB)"
+    }
+    
+    Show-PagedContent -Content $fileList -Title "ALL FILES ($($allFiles.Count) total)"
+}
+
+# Export all data to text
+function Export-AllData {
+    param([string]$IncidentPath)
+    
+    Show-Header "EXPORT ALL DATA"
+    
+    Write-Host "This will export all data to a single text file." -ForegroundColor $colors.Info
+    $confirm = Read-Host "Continue? (Y/N)"
+    
+    if ($confirm -ne 'Y' -and $confirm -ne 'y') { return }
+    
+    $exportFile = Join-Path $IncidentPath "Export_$(Get-Date -Format 'yyyyMMdd_HHmmss').txt"
+    $output = @()
+    
+    # Header
+    $output += "="*80
+    $output += "INCIDENT RESPONSE DATA EXPORT"
+    $output += "="*80
+    $output += "Generated: $(Get-Date)"
+    $output += "Incident: $(Split-Path $IncidentPath -Leaf)"
+    $output += "Path: $IncidentPath"
+    $output += "="*80
+    $output += ""
+    
+    Write-Host "Exporting data..." -ForegroundColor $colors.Info
+    
+    # Process each directory
+    $directories = @(
+        @{Name="SUMMARY"; Path="SUMMARY.txt"; Type="File"},
+        @{Name="ALERTS"; Path="ALERTS"; Type="Directory"},
+        @{Name="NETWORK"; Path="Network"; Type="Directory"},
+        @{Name="PROCESSES"; Path="Processes"; Type="Directory"},
+        @{Name="PERSISTENCE"; Path="Persistence"; Type="Directory"},
+        @{Name="SYSTEM"; Path="System"; Type="Directory"},
+        @{Name="LOGS"; Path="Logs"; Type="Directory"}
+    )
+    
+    foreach ($dir in $directories) {
+        Write-Host "  Exporting $($dir.Name)..." -ForegroundColor $colors.Data
+        
+        $fullPath = Join-Path $IncidentPath $dir.Path
+        
+        if (Test-Path $fullPath) {
+            $output += ""
+            $output += "="*80
+            $output += $dir.Name
+            $output += "="*80
+            
+            if ($dir.Type -eq "File") {
+                $output += Get-Content $fullPath
+            }
+            else {
+                $files = Get-ChildItem $fullPath -File | Sort-Object Name
+                foreach ($file in $files) {
+                    $output += ""
+                    $output += "-"*60
+                    $output += "FILE: $($file.Name)"
+                    $output += "-"*60
+                    
+                    $content = Show-FileContent -FilePath $file.FullName
+                    $output += $content
+                }
+            }
+        }
+    }
+    
+    # Save export
+    $output | Out-File $exportFile -Encoding UTF8
+    
+    Write-Host ""
+    Write-Host "Export complete!" -ForegroundColor $colors.Low
+    Write-Host "File saved to: $exportFile" -ForegroundColor $colors.Info
+    Write-Host "Size: $([Math]::Round((Get-Item $exportFile).Length/1MB, 2)) MB" -ForegroundColor $colors.Data
+    Write-Host ""
+    
+    $open = Read-Host "Open file now? (Y/N)"
+    if ($open -eq 'Y' -or $open -eq 'y') {
+        notepad.exe $exportFile
+    }
+    
+    Read-Host "Press Enter to continue"
+}
+
+# Main execution
+Show-Header
+
+Write-Host "This viewer displays data collected by the Incident Response Triage Script" -ForegroundColor $colors.Info
+Write-Host "No live data collection will be performed" -ForegroundColor $colors.Info
+Write-Host ""
+
+# Main loop
+while ($true) {
+    $incidentPath = $Path
+    
+    if (!$incidentPath -or !(Test-Path $incidentPath)) {
+        $incidentPath = Select-IncidentDirectory
+    }
+    
+    if (!$incidentPath) {
+        Write-Host "Exiting..." -ForegroundColor $colors.Info
+        break
+    }
+    
+    Show-IncidentMenu -IncidentPath $incidentPath
+    
+    # Reset path to show selection menu again
+    $Path = ""
+}
+
+Write-Host ""
+Write-Host "Thank you for using IR Data Viewer" -ForegroundColor $colors.Info) {
+                        $cutoff = (Get-Date).AddHours(-[int]$hours)
+                        $events | Where-Object { $_.TimeCreated -gt $cutoff }
+                    } else { $events }
+                }
+                default { $events }
+            }
+            
+            $output += "Filtered Events: $($events.Count)"
+            $output += ""
+        }
+        
+        # Format events
+        $eventNum = 1
+        foreach ($event in $events) {
+            $output += "===== Event #$eventNum ====="
+            $output += "Time: $($event.TimeCreated)"
+            $output += "Level: $($event.LevelDisplayName) | ID: $($event.Id)"
+            $output += "Source: $($event.ProviderName)"
+            $output += "Computer: $($event.MachineName)"
+            
+            if ($event.UserId) {
+                $output += "User: $($event.UserId)"
+            }
+            
+            if ($event.Message) {
+                # Option to show full or truncated messages
+                $output += "Message:"
+                $output += $event.Message -split "`n" | ForEach-Object { "  $_" }
+            }
+            
+            $output += ""
+            $eventNum++
+        }
+        
+        return $output
+    }
+    catch {
+        $output = @()
+        $output += "Unable to parse event log on this system."
+        $output += "Event logs can only be viewed on Windows systems with appropriate permissions."
+        $output += ""
+        $output += "Error: $_"
+        $output += ""
+        $output += "Raw file location: $FilePath"
+        $output += "File size: $([Math]::Round((Get-Item $FilePath).Length/1MB, 2)) MB"
+        
+        return $output
+    }
+}
+
+# Display file content based on type
+function Show-FileContent {
+    param([string]$FilePath)
+    
+    if (!(Test-Path $FilePath)) {
+        return @("File not found: $FilePath")
+    }
+    
+    $extension = [System.IO.Path]::GetExtension($FilePath).ToLower()
+    
+    switch ($extension) {
+        ".csv" { return Show-CsvFile -FilePath $FilePath }
+        ".json" { return Show-JsonFile -FilePath $FilePath }
+        ".evtx" { return Show-EventLog -FilePath $FilePath }
+        ".txt" { return Get-Content $FilePath }
+        ".log" { return Get-Content $FilePath }
+        default { return @("Cannot display file type: $extension") }
+    }
+}
+
+# Paged display
+function Show-PagedContent {
+    param(
+        [array]$Content,
+        [string]$Title
+    )
+    
+    if ($Content.Count -eq 0) {
+        Write-Host "No content to display" -ForegroundColor $colors.Info
+        Read-Host "Press Enter to continue"
+        return
+    }
+    
+    $totalPages = [Math]::Ceiling($Content.Count / $PageSize)
+    $currentPage = 0
+    
+    while ($true) {
+        Show-Header $Title
+        
+        $startIdx = $currentPage * $PageSize
+        $endIdx = [Math]::Min($startIdx + $PageSize, $Content.Count)
+        
+        # Display page content
+        for ($i = $startIdx; $i -lt $endIdx; $i++) {
+            $line = $Content[$i]
+            
+            # Color coding based on content
+            if ($line -match "CRITICAL|ERROR|FAIL") {
+                Write-Host $line -ForegroundColor $colors.Critical
+            }
+            elseif ($line -match "WARNING|ALERT|SUSPICIOUS") {
+                Write-Host $line -ForegroundColor $colors.High
+            }
+            elseif ($line -match "SUCCESS|PASS") {
+                Write-Host $line -ForegroundColor $colors.Low
+            }
+            else {
+                Write-Host $line -ForegroundColor $colors.Data
+            }
+        }
+        
+        # Navigation
+        Write-Host ""
+        Write-Host ("-" * 80) -ForegroundColor $colors.Menu
+        Write-Host "Page $($currentPage + 1) of $totalPages | Showing items $($startIdx + 1)-$endIdx of $($Content.Count)" -ForegroundColor $colors.Info
+        Write-Host "[N]ext [P]revious [F]irst [L]ast [Q]uit: " -NoNewline -ForegroundColor $colors.Menu
+        
+        $key = Read-Host
+        
+        switch ($key.ToUpper()) {
+            "N" { if ($currentPage -lt $totalPages - 1) { $currentPage++ } }
+            "P" { if ($currentPage -gt 0) { $currentPage-- } }
+            "F" { $currentPage = 0 }
+            "L" { $currentPage = $totalPages - 1 }
+            "Q" { return }
+        }
+    }
+}
+
+# Main menu for incident data
+function Show-IncidentMenu {
+    param([string]$IncidentPath)
+    
+    while ($true) {
+        Show-Header "INCIDENT DATA BROWSER"
+        
+        # Display incident info
+        $incidentName = Split-Path $IncidentPath -Leaf
+        Write-Host "Incident: $incidentName" -ForegroundColor $colors.Info
+        Write-Host "Path: $IncidentPath" -ForegroundColor $colors.Data
+        
+        # Get summary info if available
+        $summaryPath = Join-Path $IncidentPath "SUMMARY.txt"
+        if (Test-Path $summaryPath) {
+            $summaryLines = Get-Content $summaryPath | Select-String "THREAT LEVEL:|TOTAL ALERTS:"
+            foreach ($line in $summaryLines) {
+                if ($line -match "THREAT LEVEL:") {
+                    $level = $line.Line.Split(":")[1].Trim()
+                    $color = switch ($level) {
+                        "CRITICAL" { $colors.Critical }
+                        "HIGH" { $colors.High }
+                        "MEDIUM" { $colors.Medium }
+                        "LOW" { $colors.Low }
+                        default { $colors.Data }
+                    }
+                    Write-Host $line.Line -ForegroundColor $color
+                }
+                else {
+                    Write-Host $line.Line -ForegroundColor $colors.Info
+                }
+            }
+        }
+        
+        Write-Host ""
+        Write-Host "MAIN MENU" -ForegroundColor $colors.Header
+        Write-Host "1. View Summary" -ForegroundColor $colors.Menu
+        Write-Host "2. View Alerts" -ForegroundColor $colors.Menu
+        Write-Host "3. Network Data" -ForegroundColor $colors.Menu
+        Write-Host "4. Process Data" -ForegroundColor $colors.Menu
+        Write-Host "5. Persistence Data" -ForegroundColor $colors.Menu
+        Write-Host "6. System Information" -ForegroundColor $colors.Menu
+        Write-Host "7. Event Logs" -ForegroundColor $colors.Menu
+        Write-Host "8. Browse All Files" -ForegroundColor $colors.Menu
+        Write-Host "9. Export All to Text" -ForegroundColor $colors.Menu
+        Write-Host "Q. Back to Directory Selection" -ForegroundColor $colors.Menu
+        Write-Host ""
+        
+        $choice = Read-Host "Select option"
+        
+        switch ($choice) {
+            "1" { Show-Summary -IncidentPath $IncidentPath }
+            "2" { Show-Alerts -IncidentPath $IncidentPath }
+            "3" { Show-NetworkData -IncidentPath $IncidentPath }
+            "4" { Show-ProcessData -IncidentPath $IncidentPath }
+            "5" { Show-PersistenceData -IncidentPath $IncidentPath }
+            "6" { Show-SystemInfo -IncidentPath $IncidentPath }
+            "7" { Show-EventLogs -IncidentPath $IncidentPath }
+            "8" { Browse-Files -IncidentPath $IncidentPath }
+            "9" { Export-AllData -IncidentPath $IncidentPath }
+            "Q" { return }
+            "q" { return }
+        }
+    }
+}
+
+# Show summary
+function Show-Summary {
+    param([string]$IncidentPath)
+    
+    $summaryFile = Join-Path $IncidentPath "SUMMARY.txt"
+    if (Test-Path $summaryFile) {
+        $content = Get-Content $summaryFile
+        Show-PagedContent -Content $content -Title "INCIDENT SUMMARY"
+    }
+    else {
+        Write-Host "Summary file not found" -ForegroundColor $colors.Critical
+        Read-Host "Press Enter to continue"
+    }
+}
+
+# Show alerts
+function Show-Alerts {
+    param([string]$IncidentPath)
+    
+    $alertsPath = Join-Path $IncidentPath "ALERTS"
+    if (!(Test-Path $alertsPath)) {
+        Write-Host "No alerts directory found" -ForegroundColor $colors.Info
+        Read-Host "Press Enter to continue"
+        return
+    }
+    
+    while ($true) {
+        Show-Header "ALERTS"
+        
+        $files = Get-ChildItem $alertsPath -File | Sort-Object Name
+        if ($files.Count -eq 0) {
+            Write-Host "No alert files found" -ForegroundColor $colors.Info
+            Read-Host "Press Enter to continue"
+            return
+        }
+        
+        Write-Host "Alert Files:" -ForegroundColor $colors.Header
+        for ($i = 0; $i -lt $files.Count; $i++) {
+            Write-Host ("{0,3}. {1}" -f ($i + 1), $files[$i].Name) -ForegroundColor $colors.High
+        }
+        
+        Write-Host ""
+        Write-Host "Enter file number to view or Q to go back: " -NoNewline
+        $choice = Read-Host
+        
+        if ($choice -match '^[Qq]') { return }
+        
+        if ($choice -match '^\d+$') {
+            $index = [int]$choice - 1
+            if ($index -ge 0 -and $index -lt $files.Count) {
+                $content = Show-FileContent -FilePath $files[$index].FullName
+                Show-PagedContent -Content $content -Title "ALERT: $($files[$index].Name)"
+            }
+        }
+    }
+}
+
+# Show network data
+function Show-NetworkData {
+    param([string]$IncidentPath)
+    
+    $networkPath = Join-Path $IncidentPath "Network"
+    if (!(Test-Path $networkPath)) {
+        Write-Host "No network data found" -ForegroundColor $colors.Info
+        Read-Host "Press Enter to continue"
+        return
+    }
+    
+    while ($true) {
+        Show-Header "NETWORK DATA"
+        
+        $files = Get-ChildItem $networkPath -File | Sort-Object Name
+        
+        Write-Host "Network Files:" -ForegroundColor $colors.Header
+        for ($i = 0; $i -lt $files.Count; $i++) {
+            Write-Host ("{0,3}. {1}" -f ($i + 1), $files[$i].Name) -ForegroundColor $colors.Menu
+        }
+        
+        Write-Host ""
+        Write-Host "Enter file number to view or Q to go back: " -NoNewline
+        $choice = Read-Host
+        
+        if ($choice -match '^[Qq]') { return }
+        
+        if ($choice -match '^\d+$') {
+            $index = [int]$choice - 1
+            if ($index -ge 0 -and $index -lt $files.Count) {
+                $content = Show-FileContent -FilePath $files[$index].FullName
+                Show-PagedContent -Content $content -Title "NETWORK: $($files[$index].Name)"
+            }
+        }
+    }
+}
+
+# Show process data
+function Show-ProcessData {
+    param([string]$IncidentPath)
+    
+    $processPath = Join-Path $IncidentPath "Processes"
+    $files = @()
+    
+    # Check both Processes folder and ALERTS for process files
+    if (Test-Path $processPath) {
+        $files += Get-ChildItem $processPath -File
+    }
+    
+    $alertsPath = Join-Path $IncidentPath "ALERTS"
+    if (Test-Path $alertsPath) {
+        $files += Get-ChildItem $alertsPath -Filter "*process*" -File
+        $files += Get-ChildItem $alertsPath -Filter "*pid*" -File
+    }
+    
+    if ($files.Count -eq 0) {
+        Write-Host "No process data found" -ForegroundColor $colors.Info
+        Read-Host "Press Enter to continue"
+        return
+    }
+    
+    while ($true) {
+        Show-Header "PROCESS DATA"
+        
+        Write-Host "Process Files:" -ForegroundColor $colors.Header
+        for ($i = 0; $i -lt $files.Count; $i++) {
+            $color = if ($files[$i].DirectoryName -match "ALERTS") { $colors.High } else { $colors.Menu }
+            Write-Host ("{0,3}. {1}" -f ($i + 1), $files[$i].Name) -ForegroundColor $color
+        }
+        
+        Write-Host ""
+        Write-Host "Enter file number to view or Q to go back: " -NoNewline
+        $choice = Read-Host
+        
+        if ($choice -match '^[Qq]') { return }
+        
+        if ($choice -match '^\d+$') {
+            $index = [int]$choice - 1
+            if ($index -ge 0 -and $index -lt $files.Count) {
+                $content = Show-FileContent -FilePath $files[$index].FullName
+                Show-PagedContent -Content $content -Title "PROCESS: $($files[$index].Name)"
+            }
+        }
+    }
+}
+
+# Show persistence data
+function Show-PersistenceData {
+    param([string]$IncidentPath)
+    
+    $persistPath = Join-Path $IncidentPath "Persistence"
+    $files = @()
+    
+    if (Test-Path $persistPath) {
+        $files += Get-ChildItem $persistPath -File
+    }
+    
+    # Also check ALERTS for persistence files
+    $alertsPath = Join-Path $IncidentPath "ALERTS"
+    if (Test-Path $alertsPath) {
+        $files += Get-ChildItem $alertsPath -Filter "*autorun*" -File
+        $files += Get-ChildItem $alertsPath -Filter "*service*" -File
+        $files += Get-ChildItem $alertsPath -Filter "*task*" -File
+    }
+    
+    if ($files.Count -eq 0) {
+        Write-Host "No persistence data found" -ForegroundColor $colors.Info
+        Read-Host "Press Enter to continue"
+        return
+    }
+    
+    while ($true) {
+        Show-Header "PERSISTENCE DATA"
+        
+        Write-Host "Persistence Files:" -ForegroundColor $colors.Header
+        for ($i = 0; $i -lt $files.Count; $i++) {
+            $color = if ($files[$i].DirectoryName -match "ALERTS") { $colors.High } else { $colors.Menu }
+            Write-Host ("{0,3}. {1}" -f ($i + 1), $files[$i].Name) -ForegroundColor $color
+        }
+        
+        Write-Host ""
+        Write-Host "Enter file number to view or Q to go back: " -NoNewline
+        $choice = Read-Host
+        
+        if ($choice -match '^[Qq]') { return }
+        
+        if ($choice -match '^\d+$') {
+            $index = [int]$choice - 1
+            if ($index -ge 0 -and $index -lt $files.Count) {
+                $content = Show-FileContent -FilePath $files[$index].FullName
+                Show-PagedContent -Content $content -Title "PERSISTENCE: $($files[$index].Name)"
+            }
+        }
+    }
+}
+
+# Show system info
+function Show-SystemInfo {
+    param([string]$IncidentPath)
+    
+    $systemPath = Join-Path $IncidentPath "System"
+    if (!(Test-Path $systemPath)) {
+        Write-Host "No system data found" -ForegroundColor $colors.Info
+        Read-Host "Press Enter to continue"
+        return
+    }
+    
+    while ($true) {
+        Show-Header "SYSTEM INFORMATION"
+        
+        $files = Get-ChildItem $systemPath -File | Sort-Object Name
+        
+        Write-Host "System Files:" -ForegroundColor $colors.Header
+        for ($i = 0; $i -lt $files.Count; $i++) {
+            Write-Host ("{0,3}. {1}" -f ($i + 1), $files[$i].Name) -ForegroundColor $colors.Menu
+        }
+        
+        Write-Host ""
+        Write-Host "Enter file number to view or Q to go back: " -NoNewline
+        $choice = Read-Host
+        
+        if ($choice -match '^[Qq]') { return }
+        
+        if ($choice -match '^\d+$') {
+            $index = [int]$choice - 1
+            if ($index -ge 0 -and $index -lt $files.Count) {
+                $content = Show-FileContent -FilePath $files[$index].FullName
+                Show-PagedContent -Content $content -Title "SYSTEM: $($files[$index].Name)"
+            }
+        }
+    }
+}
+
+# Show event logs
+function Show-EventLogs {
+    param([string]$IncidentPath)
+    
+    $logsPath = Join-Path $IncidentPath "Logs"
+    if (!(Test-Path $logsPath)) {
+        Write-Host "No event logs found" -ForegroundColor $colors.Info
+        Read-Host "Press Enter to continue"
+        return
+    }
+    
+    while ($true) {
+        Show-Header "EVENT LOGS"
+        
+        $files = Get-ChildItem $logsPath -File | Sort-Object Name
+        
+        Write-Host "Event Log Files:" -ForegroundColor $colors.Header
+        Write-Host "(Note: .evtx files can only be parsed on Windows systems)" -ForegroundColor $colors.Data
+        Write-Host ""
+        
+        for ($i = 0; $i -lt $files.Count; $i++) {
+            $color = if ($files[$i].Extension -eq ".evtx") { $colors.High } else { $colors.Menu }
+            Write-Host ("{0,3}. {1} ({2:N2} MB)" -f ($i + 1), $files[$i].Name, ($files[$i].Length/1MB)) -ForegroundColor $color
+        }
+        
+        Write-Host ""
+        Write-Host "Enter file number to view or Q to go back: " -NoNewline
+        $choice = Read-Host
+        
+        if ($choice -match '^[Qq]') { return }
+        
+        if ($choice -match '^\d+$') {
+            $index = [int]$choice - 1
+            if ($index -ge 0 -and $index -lt $files.Count) {
+                $content = Show-FileContent -FilePath $files[$index].FullName
+                Show-PagedContent -Content $content -Title "LOG: $($files[$index].Name)"
+            }
+        }
+    }
+}
+
+# Browse all files
+function Browse-Files {
+    param([string]$IncidentPath)
+    
+    Show-Header "FILE BROWSER"
+    
+    Write-Host "Building file list..." -ForegroundColor $colors.Info
+    $allFiles = Get-ChildItem $IncidentPath -Recurse -File | Sort-Object DirectoryName, Name
+    
+    $fileList = @()
+    $currentDir = ""
+    
+    foreach ($file in $allFiles) {
+        $relPath = $file.DirectoryName.Replace($IncidentPath, "").TrimStart("\")
+        
+        if ($relPath -ne $currentDir) {
+            $fileList += ""
+            $fileList += "[$relPath]"
+            $currentDir = $relPath
+        }
+        
+        $fileList += "  $($file.Name) ($([Math]::Round($file.Length/1KB, 2)) KB)"
+    }
+    
+    Show-PagedContent -Content $fileList -Title "ALL FILES ($($allFiles.Count) total)"
+}
+
+# Export all data to text
+function Export-AllData {
+    param([string]$IncidentPath)
+    
+    Show-Header "EXPORT ALL DATA"
+    
+    Write-Host "This will export all data to a single text file." -ForegroundColor $colors.Info
+    $confirm = Read-Host "Continue? (Y/N)"
+    
+    if ($confirm -ne 'Y' -and $confirm -ne 'y') { return }
+    
+    $exportFile = Join-Path $IncidentPath "Export_$(Get-Date -Format 'yyyyMMdd_HHmmss').txt"
+    $output = @()
+    
+    # Header
+    $output += "="*80
+    $output += "INCIDENT RESPONSE DATA EXPORT"
+    $output += "="*80
+    $output += "Generated: $(Get-Date)"
+    $output += "Incident: $(Split-Path $IncidentPath -Leaf)"
+    $output += "Path: $IncidentPath"
+    $output += "="*80
+    $output += ""
+    
+    Write-Host "Exporting data..." -ForegroundColor $colors.Info
+    
+    # Process each directory
+    $directories = @(
+        @{Name="SUMMARY"; Path="SUMMARY.txt"; Type="File"},
+        @{Name="ALERTS"; Path="ALERTS"; Type="Directory"},
+        @{Name="NETWORK"; Path="Network"; Type="Directory"},
+        @{Name="PROCESSES"; Path="Processes"; Type="Directory"},
+        @{Name="PERSISTENCE"; Path="Persistence"; Type="Directory"},
+        @{Name="SYSTEM"; Path="System"; Type="Directory"},
+        @{Name="LOGS"; Path="Logs"; Type="Directory"}
+    )
+    
+    foreach ($dir in $directories) {
+        Write-Host "  Exporting $($dir.Name)..." -ForegroundColor $colors.Data
+        
+        $fullPath = Join-Path $IncidentPath $dir.Path
+        
+        if (Test-Path $fullPath) {
+            $output += ""
+            $output += "="*80
+            $output += $dir.Name
+            $output += "="*80
+            
+            if ($dir.Type -eq "File") {
+                $output += Get-Content $fullPath
+            }
+            else {
+                $files = Get-ChildItem $fullPath -File | Sort-Object Name
+                foreach ($file in $files) {
+                    $output += ""
+                    $output += "-"*60
+                    $output += "FILE: $($file.Name)"
+                    $output += "-"*60
+                    
+                    $content = Show-FileContent -FilePath $file.FullName
+                    $output += $content
+                }
+            }
+        }
+    }
+    
+    # Save export
+    $output | Out-File $exportFile -Encoding UTF8
+    
+    Write-Host ""
+    Write-Host "Export complete!" -ForegroundColor $colors.Low
+    Write-Host "File saved to: $exportFile" -ForegroundColor $colors.Info
+    Write-Host "Size: $([Math]::Round((Get-Item $exportFile).Length/1MB, 2)) MB" -ForegroundColor $colors.Data
+    Write-Host ""
+    
+    $open = Read-Host "Open file now? (Y/N)"
+    if ($open -eq 'Y' -or $open -eq 'y') {
+        notepad.exe $exportFile
+    }
+    
+    Read-Host "Press Enter to continue"
+}
+
+# Main execution
+Show-Header
+
+Write-Host "This viewer displays data collected by the Incident Response Triage Script" -ForegroundColor $colors.Info
+Write-Host "No live data collection will be performed" -ForegroundColor $colors.Info
+Write-Host ""
+
+# Main loop
+while ($true) {
+    $incidentPath = $Path
+    
+    if (!$incidentPath -or !(Test-Path $incidentPath)) {
+        $incidentPath = Select-IncidentDirectory
+    }
+    
+    if (!$incidentPath) {
+        Write-Host "Exiting..." -ForegroundColor $colors.Info
+        break
+    }
+    
+    Show-IncidentMenu -IncidentPath $incidentPath
+    
+    # Reset path to show selection menu again
+    $Path = ""
+}
+
+Write-Host ""
+Write-Host "Thank you for using IR Data Viewer" -ForegroundColor $colors.Info) {
+                    $pageNum = [int]$goto - 1
+                    if ($pageNum -ge 0 -and $pageNum -lt $totalPages) {
+                        $currentPage = $pageNum
+                    }
+                }
+            }
+            "J" {
+                $jumpLine = Read-Host "Enter line number (1-$($Content.Count))"
+                if ($jumpLine -match '^\d+
+                $searchTerm = Read-Host "Enter search term"
+                if ($searchTerm) {
+                    Write-Host "Searching..." -ForegroundColor $colors.Info
+                    $matches = @()
+                    for ($i = 0; $i -lt $Content.Count; $i++) {
+                        if ($Content[$i] -match [regex]::Escape($searchTerm)) {
+                            $matches += "Line $($i+1): $($Content[$i])"
+                        }
+                    }
+                    if ($matches.Count -gt 0) {
+                        Write-Host "Found $($matches.Count) matches" -ForegroundColor $colors.Info
+                        Read-Host "Press Enter to view"
+                        Show-PagedContent -Content $matches -Title "Search Results: '$searchTerm'"
+                    } else {
+                        Write-Host "No matches found" -ForegroundColor $colors.High
+                        Start-Sleep -Seconds 2
+                    }
+                }
+            }
+            "E" {
+                $exportPath = Join-Path ([System.IO.Path]::GetTempPath()) "IR_Export_$(Get-Date -Format 'yyyyMMdd_HHmmss').txt"
+                $Content | Out-File $exportPath -Encoding UTF8
+                Write-Host "Exported to: $exportPath" -ForegroundColor $colors.Low
+                Start-Sleep -Seconds 2
+            }
+            "Q" { return }
+        }
+    }
+}
+
+# Main menu for incident data
+function Show-IncidentMenu {
+    param([string]$IncidentPath)
+    
+    while ($true) {
+        Show-Header "INCIDENT DATA BROWSER"
+        
+        # Display incident info
+        $incidentName = Split-Path $IncidentPath -Leaf
+        Write-Host "Incident: $incidentName" -ForegroundColor $colors.Info
+        Write-Host "Path: $IncidentPath" -ForegroundColor $colors.Data
+        
+        # Get summary info if available
+        $summaryPath = Join-Path $IncidentPath "SUMMARY.txt"
+        if (Test-Path $summaryPath) {
+            $summaryLines = Get-Content $summaryPath | Select-String "THREAT LEVEL:|TOTAL ALERTS:"
+            foreach ($line in $summaryLines) {
+                if ($line -match "THREAT LEVEL:") {
+                    $level = $line.Line.Split(":")[1].Trim()
+                    $color = switch ($level) {
+                        "CRITICAL" { $colors.Critical }
+                        "HIGH" { $colors.High }
+                        "MEDIUM" { $colors.Medium }
+                        "LOW" { $colors.Low }
+                        default { $colors.Data }
+                    }
+                    Write-Host $line.Line -ForegroundColor $color
+                }
+                else {
+                    Write-Host $line.Line -ForegroundColor $colors.Info
+                }
+            }
+        }
+        
+        Write-Host ""
+        Write-Host "MAIN MENU" -ForegroundColor $colors.Header
+        Write-Host "1. View Summary" -ForegroundColor $colors.Menu
+        Write-Host "2. View Alerts" -ForegroundColor $colors.Menu
+        Write-Host "3. Network Data" -ForegroundColor $colors.Menu
+        Write-Host "4. Process Data" -ForegroundColor $colors.Menu
+        Write-Host "5. Persistence Data" -ForegroundColor $colors.Menu
+        Write-Host "6. System Information" -ForegroundColor $colors.Menu
+        Write-Host "7. Event Logs" -ForegroundColor $colors.Menu
+        Write-Host "8. Browse All Files" -ForegroundColor $colors.Menu
+        Write-Host "9. Export All to Text" -ForegroundColor $colors.Menu
+        Write-Host "Q. Back to Directory Selection" -ForegroundColor $colors.Menu
+        Write-Host ""
+        
+        $choice = Read-Host "Select option"
+        
+        switch ($choice) {
+            "1" { Show-Summary -IncidentPath $IncidentPath }
+            "2" { Show-Alerts -IncidentPath $IncidentPath }
+            "3" { Show-NetworkData -IncidentPath $IncidentPath }
+            "4" { Show-ProcessData -IncidentPath $IncidentPath }
+            "5" { Show-PersistenceData -IncidentPath $IncidentPath }
+            "6" { Show-SystemInfo -IncidentPath $IncidentPath }
+            "7" { Show-EventLogs -IncidentPath $IncidentPath }
+            "8" { Browse-Files -IncidentPath $IncidentPath }
+            "9" { Export-AllData -IncidentPath $IncidentPath }
+            "Q" { return }
+            "q" { return }
+        }
+    }
+}
+
+# Show summary
+function Show-Summary {
+    param([string]$IncidentPath)
+    
+    $summaryFile = Join-Path $IncidentPath "SUMMARY.txt"
+    if (Test-Path $summaryFile) {
+        $content = Get-Content $summaryFile
+        Show-PagedContent -Content $content -Title "INCIDENT SUMMARY"
+    }
+    else {
+        Write-Host "Summary file not found" -ForegroundColor $colors.Critical
+        Read-Host "Press Enter to continue"
+    }
+}
+
+# Show alerts
+function Show-Alerts {
+    param([string]$IncidentPath)
+    
+    $alertsPath = Join-Path $IncidentPath "ALERTS"
+    if (!(Test-Path $alertsPath)) {
+        Write-Host "No alerts directory found" -ForegroundColor $colors.Info
+        Read-Host "Press Enter to continue"
+        return
+    }
+    
+    while ($true) {
+        Show-Header "ALERTS"
+        
+        $files = Get-ChildItem $alertsPath -File | Sort-Object Name
+        if ($files.Count -eq 0) {
+            Write-Host "No alert files found" -ForegroundColor $colors.Info
+            Read-Host "Press Enter to continue"
+            return
+        }
+        
+        Write-Host "Alert Files:" -ForegroundColor $colors.Header
+        for ($i = 0; $i -lt $files.Count; $i++) {
+            Write-Host ("{0,3}. {1}" -f ($i + 1), $files[$i].Name) -ForegroundColor $colors.High
+        }
+        
+        Write-Host ""
+        Write-Host "Enter file number to view or Q to go back: " -NoNewline
+        $choice = Read-Host
+        
+        if ($choice -match '^[Qq]') { return }
+        
+        if ($choice -match '^\d+$') {
+            $index = [int]$choice - 1
+            if ($index -ge 0 -and $index -lt $files.Count) {
+                $content = Show-FileContent -FilePath $files[$index].FullName
+                Show-PagedContent -Content $content -Title "ALERT: $($files[$index].Name)"
+            }
+        }
+    }
+}
+
+# Show network data
+function Show-NetworkData {
+    param([string]$IncidentPath)
+    
+    $networkPath = Join-Path $IncidentPath "Network"
+    if (!(Test-Path $networkPath)) {
+        Write-Host "No network data found" -ForegroundColor $colors.Info
+        Read-Host "Press Enter to continue"
+        return
+    }
+    
+    while ($true) {
+        Show-Header "NETWORK DATA"
+        
+        $files = Get-ChildItem $networkPath -File | Sort-Object Name
+        
+        Write-Host "Network Files:" -ForegroundColor $colors.Header
+        for ($i = 0; $i -lt $files.Count; $i++) {
+            Write-Host ("{0,3}. {1}" -f ($i + 1), $files[$i].Name) -ForegroundColor $colors.Menu
+        }
+        
+        Write-Host ""
+        Write-Host "Enter file number to view or Q to go back: " -NoNewline
+        $choice = Read-Host
+        
+        if ($choice -match '^[Qq]') { return }
+        
+        if ($choice -match '^\d+$') {
+            $index = [int]$choice - 1
+            if ($index -ge 0 -and $index -lt $files.Count) {
+                $content = Show-FileContent -FilePath $files[$index].FullName
+                Show-PagedContent -Content $content -Title "NETWORK: $($files[$index].Name)"
+            }
+        }
+    }
+}
+
+# Show process data
+function Show-ProcessData {
+    param([string]$IncidentPath)
+    
+    $processPath = Join-Path $IncidentPath "Processes"
+    $files = @()
+    
+    # Check both Processes folder and ALERTS for process files
+    if (Test-Path $processPath) {
+        $files += Get-ChildItem $processPath -File
+    }
+    
+    $alertsPath = Join-Path $IncidentPath "ALERTS"
+    if (Test-Path $alertsPath) {
+        $files += Get-ChildItem $alertsPath -Filter "*process*" -File
+        $files += Get-ChildItem $alertsPath -Filter "*pid*" -File
+    }
+    
+    if ($files.Count -eq 0) {
+        Write-Host "No process data found" -ForegroundColor $colors.Info
+        Read-Host "Press Enter to continue"
+        return
+    }
+    
+    while ($true) {
+        Show-Header "PROCESS DATA"
+        
+        Write-Host "Process Files:" -ForegroundColor $colors.Header
+        for ($i = 0; $i -lt $files.Count; $i++) {
+            $color = if ($files[$i].DirectoryName -match "ALERTS") { $colors.High } else { $colors.Menu }
+            Write-Host ("{0,3}. {1}" -f ($i + 1), $files[$i].Name) -ForegroundColor $color
+        }
+        
+        Write-Host ""
+        Write-Host "Enter file number to view or Q to go back: " -NoNewline
+        $choice = Read-Host
+        
+        if ($choice -match '^[Qq]') { return }
+        
+        if ($choice -match '^\d+$') {
+            $index = [int]$choice - 1
+            if ($index -ge 0 -and $index -lt $files.Count) {
+                $content = Show-FileContent -FilePath $files[$index].FullName
+                Show-PagedContent -Content $content -Title "PROCESS: $($files[$index].Name)"
+            }
+        }
+    }
+}
+
+# Show persistence data
+function Show-PersistenceData {
+    param([string]$IncidentPath)
+    
+    $persistPath = Join-Path $IncidentPath "Persistence"
+    $files = @()
+    
+    if (Test-Path $persistPath) {
+        $files += Get-ChildItem $persistPath -File
+    }
+    
+    # Also check ALERTS for persistence files
+    $alertsPath = Join-Path $IncidentPath "ALERTS"
+    if (Test-Path $alertsPath) {
+        $files += Get-ChildItem $alertsPath -Filter "*autorun*" -File
+        $files += Get-ChildItem $alertsPath -Filter "*service*" -File
+        $files += Get-ChildItem $alertsPath -Filter "*task*" -File
+    }
+    
+    if ($files.Count -eq 0) {
+        Write-Host "No persistence data found" -ForegroundColor $colors.Info
+        Read-Host "Press Enter to continue"
+        return
+    }
+    
+    while ($true) {
+        Show-Header "PERSISTENCE DATA"
+        
+        Write-Host "Persistence Files:" -ForegroundColor $colors.Header
+        for ($i = 0; $i -lt $files.Count; $i++) {
+            $color = if ($files[$i].DirectoryName -match "ALERTS") { $colors.High } else { $colors.Menu }
+            Write-Host ("{0,3}. {1}" -f ($i + 1), $files[$i].Name) -ForegroundColor $color
+        }
+        
+        Write-Host ""
+        Write-Host "Enter file number to view or Q to go back: " -NoNewline
+        $choice = Read-Host
+        
+        if ($choice -match '^[Qq]') { return }
+        
+        if ($choice -match '^\d+$') {
+            $index = [int]$choice - 1
+            if ($index -ge 0 -and $index -lt $files.Count) {
+                $content = Show-FileContent -FilePath $files[$index].FullName
+                Show-PagedContent -Content $content -Title "PERSISTENCE: $($files[$index].Name)"
+            }
+        }
+    }
+}
+
+# Show system info
+function Show-SystemInfo {
+    param([string]$IncidentPath)
+    
+    $systemPath = Join-Path $IncidentPath "System"
+    if (!(Test-Path $systemPath)) {
+        Write-Host "No system data found" -ForegroundColor $colors.Info
+        Read-Host "Press Enter to continue"
+        return
+    }
+    
+    while ($true) {
+        Show-Header "SYSTEM INFORMATION"
+        
+        $files = Get-ChildItem $systemPath -File | Sort-Object Name
+        
+        Write-Host "System Files:" -ForegroundColor $colors.Header
+        for ($i = 0; $i -lt $files.Count; $i++) {
+            Write-Host ("{0,3}. {1}" -f ($i + 1), $files[$i].Name) -ForegroundColor $colors.Menu
+        }
+        
+        Write-Host ""
+        Write-Host "Enter file number to view or Q to go back: " -NoNewline
+        $choice = Read-Host
+        
+        if ($choice -match '^[Qq]') { return }
+        
+        if ($choice -match '^\d+$') {
+            $index = [int]$choice - 1
+            if ($index -ge 0 -and $index -lt $files.Count) {
+                $content = Show-FileContent -FilePath $files[$index].FullName
+                Show-PagedContent -Content $content -Title "SYSTEM: $($files[$index].Name)"
+            }
+        }
+    }
+}
+
+# Show event logs
+function Show-EventLogs {
+    param([string]$IncidentPath)
+    
+    $logsPath = Join-Path $IncidentPath "Logs"
+    if (!(Test-Path $logsPath)) {
+        Write-Host "No event logs found" -ForegroundColor $colors.Info
+        Read-Host "Press Enter to continue"
+        return
+    }
+    
+    while ($true) {
+        Show-Header "EVENT LOGS"
+        
+        $files = Get-ChildItem $logsPath -File | Sort-Object Name
+        
+        Write-Host "Event Log Files:" -ForegroundColor $colors.Header
+        Write-Host "(Note: .evtx files can only be parsed on Windows systems)" -ForegroundColor $colors.Data
+        Write-Host ""
+        
+        for ($i = 0; $i -lt $files.Count; $i++) {
+            $color = if ($files[$i].Extension -eq ".evtx") { $colors.High } else { $colors.Menu }
+            Write-Host ("{0,3}. {1} ({2:N2} MB)" -f ($i + 1), $files[$i].Name, ($files[$i].Length/1MB)) -ForegroundColor $color
+        }
+        
+        Write-Host ""
+        Write-Host "Enter file number to view or Q to go back: " -NoNewline
+        $choice = Read-Host
+        
+        if ($choice -match '^[Qq]') { return }
+        
+        if ($choice -match '^\d+$') {
+            $index = [int]$choice - 1
+            if ($index -ge 0 -and $index -lt $files.Count) {
+                $content = Show-FileContent -FilePath $files[$index].FullName
+                Show-PagedContent -Content $content -Title "LOG: $($files[$index].Name)"
+            }
+        }
+    }
+}
+
+# Browse all files
+function Browse-Files {
+    param([string]$IncidentPath)
+    
+    Show-Header "FILE BROWSER"
+    
+    Write-Host "Building file list..." -ForegroundColor $colors.Info
+    $allFiles = Get-ChildItem $IncidentPath -Recurse -File | Sort-Object DirectoryName, Name
+    
+    $fileList = @()
+    $currentDir = ""
+    
+    foreach ($file in $allFiles) {
+        $relPath = $file.DirectoryName.Replace($IncidentPath, "").TrimStart("\")
+        
+        if ($relPath -ne $currentDir) {
+            $fileList += ""
+            $fileList += "[$relPath]"
+            $currentDir = $relPath
+        }
+        
+        $fileList += "  $($file.Name) ($([Math]::Round($file.Length/1KB, 2)) KB)"
+    }
+    
+    Show-PagedContent -Content $fileList -Title "ALL FILES ($($allFiles.Count) total)"
+}
+
+# Export all data to text
+function Export-AllData {
+    param([string]$IncidentPath)
+    
+    Show-Header "EXPORT ALL DATA"
+    
+    Write-Host "This will export all data to a single text file." -ForegroundColor $colors.Info
+    $confirm = Read-Host "Continue? (Y/N)"
+    
+    if ($confirm -ne 'Y' -and $confirm -ne 'y') { return }
+    
+    $exportFile = Join-Path $IncidentPath "Export_$(Get-Date -Format 'yyyyMMdd_HHmmss').txt"
+    $output = @()
+    
+    # Header
+    $output += "="*80
+    $output += "INCIDENT RESPONSE DATA EXPORT"
+    $output += "="*80
+    $output += "Generated: $(Get-Date)"
+    $output += "Incident: $(Split-Path $IncidentPath -Leaf)"
+    $output += "Path: $IncidentPath"
+    $output += "="*80
+    $output += ""
+    
+    Write-Host "Exporting data..." -ForegroundColor $colors.Info
+    
+    # Process each directory
+    $directories = @(
+        @{Name="SUMMARY"; Path="SUMMARY.txt"; Type="File"},
+        @{Name="ALERTS"; Path="ALERTS"; Type="Directory"},
+        @{Name="NETWORK"; Path="Network"; Type="Directory"},
+        @{Name="PROCESSES"; Path="Processes"; Type="Directory"},
+        @{Name="PERSISTENCE"; Path="Persistence"; Type="Directory"},
+        @{Name="SYSTEM"; Path="System"; Type="Directory"},
+        @{Name="LOGS"; Path="Logs"; Type="Directory"}
+    )
+    
+    foreach ($dir in $directories) {
+        Write-Host "  Exporting $($dir.Name)..." -ForegroundColor $colors.Data
+        
+        $fullPath = Join-Path $IncidentPath $dir.Path
+        
+        if (Test-Path $fullPath) {
+            $output += ""
+            $output += "="*80
+            $output += $dir.Name
+            $output += "="*80
+            
+            if ($dir.Type -eq "File") {
+                $output += Get-Content $fullPath
+            }
+            else {
+                $files = Get-ChildItem $fullPath -File | Sort-Object Name
+                foreach ($file in $files) {
+                    $output += ""
+                    $output += "-"*60
+                    $output += "FILE: $($file.Name)"
+                    $output += "-"*60
+                    
+                    $content = Show-FileContent -FilePath $file.FullName
+                    $output += $content
+                }
+            }
+        }
+    }
+    
+    # Save export
+    $output | Out-File $exportFile -Encoding UTF8
+    
+    Write-Host ""
+    Write-Host "Export complete!" -ForegroundColor $colors.Low
+    Write-Host "File saved to: $exportFile" -ForegroundColor $colors.Info
+    Write-Host "Size: $([Math]::Round((Get-Item $exportFile).Length/1MB, 2)) MB" -ForegroundColor $colors.Data
+    Write-Host ""
+    
+    $open = Read-Host "Open file now? (Y/N)"
+    if ($open -eq 'Y' -or $open -eq 'y') {
+        notepad.exe $exportFile
+    }
+    
+    Read-Host "Press Enter to continue"
+}
+
+# Main execution
+Show-Header
+
+Write-Host "This viewer displays data collected by the Incident Response Triage Script" -ForegroundColor $colors.Info
+Write-Host "No live data collection will be performed" -ForegroundColor $colors.Info
+Write-Host ""
+
+# Main loop
+while ($true) {
+    $incidentPath = $Path
+    
+    if (!$incidentPath -or !(Test-Path $incidentPath)) {
+        $incidentPath = Select-IncidentDirectory
+    }
+    
+    if (!$incidentPath) {
+        Write-Host "Exiting..." -ForegroundColor $colors.Info
+        break
+    }
+    
+    Show-IncidentMenu -IncidentPath $incidentPath
+    
+    # Reset path to show selection menu again
+    $Path = ""
+}
+
+Write-Host ""
+Write-Host "Thank you for using IR Data Viewer" -ForegroundColor $colors.Info) {
+                    Get-WinEvent -Path $FilePath -MaxEvents ([int]$maxEvents) -ErrorAction Stop
+                } else {
+                    Get-WinEvent -Path $FilePath -MaxEvents 100 -ErrorAction Stop
+                }
+            }
+            default { Get-WinEvent -Path $FilePath -MaxEvents 100 -ErrorAction Stop }
+        }
+        
+        Write-Host "Processing $($events.Count) events..." -ForegroundColor $colors.Info
+        
+        $output = @()
+        $output += "Event Log: $(Split-Path $FilePath -Leaf)"
+        $output += "Total Events Loaded: $($events.Count)"
+        $output += ("=" * 60)
+        $output += ""
+        
+        # Add filter option
+        Write-Host "Filter events? (Y/N)" -NoNewline -ForegroundColor $colors.Info
+        $filter = Read-Host
+        
+        if ($filter -eq 'Y' -or $filter -eq 'y') {
+            Write-Host "Filter by:" -ForegroundColor $colors.Menu
+            Write-Host "1. Error/Critical only" -ForegroundColor $colors.Menu
+            Write-Host "2. Specific Event ID" -ForegroundColor $colors.Menu
+            Write-Host "3. Time range" -ForegroundColor $colors.Menu
+            Write-Host "4. No filter" -ForegroundColor $colors.Menu
+            
+            $filterChoice = Read-Host "Select filter (1-4)"
+            
+            $events = switch ($filterChoice) {
+                "1" { $events | Where-Object { $_.Level -le 2 } }
+                "2" {
+                    $eventId = Read-Host "Enter Event ID"
+                    if ($eventId -match '^\d+
+
+# Display file content based on type
+function Show-FileContent {
+    param([string]$FilePath)
+    
+    if (!(Test-Path $FilePath)) {
+        return @("File not found: $FilePath")
+    }
+    
+    $extension = [System.IO.Path]::GetExtension($FilePath).ToLower()
+    
+    switch ($extension) {
+        ".csv" { return Show-CsvFile -FilePath $FilePath }
+        ".json" { return Show-JsonFile -FilePath $FilePath }
+        ".evtx" { return Show-EventLog -FilePath $FilePath }
+        ".txt" { return Get-Content $FilePath }
+        ".log" { return Get-Content $FilePath }
+        default { return @("Cannot display file type: $extension") }
+    }
+}
+
+# Paged display
+function Show-PagedContent {
+    param(
+        [array]$Content,
+        [string]$Title
+    )
+    
+    if ($Content.Count -eq 0) {
+        Write-Host "No content to display" -ForegroundColor $colors.Info
+        Read-Host "Press Enter to continue"
+        return
+    }
+    
+    $totalPages = [Math]::Ceiling($Content.Count / $PageSize)
+    $currentPage = 0
+    
+    while ($true) {
+        Show-Header $Title
+        
+        $startIdx = $currentPage * $PageSize
+        $endIdx = [Math]::Min($startIdx + $PageSize, $Content.Count)
+        
+        # Display page content
+        for ($i = $startIdx; $i -lt $endIdx; $i++) {
+            $line = $Content[$i]
+            
+            # Color coding based on content
+            if ($line -match "CRITICAL|ERROR|FAIL") {
+                Write-Host $line -ForegroundColor $colors.Critical
+            }
+            elseif ($line -match "WARNING|ALERT|SUSPICIOUS") {
+                Write-Host $line -ForegroundColor $colors.High
+            }
+            elseif ($line -match "SUCCESS|PASS") {
+                Write-Host $line -ForegroundColor $colors.Low
+            }
+            else {
+                Write-Host $line -ForegroundColor $colors.Data
+            }
+        }
+        
+        # Navigation
+        Write-Host ""
+        Write-Host ("-" * 80) -ForegroundColor $colors.Menu
+        Write-Host "Page $($currentPage + 1) of $totalPages | Showing items $($startIdx + 1)-$endIdx of $($Content.Count)" -ForegroundColor $colors.Info
+        Write-Host "[N]ext [P]revious [F]irst [L]ast [Q]uit: " -NoNewline -ForegroundColor $colors.Menu
+        
+        $key = Read-Host
+        
+        switch ($key.ToUpper()) {
+            "N" { if ($currentPage -lt $totalPages - 1) { $currentPage++ } }
+            "P" { if ($currentPage -gt 0) { $currentPage-- } }
+            "F" { $currentPage = 0 }
+            "L" { $currentPage = $totalPages - 1 }
+            "Q" { return }
+        }
+    }
+}
+
+# Main menu for incident data
+function Show-IncidentMenu {
+    param([string]$IncidentPath)
+    
+    while ($true) {
+        Show-Header "INCIDENT DATA BROWSER"
+        
+        # Display incident info
+        $incidentName = Split-Path $IncidentPath -Leaf
+        Write-Host "Incident: $incidentName" -ForegroundColor $colors.Info
+        Write-Host "Path: $IncidentPath" -ForegroundColor $colors.Data
+        
+        # Get summary info if available
+        $summaryPath = Join-Path $IncidentPath "SUMMARY.txt"
+        if (Test-Path $summaryPath) {
+            $summaryLines = Get-Content $summaryPath | Select-String "THREAT LEVEL:|TOTAL ALERTS:"
+            foreach ($line in $summaryLines) {
+                if ($line -match "THREAT LEVEL:") {
+                    $level = $line.Line.Split(":")[1].Trim()
+                    $color = switch ($level) {
+                        "CRITICAL" { $colors.Critical }
+                        "HIGH" { $colors.High }
+                        "MEDIUM" { $colors.Medium }
+                        "LOW" { $colors.Low }
+                        default { $colors.Data }
+                    }
+                    Write-Host $line.Line -ForegroundColor $color
+                }
+                else {
+                    Write-Host $line.Line -ForegroundColor $colors.Info
+                }
+            }
+        }
+        
+        Write-Host ""
+        Write-Host "MAIN MENU" -ForegroundColor $colors.Header
+        Write-Host "1. View Summary" -ForegroundColor $colors.Menu
+        Write-Host "2. View Alerts" -ForegroundColor $colors.Menu
+        Write-Host "3. Network Data" -ForegroundColor $colors.Menu
+        Write-Host "4. Process Data" -ForegroundColor $colors.Menu
+        Write-Host "5. Persistence Data" -ForegroundColor $colors.Menu
+        Write-Host "6. System Information" -ForegroundColor $colors.Menu
+        Write-Host "7. Event Logs" -ForegroundColor $colors.Menu
+        Write-Host "8. Browse All Files" -ForegroundColor $colors.Menu
+        Write-Host "9. Export All to Text" -ForegroundColor $colors.Menu
+        Write-Host "Q. Back to Directory Selection" -ForegroundColor $colors.Menu
+        Write-Host ""
+        
+        $choice = Read-Host "Select option"
+        
+        switch ($choice) {
+            "1" { Show-Summary -IncidentPath $IncidentPath }
+            "2" { Show-Alerts -IncidentPath $IncidentPath }
+            "3" { Show-NetworkData -IncidentPath $IncidentPath }
+            "4" { Show-ProcessData -IncidentPath $IncidentPath }
+            "5" { Show-PersistenceData -IncidentPath $IncidentPath }
+            "6" { Show-SystemInfo -IncidentPath $IncidentPath }
+            "7" { Show-EventLogs -IncidentPath $IncidentPath }
+            "8" { Browse-Files -IncidentPath $IncidentPath }
+            "9" { Export-AllData -IncidentPath $IncidentPath }
+            "Q" { return }
+            "q" { return }
+        }
+    }
+}
+
+# Show summary
+function Show-Summary {
+    param([string]$IncidentPath)
+    
+    $summaryFile = Join-Path $IncidentPath "SUMMARY.txt"
+    if (Test-Path $summaryFile) {
+        $content = Get-Content $summaryFile
+        Show-PagedContent -Content $content -Title "INCIDENT SUMMARY"
+    }
+    else {
+        Write-Host "Summary file not found" -ForegroundColor $colors.Critical
+        Read-Host "Press Enter to continue"
+    }
+}
+
+# Show alerts
+function Show-Alerts {
+    param([string]$IncidentPath)
+    
+    $alertsPath = Join-Path $IncidentPath "ALERTS"
+    if (!(Test-Path $alertsPath)) {
+        Write-Host "No alerts directory found" -ForegroundColor $colors.Info
+        Read-Host "Press Enter to continue"
+        return
+    }
+    
+    while ($true) {
+        Show-Header "ALERTS"
+        
+        $files = Get-ChildItem $alertsPath -File | Sort-Object Name
+        if ($files.Count -eq 0) {
+            Write-Host "No alert files found" -ForegroundColor $colors.Info
+            Read-Host "Press Enter to continue"
+            return
+        }
+        
+        Write-Host "Alert Files:" -ForegroundColor $colors.Header
+        for ($i = 0; $i -lt $files.Count; $i++) {
+            Write-Host ("{0,3}. {1}" -f ($i + 1), $files[$i].Name) -ForegroundColor $colors.High
+        }
+        
+        Write-Host ""
+        Write-Host "Enter file number to view or Q to go back: " -NoNewline
+        $choice = Read-Host
+        
+        if ($choice -match '^[Qq]') { return }
+        
+        if ($choice -match '^\d+$') {
+            $index = [int]$choice - 1
+            if ($index -ge 0 -and $index -lt $files.Count) {
+                $content = Show-FileContent -FilePath $files[$index].FullName
+                Show-PagedContent -Content $content -Title "ALERT: $($files[$index].Name)"
+            }
+        }
+    }
+}
+
+# Show network data
+function Show-NetworkData {
+    param([string]$IncidentPath)
+    
+    $networkPath = Join-Path $IncidentPath "Network"
+    if (!(Test-Path $networkPath)) {
+        Write-Host "No network data found" -ForegroundColor $colors.Info
+        Read-Host "Press Enter to continue"
+        return
+    }
+    
+    while ($true) {
+        Show-Header "NETWORK DATA"
+        
+        $files = Get-ChildItem $networkPath -File | Sort-Object Name
+        
+        Write-Host "Network Files:" -ForegroundColor $colors.Header
+        for ($i = 0; $i -lt $files.Count; $i++) {
+            Write-Host ("{0,3}. {1}" -f ($i + 1), $files[$i].Name) -ForegroundColor $colors.Menu
+        }
+        
+        Write-Host ""
+        Write-Host "Enter file number to view or Q to go back: " -NoNewline
+        $choice = Read-Host
+        
+        if ($choice -match '^[Qq]') { return }
+        
+        if ($choice -match '^\d+$') {
+            $index = [int]$choice - 1
+            if ($index -ge 0 -and $index -lt $files.Count) {
+                $content = Show-FileContent -FilePath $files[$index].FullName
+                Show-PagedContent -Content $content -Title "NETWORK: $($files[$index].Name)"
+            }
+        }
+    }
+}
+
+# Show process data
+function Show-ProcessData {
+    param([string]$IncidentPath)
+    
+    $processPath = Join-Path $IncidentPath "Processes"
+    $files = @()
+    
+    # Check both Processes folder and ALERTS for process files
+    if (Test-Path $processPath) {
+        $files += Get-ChildItem $processPath -File
+    }
+    
+    $alertsPath = Join-Path $IncidentPath "ALERTS"
+    if (Test-Path $alertsPath) {
+        $files += Get-ChildItem $alertsPath -Filter "*process*" -File
+        $files += Get-ChildItem $alertsPath -Filter "*pid*" -File
+    }
+    
+    if ($files.Count -eq 0) {
+        Write-Host "No process data found" -ForegroundColor $colors.Info
+        Read-Host "Press Enter to continue"
+        return
+    }
+    
+    while ($true) {
+        Show-Header "PROCESS DATA"
+        
+        Write-Host "Process Files:" -ForegroundColor $colors.Header
+        for ($i = 0; $i -lt $files.Count; $i++) {
+            $color = if ($files[$i].DirectoryName -match "ALERTS") { $colors.High } else { $colors.Menu }
+            Write-Host ("{0,3}. {1}" -f ($i + 1), $files[$i].Name) -ForegroundColor $color
+        }
+        
+        Write-Host ""
+        Write-Host "Enter file number to view or Q to go back: " -NoNewline
+        $choice = Read-Host
+        
+        if ($choice -match '^[Qq]') { return }
+        
+        if ($choice -match '^\d+$') {
+            $index = [int]$choice - 1
+            if ($index -ge 0 -and $index -lt $files.Count) {
+                $content = Show-FileContent -FilePath $files[$index].FullName
+                Show-PagedContent -Content $content -Title "PROCESS: $($files[$index].Name)"
+            }
+        }
+    }
+}
+
+# Show persistence data
+function Show-PersistenceData {
+    param([string]$IncidentPath)
+    
+    $persistPath = Join-Path $IncidentPath "Persistence"
+    $files = @()
+    
+    if (Test-Path $persistPath) {
+        $files += Get-ChildItem $persistPath -File
+    }
+    
+    # Also check ALERTS for persistence files
+    $alertsPath = Join-Path $IncidentPath "ALERTS"
+    if (Test-Path $alertsPath) {
+        $files += Get-ChildItem $alertsPath -Filter "*autorun*" -File
+        $files += Get-ChildItem $alertsPath -Filter "*service*" -File
+        $files += Get-ChildItem $alertsPath -Filter "*task*" -File
+    }
+    
+    if ($files.Count -eq 0) {
+        Write-Host "No persistence data found" -ForegroundColor $colors.Info
+        Read-Host "Press Enter to continue"
+        return
+    }
+    
+    while ($true) {
+        Show-Header "PERSISTENCE DATA"
+        
+        Write-Host "Persistence Files:" -ForegroundColor $colors.Header
+        for ($i = 0; $i -lt $files.Count; $i++) {
+            $color = if ($files[$i].DirectoryName -match "ALERTS") { $colors.High } else { $colors.Menu }
+            Write-Host ("{0,3}. {1}" -f ($i + 1), $files[$i].Name) -ForegroundColor $color
+        }
+        
+        Write-Host ""
+        Write-Host "Enter file number to view or Q to go back: " -NoNewline
+        $choice = Read-Host
+        
+        if ($choice -match '^[Qq]') { return }
+        
+        if ($choice -match '^\d+$') {
+            $index = [int]$choice - 1
+            if ($index -ge 0 -and $index -lt $files.Count) {
+                $content = Show-FileContent -FilePath $files[$index].FullName
+                Show-PagedContent -Content $content -Title "PERSISTENCE: $($files[$index].Name)"
+            }
+        }
+    }
+}
+
+# Show system info
+function Show-SystemInfo {
+    param([string]$IncidentPath)
+    
+    $systemPath = Join-Path $IncidentPath "System"
+    if (!(Test-Path $systemPath)) {
+        Write-Host "No system data found" -ForegroundColor $colors.Info
+        Read-Host "Press Enter to continue"
+        return
+    }
+    
+    while ($true) {
+        Show-Header "SYSTEM INFORMATION"
+        
+        $files = Get-ChildItem $systemPath -File | Sort-Object Name
+        
+        Write-Host "System Files:" -ForegroundColor $colors.Header
+        for ($i = 0; $i -lt $files.Count; $i++) {
+            Write-Host ("{0,3}. {1}" -f ($i + 1), $files[$i].Name) -ForegroundColor $colors.Menu
+        }
+        
+        Write-Host ""
+        Write-Host "Enter file number to view or Q to go back: " -NoNewline
+        $choice = Read-Host
+        
+        if ($choice -match '^[Qq]') { return }
+        
+        if ($choice -match '^\d+$') {
+            $index = [int]$choice - 1
+            if ($index -ge 0 -and $index -lt $files.Count) {
+                $content = Show-FileContent -FilePath $files[$index].FullName
+                Show-PagedContent -Content $content -Title "SYSTEM: $($files[$index].Name)"
+            }
+        }
+    }
+}
+
+# Show event logs
+function Show-EventLogs {
+    param([string]$IncidentPath)
+    
+    $logsPath = Join-Path $IncidentPath "Logs"
+    if (!(Test-Path $logsPath)) {
+        Write-Host "No event logs found" -ForegroundColor $colors.Info
+        Read-Host "Press Enter to continue"
+        return
+    }
+    
+    while ($true) {
+        Show-Header "EVENT LOGS"
+        
+        $files = Get-ChildItem $logsPath -File | Sort-Object Name
+        
+        Write-Host "Event Log Files:" -ForegroundColor $colors.Header
+        Write-Host "(Note: .evtx files can only be parsed on Windows systems)" -ForegroundColor $colors.Data
+        Write-Host ""
+        
+        for ($i = 0; $i -lt $files.Count; $i++) {
+            $color = if ($files[$i].Extension -eq ".evtx") { $colors.High } else { $colors.Menu }
+            Write-Host ("{0,3}. {1} ({2:N2} MB)" -f ($i + 1), $files[$i].Name, ($files[$i].Length/1MB)) -ForegroundColor $color
+        }
+        
+        Write-Host ""
+        Write-Host "Enter file number to view or Q to go back: " -NoNewline
+        $choice = Read-Host
+        
+        if ($choice -match '^[Qq]') { return }
+        
+        if ($choice -match '^\d+$') {
+            $index = [int]$choice - 1
+            if ($index -ge 0 -and $index -lt $files.Count) {
+                $content = Show-FileContent -FilePath $files[$index].FullName
+                Show-PagedContent -Content $content -Title "LOG: $($files[$index].Name)"
+            }
+        }
+    }
+}
+
+# Browse all files
+function Browse-Files {
+    param([string]$IncidentPath)
+    
+    Show-Header "FILE BROWSER"
+    
+    Write-Host "Building file list..." -ForegroundColor $colors.Info
+    $allFiles = Get-ChildItem $IncidentPath -Recurse -File | Sort-Object DirectoryName, Name
+    
+    $fileList = @()
+    $currentDir = ""
+    
+    foreach ($file in $allFiles) {
+        $relPath = $file.DirectoryName.Replace($IncidentPath, "").TrimStart("\")
+        
+        if ($relPath -ne $currentDir) {
+            $fileList += ""
+            $fileList += "[$relPath]"
+            $currentDir = $relPath
+        }
+        
+        $fileList += "  $($file.Name) ($([Math]::Round($file.Length/1KB, 2)) KB)"
+    }
+    
+    Show-PagedContent -Content $fileList -Title "ALL FILES ($($allFiles.Count) total)"
+}
+
+# Export all data to text
+function Export-AllData {
+    param([string]$IncidentPath)
+    
+    Show-Header "EXPORT ALL DATA"
+    
+    Write-Host "This will export all data to a single text file." -ForegroundColor $colors.Info
+    $confirm = Read-Host "Continue? (Y/N)"
+    
+    if ($confirm -ne 'Y' -and $confirm -ne 'y') { return }
+    
+    $exportFile = Join-Path $IncidentPath "Export_$(Get-Date -Format 'yyyyMMdd_HHmmss').txt"
+    $output = @()
+    
+    # Header
+    $output += "="*80
+    $output += "INCIDENT RESPONSE DATA EXPORT"
+    $output += "="*80
+    $output += "Generated: $(Get-Date)"
+    $output += "Incident: $(Split-Path $IncidentPath -Leaf)"
+    $output += "Path: $IncidentPath"
+    $output += "="*80
+    $output += ""
+    
+    Write-Host "Exporting data..." -ForegroundColor $colors.Info
+    
+    # Process each directory
+    $directories = @(
+        @{Name="SUMMARY"; Path="SUMMARY.txt"; Type="File"},
+        @{Name="ALERTS"; Path="ALERTS"; Type="Directory"},
+        @{Name="NETWORK"; Path="Network"; Type="Directory"},
+        @{Name="PROCESSES"; Path="Processes"; Type="Directory"},
+        @{Name="PERSISTENCE"; Path="Persistence"; Type="Directory"},
+        @{Name="SYSTEM"; Path="System"; Type="Directory"},
+        @{Name="LOGS"; Path="Logs"; Type="Directory"}
+    )
+    
+    foreach ($dir in $directories) {
+        Write-Host "  Exporting $($dir.Name)..." -ForegroundColor $colors.Data
+        
+        $fullPath = Join-Path $IncidentPath $dir.Path
+        
+        if (Test-Path $fullPath) {
+            $output += ""
+            $output += "="*80
+            $output += $dir.Name
+            $output += "="*80
+            
+            if ($dir.Type -eq "File") {
+                $output += Get-Content $fullPath
+            }
+            else {
+                $files = Get-ChildItem $fullPath -File | Sort-Object Name
+                foreach ($file in $files) {
+                    $output += ""
+                    $output += "-"*60
+                    $output += "FILE: $($file.Name)"
+                    $output += "-"*60
+                    
+                    $content = Show-FileContent -FilePath $file.FullName
+                    $output += $content
+                }
+            }
+        }
+    }
+    
+    # Save export
+    $output | Out-File $exportFile -Encoding UTF8
+    
+    Write-Host ""
+    Write-Host "Export complete!" -ForegroundColor $colors.Low
+    Write-Host "File saved to: $exportFile" -ForegroundColor $colors.Info
+    Write-Host "Size: $([Math]::Round((Get-Item $exportFile).Length/1MB, 2)) MB" -ForegroundColor $colors.Data
+    Write-Host ""
+    
+    $open = Read-Host "Open file now? (Y/N)"
+    if ($open -eq 'Y' -or $open -eq 'y') {
+        notepad.exe $exportFile
+    }
+    
+    Read-Host "Press Enter to continue"
+}
+
+# Main execution
+Show-Header
+
+Write-Host "This viewer displays data collected by the Incident Response Triage Script" -ForegroundColor $colors.Info
+Write-Host "No live data collection will be performed" -ForegroundColor $colors.Info
+Write-Host ""
+
+# Main loop
+while ($true) {
+    $incidentPath = $Path
+    
+    if (!$incidentPath -or !(Test-Path $incidentPath)) {
+        $incidentPath = Select-IncidentDirectory
+    }
+    
+    if (!$incidentPath) {
+        Write-Host "Exiting..." -ForegroundColor $colors.Info
+        break
+    }
+    
+    Show-IncidentMenu -IncidentPath $incidentPath
+    
+    # Reset path to show selection menu again
+    $Path = ""
+}
+
+Write-Host ""
+Write-Host "Thank you for using IR Data Viewer" -ForegroundColor $colors.Info) {
+                        $events | Where-Object { $_.Id -eq [int]$eventId }
+                    } else { $events }
+                }
+                "3" {
+                    $hours = Read-Host "Events from last X hours"
+                    if ($hours -match '^\d+
+
+# Display file content based on type
+function Show-FileContent {
+    param([string]$FilePath)
+    
+    if (!(Test-Path $FilePath)) {
+        return @("File not found: $FilePath")
+    }
+    
+    $extension = [System.IO.Path]::GetExtension($FilePath).ToLower()
+    
+    switch ($extension) {
+        ".csv" { return Show-CsvFile -FilePath $FilePath }
+        ".json" { return Show-JsonFile -FilePath $FilePath }
+        ".evtx" { return Show-EventLog -FilePath $FilePath }
+        ".txt" { return Get-Content $FilePath }
+        ".log" { return Get-Content $FilePath }
+        default { return @("Cannot display file type: $extension") }
+    }
+}
+
+# Paged display
+function Show-PagedContent {
+    param(
+        [array]$Content,
+        [string]$Title
+    )
+    
+    if ($Content.Count -eq 0) {
+        Write-Host "No content to display" -ForegroundColor $colors.Info
+        Read-Host "Press Enter to continue"
+        return
+    }
+    
+    $totalPages = [Math]::Ceiling($Content.Count / $PageSize)
+    $currentPage = 0
+    
+    while ($true) {
+        Show-Header $Title
+        
+        $startIdx = $currentPage * $PageSize
+        $endIdx = [Math]::Min($startIdx + $PageSize, $Content.Count)
+        
+        # Display page content
+        for ($i = $startIdx; $i -lt $endIdx; $i++) {
+            $line = $Content[$i]
+            
+            # Color coding based on content
+            if ($line -match "CRITICAL|ERROR|FAIL") {
+                Write-Host $line -ForegroundColor $colors.Critical
+            }
+            elseif ($line -match "WARNING|ALERT|SUSPICIOUS") {
+                Write-Host $line -ForegroundColor $colors.High
+            }
+            elseif ($line -match "SUCCESS|PASS") {
+                Write-Host $line -ForegroundColor $colors.Low
+            }
+            else {
+                Write-Host $line -ForegroundColor $colors.Data
+            }
+        }
+        
+        # Navigation
+        Write-Host ""
+        Write-Host ("-" * 80) -ForegroundColor $colors.Menu
+        Write-Host "Page $($currentPage + 1) of $totalPages | Showing items $($startIdx + 1)-$endIdx of $($Content.Count)" -ForegroundColor $colors.Info
+        Write-Host "[N]ext [P]revious [F]irst [L]ast [Q]uit: " -NoNewline -ForegroundColor $colors.Menu
+        
+        $key = Read-Host
+        
+        switch ($key.ToUpper()) {
+            "N" { if ($currentPage -lt $totalPages - 1) { $currentPage++ } }
+            "P" { if ($currentPage -gt 0) { $currentPage-- } }
+            "F" { $currentPage = 0 }
+            "L" { $currentPage = $totalPages - 1 }
+            "Q" { return }
+        }
+    }
+}
+
+# Main menu for incident data
+function Show-IncidentMenu {
+    param([string]$IncidentPath)
+    
+    while ($true) {
+        Show-Header "INCIDENT DATA BROWSER"
+        
+        # Display incident info
+        $incidentName = Split-Path $IncidentPath -Leaf
+        Write-Host "Incident: $incidentName" -ForegroundColor $colors.Info
+        Write-Host "Path: $IncidentPath" -ForegroundColor $colors.Data
+        
+        # Get summary info if available
+        $summaryPath = Join-Path $IncidentPath "SUMMARY.txt"
+        if (Test-Path $summaryPath) {
+            $summaryLines = Get-Content $summaryPath | Select-String "THREAT LEVEL:|TOTAL ALERTS:"
+            foreach ($line in $summaryLines) {
+                if ($line -match "THREAT LEVEL:") {
+                    $level = $line.Line.Split(":")[1].Trim()
+                    $color = switch ($level) {
+                        "CRITICAL" { $colors.Critical }
+                        "HIGH" { $colors.High }
+                        "MEDIUM" { $colors.Medium }
+                        "LOW" { $colors.Low }
+                        default { $colors.Data }
+                    }
+                    Write-Host $line.Line -ForegroundColor $color
+                }
+                else {
+                    Write-Host $line.Line -ForegroundColor $colors.Info
+                }
+            }
+        }
+        
+        Write-Host ""
+        Write-Host "MAIN MENU" -ForegroundColor $colors.Header
+        Write-Host "1. View Summary" -ForegroundColor $colors.Menu
+        Write-Host "2. View Alerts" -ForegroundColor $colors.Menu
+        Write-Host "3. Network Data" -ForegroundColor $colors.Menu
+        Write-Host "4. Process Data" -ForegroundColor $colors.Menu
+        Write-Host "5. Persistence Data" -ForegroundColor $colors.Menu
+        Write-Host "6. System Information" -ForegroundColor $colors.Menu
+        Write-Host "7. Event Logs" -ForegroundColor $colors.Menu
+        Write-Host "8. Browse All Files" -ForegroundColor $colors.Menu
+        Write-Host "9. Export All to Text" -ForegroundColor $colors.Menu
+        Write-Host "Q. Back to Directory Selection" -ForegroundColor $colors.Menu
+        Write-Host ""
+        
+        $choice = Read-Host "Select option"
+        
+        switch ($choice) {
+            "1" { Show-Summary -IncidentPath $IncidentPath }
+            "2" { Show-Alerts -IncidentPath $IncidentPath }
+            "3" { Show-NetworkData -IncidentPath $IncidentPath }
+            "4" { Show-ProcessData -IncidentPath $IncidentPath }
+            "5" { Show-PersistenceData -IncidentPath $IncidentPath }
+            "6" { Show-SystemInfo -IncidentPath $IncidentPath }
+            "7" { Show-EventLogs -IncidentPath $IncidentPath }
+            "8" { Browse-Files -IncidentPath $IncidentPath }
+            "9" { Export-AllData -IncidentPath $IncidentPath }
+            "Q" { return }
+            "q" { return }
+        }
+    }
+}
+
+# Show summary
+function Show-Summary {
+    param([string]$IncidentPath)
+    
+    $summaryFile = Join-Path $IncidentPath "SUMMARY.txt"
+    if (Test-Path $summaryFile) {
+        $content = Get-Content $summaryFile
+        Show-PagedContent -Content $content -Title "INCIDENT SUMMARY"
+    }
+    else {
+        Write-Host "Summary file not found" -ForegroundColor $colors.Critical
+        Read-Host "Press Enter to continue"
+    }
+}
+
+# Show alerts
+function Show-Alerts {
+    param([string]$IncidentPath)
+    
+    $alertsPath = Join-Path $IncidentPath "ALERTS"
+    if (!(Test-Path $alertsPath)) {
+        Write-Host "No alerts directory found" -ForegroundColor $colors.Info
+        Read-Host "Press Enter to continue"
+        return
+    }
+    
+    while ($true) {
+        Show-Header "ALERTS"
+        
+        $files = Get-ChildItem $alertsPath -File | Sort-Object Name
+        if ($files.Count -eq 0) {
+            Write-Host "No alert files found" -ForegroundColor $colors.Info
+            Read-Host "Press Enter to continue"
+            return
+        }
+        
+        Write-Host "Alert Files:" -ForegroundColor $colors.Header
+        for ($i = 0; $i -lt $files.Count; $i++) {
+            Write-Host ("{0,3}. {1}" -f ($i + 1), $files[$i].Name) -ForegroundColor $colors.High
+        }
+        
+        Write-Host ""
+        Write-Host "Enter file number to view or Q to go back: " -NoNewline
+        $choice = Read-Host
+        
+        if ($choice -match '^[Qq]') { return }
+        
+        if ($choice -match '^\d+$') {
+            $index = [int]$choice - 1
+            if ($index -ge 0 -and $index -lt $files.Count) {
+                $content = Show-FileContent -FilePath $files[$index].FullName
+                Show-PagedContent -Content $content -Title "ALERT: $($files[$index].Name)"
+            }
+        }
+    }
+}
+
+# Show network data
+function Show-NetworkData {
+    param([string]$IncidentPath)
+    
+    $networkPath = Join-Path $IncidentPath "Network"
+    if (!(Test-Path $networkPath)) {
+        Write-Host "No network data found" -ForegroundColor $colors.Info
+        Read-Host "Press Enter to continue"
+        return
+    }
+    
+    while ($true) {
+        Show-Header "NETWORK DATA"
+        
+        $files = Get-ChildItem $networkPath -File | Sort-Object Name
+        
+        Write-Host "Network Files:" -ForegroundColor $colors.Header
+        for ($i = 0; $i -lt $files.Count; $i++) {
+            Write-Host ("{0,3}. {1}" -f ($i + 1), $files[$i].Name) -ForegroundColor $colors.Menu
+        }
+        
+        Write-Host ""
+        Write-Host "Enter file number to view or Q to go back: " -NoNewline
+        $choice = Read-Host
+        
+        if ($choice -match '^[Qq]') { return }
+        
+        if ($choice -match '^\d+$') {
+            $index = [int]$choice - 1
+            if ($index -ge 0 -and $index -lt $files.Count) {
+                $content = Show-FileContent -FilePath $files[$index].FullName
+                Show-PagedContent -Content $content -Title "NETWORK: $($files[$index].Name)"
+            }
+        }
+    }
+}
+
+# Show process data
+function Show-ProcessData {
+    param([string]$IncidentPath)
+    
+    $processPath = Join-Path $IncidentPath "Processes"
+    $files = @()
+    
+    # Check both Processes folder and ALERTS for process files
+    if (Test-Path $processPath) {
+        $files += Get-ChildItem $processPath -File
+    }
+    
+    $alertsPath = Join-Path $IncidentPath "ALERTS"
+    if (Test-Path $alertsPath) {
+        $files += Get-ChildItem $alertsPath -Filter "*process*" -File
+        $files += Get-ChildItem $alertsPath -Filter "*pid*" -File
+    }
+    
+    if ($files.Count -eq 0) {
+        Write-Host "No process data found" -ForegroundColor $colors.Info
+        Read-Host "Press Enter to continue"
+        return
+    }
+    
+    while ($true) {
+        Show-Header "PROCESS DATA"
+        
+        Write-Host "Process Files:" -ForegroundColor $colors.Header
+        for ($i = 0; $i -lt $files.Count; $i++) {
+            $color = if ($files[$i].DirectoryName -match "ALERTS") { $colors.High } else { $colors.Menu }
+            Write-Host ("{0,3}. {1}" -f ($i + 1), $files[$i].Name) -ForegroundColor $color
+        }
+        
+        Write-Host ""
+        Write-Host "Enter file number to view or Q to go back: " -NoNewline
+        $choice = Read-Host
+        
+        if ($choice -match '^[Qq]') { return }
+        
+        if ($choice -match '^\d+$') {
+            $index = [int]$choice - 1
+            if ($index -ge 0 -and $index -lt $files.Count) {
+                $content = Show-FileContent -FilePath $files[$index].FullName
+                Show-PagedContent -Content $content -Title "PROCESS: $($files[$index].Name)"
+            }
+        }
+    }
+}
+
+# Show persistence data
+function Show-PersistenceData {
+    param([string]$IncidentPath)
+    
+    $persistPath = Join-Path $IncidentPath "Persistence"
+    $files = @()
+    
+    if (Test-Path $persistPath) {
+        $files += Get-ChildItem $persistPath -File
+    }
+    
+    # Also check ALERTS for persistence files
+    $alertsPath = Join-Path $IncidentPath "ALERTS"
+    if (Test-Path $alertsPath) {
+        $files += Get-ChildItem $alertsPath -Filter "*autorun*" -File
+        $files += Get-ChildItem $alertsPath -Filter "*service*" -File
+        $files += Get-ChildItem $alertsPath -Filter "*task*" -File
+    }
+    
+    if ($files.Count -eq 0) {
+        Write-Host "No persistence data found" -ForegroundColor $colors.Info
+        Read-Host "Press Enter to continue"
+        return
+    }
+    
+    while ($true) {
+        Show-Header "PERSISTENCE DATA"
+        
+        Write-Host "Persistence Files:" -ForegroundColor $colors.Header
+        for ($i = 0; $i -lt $files.Count; $i++) {
+            $color = if ($files[$i].DirectoryName -match "ALERTS") { $colors.High } else { $colors.Menu }
+            Write-Host ("{0,3}. {1}" -f ($i + 1), $files[$i].Name) -ForegroundColor $color
+        }
+        
+        Write-Host ""
+        Write-Host "Enter file number to view or Q to go back: " -NoNewline
+        $choice = Read-Host
+        
+        if ($choice -match '^[Qq]') { return }
+        
+        if ($choice -match '^\d+$') {
+            $index = [int]$choice - 1
+            if ($index -ge 0 -and $index -lt $files.Count) {
+                $content = Show-FileContent -FilePath $files[$index].FullName
+                Show-PagedContent -Content $content -Title "PERSISTENCE: $($files[$index].Name)"
+            }
+        }
+    }
+}
+
+# Show system info
+function Show-SystemInfo {
+    param([string]$IncidentPath)
+    
+    $systemPath = Join-Path $IncidentPath "System"
+    if (!(Test-Path $systemPath)) {
+        Write-Host "No system data found" -ForegroundColor $colors.Info
+        Read-Host "Press Enter to continue"
+        return
+    }
+    
+    while ($true) {
+        Show-Header "SYSTEM INFORMATION"
+        
+        $files = Get-ChildItem $systemPath -File | Sort-Object Name
+        
+        Write-Host "System Files:" -ForegroundColor $colors.Header
+        for ($i = 0; $i -lt $files.Count; $i++) {
+            Write-Host ("{0,3}. {1}" -f ($i + 1), $files[$i].Name) -ForegroundColor $colors.Menu
+        }
+        
+        Write-Host ""
+        Write-Host "Enter file number to view or Q to go back: " -NoNewline
+        $choice = Read-Host
+        
+        if ($choice -match '^[Qq]') { return }
+        
+        if ($choice -match '^\d+$') {
+            $index = [int]$choice - 1
+            if ($index -ge 0 -and $index -lt $files.Count) {
+                $content = Show-FileContent -FilePath $files[$index].FullName
+                Show-PagedContent -Content $content -Title "SYSTEM: $($files[$index].Name)"
+            }
+        }
+    }
+}
+
+# Show event logs
+function Show-EventLogs {
+    param([string]$IncidentPath)
+    
+    $logsPath = Join-Path $IncidentPath "Logs"
+    if (!(Test-Path $logsPath)) {
+        Write-Host "No event logs found" -ForegroundColor $colors.Info
+        Read-Host "Press Enter to continue"
+        return
+    }
+    
+    while ($true) {
+        Show-Header "EVENT LOGS"
+        
+        $files = Get-ChildItem $logsPath -File | Sort-Object Name
+        
+        Write-Host "Event Log Files:" -ForegroundColor $colors.Header
+        Write-Host "(Note: .evtx files can only be parsed on Windows systems)" -ForegroundColor $colors.Data
+        Write-Host ""
+        
+        for ($i = 0; $i -lt $files.Count; $i++) {
+            $color = if ($files[$i].Extension -eq ".evtx") { $colors.High } else { $colors.Menu }
+            Write-Host ("{0,3}. {1} ({2:N2} MB)" -f ($i + 1), $files[$i].Name, ($files[$i].Length/1MB)) -ForegroundColor $color
+        }
+        
+        Write-Host ""
+        Write-Host "Enter file number to view or Q to go back: " -NoNewline
+        $choice = Read-Host
+        
+        if ($choice -match '^[Qq]') { return }
+        
+        if ($choice -match '^\d+$') {
+            $index = [int]$choice - 1
+            if ($index -ge 0 -and $index -lt $files.Count) {
+                $content = Show-FileContent -FilePath $files[$index].FullName
+                Show-PagedContent -Content $content -Title "LOG: $($files[$index].Name)"
+            }
+        }
+    }
+}
+
+# Browse all files
+function Browse-Files {
+    param([string]$IncidentPath)
+    
+    Show-Header "FILE BROWSER"
+    
+    Write-Host "Building file list..." -ForegroundColor $colors.Info
+    $allFiles = Get-ChildItem $IncidentPath -Recurse -File | Sort-Object DirectoryName, Name
+    
+    $fileList = @()
+    $currentDir = ""
+    
+    foreach ($file in $allFiles) {
+        $relPath = $file.DirectoryName.Replace($IncidentPath, "").TrimStart("\")
+        
+        if ($relPath -ne $currentDir) {
+            $fileList += ""
+            $fileList += "[$relPath]"
+            $currentDir = $relPath
+        }
+        
+        $fileList += "  $($file.Name) ($([Math]::Round($file.Length/1KB, 2)) KB)"
+    }
+    
+    Show-PagedContent -Content $fileList -Title "ALL FILES ($($allFiles.Count) total)"
+}
+
+# Export all data to text
+function Export-AllData {
+    param([string]$IncidentPath)
+    
+    Show-Header "EXPORT ALL DATA"
+    
+    Write-Host "This will export all data to a single text file." -ForegroundColor $colors.Info
+    $confirm = Read-Host "Continue? (Y/N)"
+    
+    if ($confirm -ne 'Y' -and $confirm -ne 'y') { return }
+    
+    $exportFile = Join-Path $IncidentPath "Export_$(Get-Date -Format 'yyyyMMdd_HHmmss').txt"
+    $output = @()
+    
+    # Header
+    $output += "="*80
+    $output += "INCIDENT RESPONSE DATA EXPORT"
+    $output += "="*80
+    $output += "Generated: $(Get-Date)"
+    $output += "Incident: $(Split-Path $IncidentPath -Leaf)"
+    $output += "Path: $IncidentPath"
+    $output += "="*80
+    $output += ""
+    
+    Write-Host "Exporting data..." -ForegroundColor $colors.Info
+    
+    # Process each directory
+    $directories = @(
+        @{Name="SUMMARY"; Path="SUMMARY.txt"; Type="File"},
+        @{Name="ALERTS"; Path="ALERTS"; Type="Directory"},
+        @{Name="NETWORK"; Path="Network"; Type="Directory"},
+        @{Name="PROCESSES"; Path="Processes"; Type="Directory"},
+        @{Name="PERSISTENCE"; Path="Persistence"; Type="Directory"},
+        @{Name="SYSTEM"; Path="System"; Type="Directory"},
+        @{Name="LOGS"; Path="Logs"; Type="Directory"}
+    )
+    
+    foreach ($dir in $directories) {
+        Write-Host "  Exporting $($dir.Name)..." -ForegroundColor $colors.Data
+        
+        $fullPath = Join-Path $IncidentPath $dir.Path
+        
+        if (Test-Path $fullPath) {
+            $output += ""
+            $output += "="*80
+            $output += $dir.Name
+            $output += "="*80
+            
+            if ($dir.Type -eq "File") {
+                $output += Get-Content $fullPath
+            }
+            else {
+                $files = Get-ChildItem $fullPath -File | Sort-Object Name
+                foreach ($file in $files) {
+                    $output += ""
+                    $output += "-"*60
+                    $output += "FILE: $($file.Name)"
+                    $output += "-"*60
+                    
+                    $content = Show-FileContent -FilePath $file.FullName
+                    $output += $content
+                }
+            }
+        }
+    }
+    
+    # Save export
+    $output | Out-File $exportFile -Encoding UTF8
+    
+    Write-Host ""
+    Write-Host "Export complete!" -ForegroundColor $colors.Low
+    Write-Host "File saved to: $exportFile" -ForegroundColor $colors.Info
+    Write-Host "Size: $([Math]::Round((Get-Item $exportFile).Length/1MB, 2)) MB" -ForegroundColor $colors.Data
+    Write-Host ""
+    
+    $open = Read-Host "Open file now? (Y/N)"
+    if ($open -eq 'Y' -or $open -eq 'y') {
+        notepad.exe $exportFile
+    }
+    
+    Read-Host "Press Enter to continue"
+}
+
+# Main execution
+Show-Header
+
+Write-Host "This viewer displays data collected by the Incident Response Triage Script" -ForegroundColor $colors.Info
+Write-Host "No live data collection will be performed" -ForegroundColor $colors.Info
+Write-Host ""
+
+# Main loop
+while ($true) {
+    $incidentPath = $Path
+    
+    if (!$incidentPath -or !(Test-Path $incidentPath)) {
+        $incidentPath = Select-IncidentDirectory
+    }
+    
+    if (!$incidentPath) {
+        Write-Host "Exiting..." -ForegroundColor $colors.Info
+        break
+    }
+    
+    Show-IncidentMenu -IncidentPath $incidentPath
+    
+    # Reset path to show selection menu again
+    $Path = ""
+}
+
+Write-Host ""
+Write-Host "Thank you for using IR Data Viewer" -ForegroundColor $colors.Info) {
+                        $cutoff = (Get-Date).AddHours(-[int]$hours)
+                        $events | Where-Object { $_.TimeCreated -gt $cutoff }
+                    } else { $events }
+                }
+                default { $events }
+            }
+            
+            $output += "Filtered Events: $($events.Count)"
+            $output += ""
+        }
+        
+        # Format events
+        $eventNum = 1
+        foreach ($event in $events) {
+            $output += "===== Event #$eventNum ====="
+            $output += "Time: $($event.TimeCreated)"
+            $output += "Level: $($event.LevelDisplayName) | ID: $($event.Id)"
+            $output += "Source: $($event.ProviderName)"
+            $output += "Computer: $($event.MachineName)"
+            
+            if ($event.UserId) {
+                $output += "User: $($event.UserId)"
+            }
+            
+            if ($event.Message) {
+                # Option to show full or truncated messages
+                $output += "Message:"
+                $output += $event.Message -split "`n" | ForEach-Object { "  $_" }
+            }
+            
+            $output += ""
+            $eventNum++
+        }
+        
+        return $output
+    }
+    catch {
+        $output = @()
+        $output += "Unable to parse event log on this system."
+        $output += "Event logs can only be viewed on Windows systems with appropriate permissions."
+        $output += ""
+        $output += "Error: $_"
+        $output += ""
+        $output += "Raw file location: $FilePath"
+        $output += "File size: $([Math]::Round((Get-Item $FilePath).Length/1MB, 2)) MB"
+        
+        return $output
+    }
+}
+
+# Display file content based on type
+function Show-FileContent {
+    param([string]$FilePath)
+    
+    if (!(Test-Path $FilePath)) {
+        return @("File not found: $FilePath")
+    }
+    
+    $extension = [System.IO.Path]::GetExtension($FilePath).ToLower()
+    
+    switch ($extension) {
+        ".csv" { return Show-CsvFile -FilePath $FilePath }
+        ".json" { return Show-JsonFile -FilePath $FilePath }
+        ".evtx" { return Show-EventLog -FilePath $FilePath }
+        ".txt" { return Get-Content $FilePath }
+        ".log" { return Get-Content $FilePath }
+        default { return @("Cannot display file type: $extension") }
+    }
+}
+
+# Paged display
+function Show-PagedContent {
+    param(
+        [array]$Content,
+        [string]$Title
+    )
+    
+    if ($Content.Count -eq 0) {
+        Write-Host "No content to display" -ForegroundColor $colors.Info
+        Read-Host "Press Enter to continue"
+        return
+    }
+    
+    $totalPages = [Math]::Ceiling($Content.Count / $PageSize)
+    $currentPage = 0
+    
+    while ($true) {
+        Show-Header $Title
+        
+        $startIdx = $currentPage * $PageSize
+        $endIdx = [Math]::Min($startIdx + $PageSize, $Content.Count)
+        
+        # Display page content
+        for ($i = $startIdx; $i -lt $endIdx; $i++) {
+            $line = $Content[$i]
+            
+            # Color coding based on content
+            if ($line -match "CRITICAL|ERROR|FAIL") {
+                Write-Host $line -ForegroundColor $colors.Critical
+            }
+            elseif ($line -match "WARNING|ALERT|SUSPICIOUS") {
+                Write-Host $line -ForegroundColor $colors.High
+            }
+            elseif ($line -match "SUCCESS|PASS") {
+                Write-Host $line -ForegroundColor $colors.Low
+            }
+            else {
+                Write-Host $line -ForegroundColor $colors.Data
+            }
+        }
+        
+        # Navigation
+        Write-Host ""
+        Write-Host ("-" * 80) -ForegroundColor $colors.Menu
+        Write-Host "Page $($currentPage + 1) of $totalPages | Showing items $($startIdx + 1)-$endIdx of $($Content.Count)" -ForegroundColor $colors.Info
+        Write-Host "[N]ext [P]revious [F]irst [L]ast [Q]uit: " -NoNewline -ForegroundColor $colors.Menu
+        
+        $key = Read-Host
+        
+        switch ($key.ToUpper()) {
+            "N" { if ($currentPage -lt $totalPages - 1) { $currentPage++ } }
+            "P" { if ($currentPage -gt 0) { $currentPage-- } }
+            "F" { $currentPage = 0 }
+            "L" { $currentPage = $totalPages - 1 }
+            "Q" { return }
+        }
+    }
+}
+
+# Main menu for incident data
+function Show-IncidentMenu {
+    param([string]$IncidentPath)
+    
+    while ($true) {
+        Show-Header "INCIDENT DATA BROWSER"
+        
+        # Display incident info
+        $incidentName = Split-Path $IncidentPath -Leaf
+        Write-Host "Incident: $incidentName" -ForegroundColor $colors.Info
+        Write-Host "Path: $IncidentPath" -ForegroundColor $colors.Data
+        
+        # Get summary info if available
+        $summaryPath = Join-Path $IncidentPath "SUMMARY.txt"
+        if (Test-Path $summaryPath) {
+            $summaryLines = Get-Content $summaryPath | Select-String "THREAT LEVEL:|TOTAL ALERTS:"
+            foreach ($line in $summaryLines) {
+                if ($line -match "THREAT LEVEL:") {
+                    $level = $line.Line.Split(":")[1].Trim()
+                    $color = switch ($level) {
+                        "CRITICAL" { $colors.Critical }
+                        "HIGH" { $colors.High }
+                        "MEDIUM" { $colors.Medium }
+                        "LOW" { $colors.Low }
+                        default { $colors.Data }
+                    }
+                    Write-Host $line.Line -ForegroundColor $color
+                }
+                else {
+                    Write-Host $line.Line -ForegroundColor $colors.Info
+                }
+            }
+        }
+        
+        Write-Host ""
+        Write-Host "MAIN MENU" -ForegroundColor $colors.Header
+        Write-Host "1. View Summary" -ForegroundColor $colors.Menu
+        Write-Host "2. View Alerts" -ForegroundColor $colors.Menu
+        Write-Host "3. Network Data" -ForegroundColor $colors.Menu
+        Write-Host "4. Process Data" -ForegroundColor $colors.Menu
+        Write-Host "5. Persistence Data" -ForegroundColor $colors.Menu
+        Write-Host "6. System Information" -ForegroundColor $colors.Menu
+        Write-Host "7. Event Logs" -ForegroundColor $colors.Menu
+        Write-Host "8. Browse All Files" -ForegroundColor $colors.Menu
+        Write-Host "9. Export All to Text" -ForegroundColor $colors.Menu
+        Write-Host "Q. Back to Directory Selection" -ForegroundColor $colors.Menu
+        Write-Host ""
+        
+        $choice = Read-Host "Select option"
+        
+        switch ($choice) {
+            "1" { Show-Summary -IncidentPath $IncidentPath }
+            "2" { Show-Alerts -IncidentPath $IncidentPath }
+            "3" { Show-NetworkData -IncidentPath $IncidentPath }
+            "4" { Show-ProcessData -IncidentPath $IncidentPath }
+            "5" { Show-PersistenceData -IncidentPath $IncidentPath }
+            "6" { Show-SystemInfo -IncidentPath $IncidentPath }
+            "7" { Show-EventLogs -IncidentPath $IncidentPath }
+            "8" { Browse-Files -IncidentPath $IncidentPath }
+            "9" { Export-AllData -IncidentPath $IncidentPath }
+            "Q" { return }
+            "q" { return }
+        }
+    }
+}
+
+# Show summary
+function Show-Summary {
+    param([string]$IncidentPath)
+    
+    $summaryFile = Join-Path $IncidentPath "SUMMARY.txt"
+    if (Test-Path $summaryFile) {
+        $content = Get-Content $summaryFile
+        Show-PagedContent -Content $content -Title "INCIDENT SUMMARY"
+    }
+    else {
+        Write-Host "Summary file not found" -ForegroundColor $colors.Critical
+        Read-Host "Press Enter to continue"
+    }
+}
+
+# Show alerts
+function Show-Alerts {
+    param([string]$IncidentPath)
+    
+    $alertsPath = Join-Path $IncidentPath "ALERTS"
+    if (!(Test-Path $alertsPath)) {
+        Write-Host "No alerts directory found" -ForegroundColor $colors.Info
+        Read-Host "Press Enter to continue"
+        return
+    }
+    
+    while ($true) {
+        Show-Header "ALERTS"
+        
+        $files = Get-ChildItem $alertsPath -File | Sort-Object Name
+        if ($files.Count -eq 0) {
+            Write-Host "No alert files found" -ForegroundColor $colors.Info
+            Read-Host "Press Enter to continue"
+            return
+        }
+        
+        Write-Host "Alert Files:" -ForegroundColor $colors.Header
+        for ($i = 0; $i -lt $files.Count; $i++) {
+            Write-Host ("{0,3}. {1}" -f ($i + 1), $files[$i].Name) -ForegroundColor $colors.High
+        }
+        
+        Write-Host ""
+        Write-Host "Enter file number to view or Q to go back: " -NoNewline
+        $choice = Read-Host
+        
+        if ($choice -match '^[Qq]') { return }
+        
+        if ($choice -match '^\d+$') {
+            $index = [int]$choice - 1
+            if ($index -ge 0 -and $index -lt $files.Count) {
+                $content = Show-FileContent -FilePath $files[$index].FullName
+                Show-PagedContent -Content $content -Title "ALERT: $($files[$index].Name)"
+            }
+        }
+    }
+}
+
+# Show network data
+function Show-NetworkData {
+    param([string]$IncidentPath)
+    
+    $networkPath = Join-Path $IncidentPath "Network"
+    if (!(Test-Path $networkPath)) {
+        Write-Host "No network data found" -ForegroundColor $colors.Info
+        Read-Host "Press Enter to continue"
+        return
+    }
+    
+    while ($true) {
+        Show-Header "NETWORK DATA"
+        
+        $files = Get-ChildItem $networkPath -File | Sort-Object Name
+        
+        Write-Host "Network Files:" -ForegroundColor $colors.Header
+        for ($i = 0; $i -lt $files.Count; $i++) {
+            Write-Host ("{0,3}. {1}" -f ($i + 1), $files[$i].Name) -ForegroundColor $colors.Menu
+        }
+        
+        Write-Host ""
+        Write-Host "Enter file number to view or Q to go back: " -NoNewline
+        $choice = Read-Host
+        
+        if ($choice -match '^[Qq]') { return }
+        
+        if ($choice -match '^\d+$') {
+            $index = [int]$choice - 1
+            if ($index -ge 0 -and $index -lt $files.Count) {
+                $content = Show-FileContent -FilePath $files[$index].FullName
+                Show-PagedContent -Content $content -Title "NETWORK: $($files[$index].Name)"
+            }
+        }
+    }
+}
+
+# Show process data
+function Show-ProcessData {
+    param([string]$IncidentPath)
+    
+    $processPath = Join-Path $IncidentPath "Processes"
+    $files = @()
+    
+    # Check both Processes folder and ALERTS for process files
+    if (Test-Path $processPath) {
+        $files += Get-ChildItem $processPath -File
+    }
+    
+    $alertsPath = Join-Path $IncidentPath "ALERTS"
+    if (Test-Path $alertsPath) {
+        $files += Get-ChildItem $alertsPath -Filter "*process*" -File
+        $files += Get-ChildItem $alertsPath -Filter "*pid*" -File
+    }
+    
+    if ($files.Count -eq 0) {
+        Write-Host "No process data found" -ForegroundColor $colors.Info
+        Read-Host "Press Enter to continue"
+        return
+    }
+    
+    while ($true) {
+        Show-Header "PROCESS DATA"
+        
+        Write-Host "Process Files:" -ForegroundColor $colors.Header
+        for ($i = 0; $i -lt $files.Count; $i++) {
+            $color = if ($files[$i].DirectoryName -match "ALERTS") { $colors.High } else { $colors.Menu }
+            Write-Host ("{0,3}. {1}" -f ($i + 1), $files[$i].Name) -ForegroundColor $color
+        }
+        
+        Write-Host ""
+        Write-Host "Enter file number to view or Q to go back: " -NoNewline
+        $choice = Read-Host
+        
+        if ($choice -match '^[Qq]') { return }
+        
+        if ($choice -match '^\d+$') {
+            $index = [int]$choice - 1
+            if ($index -ge 0 -and $index -lt $files.Count) {
+                $content = Show-FileContent -FilePath $files[$index].FullName
+                Show-PagedContent -Content $content -Title "PROCESS: $($files[$index].Name)"
+            }
+        }
+    }
+}
+
+# Show persistence data
+function Show-PersistenceData {
+    param([string]$IncidentPath)
+    
+    $persistPath = Join-Path $IncidentPath "Persistence"
+    $files = @()
+    
+    if (Test-Path $persistPath) {
+        $files += Get-ChildItem $persistPath -File
+    }
+    
+    # Also check ALERTS for persistence files
+    $alertsPath = Join-Path $IncidentPath "ALERTS"
+    if (Test-Path $alertsPath) {
+        $files += Get-ChildItem $alertsPath -Filter "*autorun*" -File
+        $files += Get-ChildItem $alertsPath -Filter "*service*" -File
+        $files += Get-ChildItem $alertsPath -Filter "*task*" -File
+    }
+    
+    if ($files.Count -eq 0) {
+        Write-Host "No persistence data found" -ForegroundColor $colors.Info
+        Read-Host "Press Enter to continue"
+        return
+    }
+    
+    while ($true) {
+        Show-Header "PERSISTENCE DATA"
+        
+        Write-Host "Persistence Files:" -ForegroundColor $colors.Header
+        for ($i = 0; $i -lt $files.Count; $i++) {
+            $color = if ($files[$i].DirectoryName -match "ALERTS") { $colors.High } else { $colors.Menu }
+            Write-Host ("{0,3}. {1}" -f ($i + 1), $files[$i].Name) -ForegroundColor $color
+        }
+        
+        Write-Host ""
+        Write-Host "Enter file number to view or Q to go back: " -NoNewline
+        $choice = Read-Host
+        
+        if ($choice -match '^[Qq]') { return }
+        
+        if ($choice -match '^\d+$') {
+            $index = [int]$choice - 1
+            if ($index -ge 0 -and $index -lt $files.Count) {
+                $content = Show-FileContent -FilePath $files[$index].FullName
+                Show-PagedContent -Content $content -Title "PERSISTENCE: $($files[$index].Name)"
+            }
+        }
+    }
+}
+
+# Show system info
+function Show-SystemInfo {
+    param([string]$IncidentPath)
+    
+    $systemPath = Join-Path $IncidentPath "System"
+    if (!(Test-Path $systemPath)) {
+        Write-Host "No system data found" -ForegroundColor $colors.Info
+        Read-Host "Press Enter to continue"
+        return
+    }
+    
+    while ($true) {
+        Show-Header "SYSTEM INFORMATION"
+        
+        $files = Get-ChildItem $systemPath -File | Sort-Object Name
+        
+        Write-Host "System Files:" -ForegroundColor $colors.Header
+        for ($i = 0; $i -lt $files.Count; $i++) {
+            Write-Host ("{0,3}. {1}" -f ($i + 1), $files[$i].Name) -ForegroundColor $colors.Menu
+        }
+        
+        Write-Host ""
+        Write-Host "Enter file number to view or Q to go back: " -NoNewline
+        $choice = Read-Host
+        
+        if ($choice -match '^[Qq]') { return }
+        
+        if ($choice -match '^\d+$') {
+            $index = [int]$choice - 1
+            if ($index -ge 0 -and $index -lt $files.Count) {
+                $content = Show-FileContent -FilePath $files[$index].FullName
+                Show-PagedContent -Content $content -Title "SYSTEM: $($files[$index].Name)"
+            }
+        }
+    }
+}
+
+# Show event logs
+function Show-EventLogs {
+    param([string]$IncidentPath)
+    
+    $logsPath = Join-Path $IncidentPath "Logs"
+    if (!(Test-Path $logsPath)) {
+        Write-Host "No event logs found" -ForegroundColor $colors.Info
+        Read-Host "Press Enter to continue"
+        return
+    }
+    
+    while ($true) {
+        Show-Header "EVENT LOGS"
+        
+        $files = Get-ChildItem $logsPath -File | Sort-Object Name
+        
+        Write-Host "Event Log Files:" -ForegroundColor $colors.Header
+        Write-Host "(Note: .evtx files can only be parsed on Windows systems)" -ForegroundColor $colors.Data
+        Write-Host ""
+        
+        for ($i = 0; $i -lt $files.Count; $i++) {
+            $color = if ($files[$i].Extension -eq ".evtx") { $colors.High } else { $colors.Menu }
+            Write-Host ("{0,3}. {1} ({2:N2} MB)" -f ($i + 1), $files[$i].Name, ($files[$i].Length/1MB)) -ForegroundColor $color
+        }
+        
+        Write-Host ""
+        Write-Host "Enter file number to view or Q to go back: " -NoNewline
+        $choice = Read-Host
+        
+        if ($choice -match '^[Qq]') { return }
+        
+        if ($choice -match '^\d+$') {
+            $index = [int]$choice - 1
+            if ($index -ge 0 -and $index -lt $files.Count) {
+                $content = Show-FileContent -FilePath $files[$index].FullName
+                Show-PagedContent -Content $content -Title "LOG: $($files[$index].Name)"
+            }
+        }
+    }
+}
+
+# Browse all files
+function Browse-Files {
+    param([string]$IncidentPath)
+    
+    Show-Header "FILE BROWSER"
+    
+    Write-Host "Building file list..." -ForegroundColor $colors.Info
+    $allFiles = Get-ChildItem $IncidentPath -Recurse -File | Sort-Object DirectoryName, Name
+    
+    $fileList = @()
+    $currentDir = ""
+    
+    foreach ($file in $allFiles) {
+        $relPath = $file.DirectoryName.Replace($IncidentPath, "").TrimStart("\")
+        
+        if ($relPath -ne $currentDir) {
+            $fileList += ""
+            $fileList += "[$relPath]"
+            $currentDir = $relPath
+        }
+        
+        $fileList += "  $($file.Name) ($([Math]::Round($file.Length/1KB, 2)) KB)"
+    }
+    
+    Show-PagedContent -Content $fileList -Title "ALL FILES ($($allFiles.Count) total)"
+}
+
+# Export all data to text
+function Export-AllData {
+    param([string]$IncidentPath)
+    
+    Show-Header "EXPORT ALL DATA"
+    
+    Write-Host "This will export all data to a single text file." -ForegroundColor $colors.Info
+    $confirm = Read-Host "Continue? (Y/N)"
+    
+    if ($confirm -ne 'Y' -and $confirm -ne 'y') { return }
+    
+    $exportFile = Join-Path $IncidentPath "Export_$(Get-Date -Format 'yyyyMMdd_HHmmss').txt"
+    $output = @()
+    
+    # Header
+    $output += "="*80
+    $output += "INCIDENT RESPONSE DATA EXPORT"
+    $output += "="*80
+    $output += "Generated: $(Get-Date)"
+    $output += "Incident: $(Split-Path $IncidentPath -Leaf)"
+    $output += "Path: $IncidentPath"
+    $output += "="*80
+    $output += ""
+    
+    Write-Host "Exporting data..." -ForegroundColor $colors.Info
+    
+    # Process each directory
+    $directories = @(
+        @{Name="SUMMARY"; Path="SUMMARY.txt"; Type="File"},
+        @{Name="ALERTS"; Path="ALERTS"; Type="Directory"},
+        @{Name="NETWORK"; Path="Network"; Type="Directory"},
+        @{Name="PROCESSES"; Path="Processes"; Type="Directory"},
+        @{Name="PERSISTENCE"; Path="Persistence"; Type="Directory"},
+        @{Name="SYSTEM"; Path="System"; Type="Directory"},
+        @{Name="LOGS"; Path="Logs"; Type="Directory"}
+    )
+    
+    foreach ($dir in $directories) {
+        Write-Host "  Exporting $($dir.Name)..." -ForegroundColor $colors.Data
+        
+        $fullPath = Join-Path $IncidentPath $dir.Path
+        
+        if (Test-Path $fullPath) {
+            $output += ""
+            $output += "="*80
+            $output += $dir.Name
+            $output += "="*80
+            
+            if ($dir.Type -eq "File") {
+                $output += Get-Content $fullPath
+            }
+            else {
+                $files = Get-ChildItem $fullPath -File | Sort-Object Name
+                foreach ($file in $files) {
+                    $output += ""
+                    $output += "-"*60
+                    $output += "FILE: $($file.Name)"
+                    $output += "-"*60
+                    
+                    $content = Show-FileContent -FilePath $file.FullName
+                    $output += $content
+                }
+            }
+        }
+    }
+    
+    # Save export
+    $output | Out-File $exportFile -Encoding UTF8
+    
+    Write-Host ""
+    Write-Host "Export complete!" -ForegroundColor $colors.Low
+    Write-Host "File saved to: $exportFile" -ForegroundColor $colors.Info
+    Write-Host "Size: $([Math]::Round((Get-Item $exportFile).Length/1MB, 2)) MB" -ForegroundColor $colors.Data
+    Write-Host ""
+    
+    $open = Read-Host "Open file now? (Y/N)"
+    if ($open -eq 'Y' -or $open -eq 'y') {
+        notepad.exe $exportFile
+    }
+    
+    Read-Host "Press Enter to continue"
+}
+
+# Main execution
+Show-Header
+
+Write-Host "This viewer displays data collected by the Incident Response Triage Script" -ForegroundColor $colors.Info
+Write-Host "No live data collection will be performed" -ForegroundColor $colors.Info
+Write-Host ""
+
+# Main loop
+while ($true) {
+    $incidentPath = $Path
+    
+    if (!$incidentPath -or !(Test-Path $incidentPath)) {
+        $incidentPath = Select-IncidentDirectory
+    }
+    
+    if (!$incidentPath) {
+        Write-Host "Exiting..." -ForegroundColor $colors.Info
+        break
+    }
+    
+    Show-IncidentMenu -IncidentPath $incidentPath
+    
+    # Reset path to show selection menu again
+    $Path = ""
+}
+
+Write-Host ""
+Write-Host "Thank you for using IR Data Viewer" -ForegroundColor $colors.Info) {
+            $index = [int]$choice - 1
+            if ($index -ge 0 -and $index -lt $files.Count) {
+                $content = Show-FileContent -FilePath $files[$index].FullName
+                Show-PagedContent -Content $content -Title "LOG: $($files[$index].Name)"
+            }
+        }
+    }
+}
+
+# Event log summary analysis
+function Show-EventLogSummary {
+    param([string]$LogsPath)
+    
+    Write-Host "Analyzing event logs..." -ForegroundColor $colors.Info
+    $summary = @()
+    $summary += "EVENT LOG SUMMARY ANALYSIS"
+    $summary += "="*60
+    $summary += ""
+    
+    $evtxFiles = Get-ChildItem $LogsPath -Filter "*.evtx"
+    
+    foreach ($file in $evtxFiles) {
+        $summary += "Log: $($file.Name)"
+        $summary += "Size: $([Math]::Round($file.Length/1MB, 2)) MB"
+        
+        try {
+            # Try to get basic stats
+            $events = Get-WinEvent -Path $file.FullName -MaxEvents 1000 -ErrorAction Stop
+            
+            $errorCount = ($events | Where-Object { $_.Level -eq 2 }).Count
+            $warningCount = ($events | Where-Object { $_.Level -eq 3 }).Count
+            $infoCount = ($events | Where-Object { $_.Level -eq 4 }).Count
+            
+            $summary += "Sample of 1000 events:"
+            $summary += "  - Errors: $errorCount"
+            $summary += "  - Warnings: $warningCount"
+            $summary += "  - Information: $infoCount"
+            
+            # Get time range
+            $oldest = $events | Select-Object -Last 1
+            $newest = $events | Select-Object -First 1
+            $summary += "  - Time range: $($oldest.TimeCreated) to $($newest.TimeCreated)"
+            
+            # Common event IDs
+            $commonIds = $events | Group-Object Id | Sort-Object Count -Descending | Select-Object -First 5
+            $summary += "  - Common Event IDs:"
+            foreach ($id in $commonIds) {
+                $summary += "    - ID $($id.Name): $($id.Count) occurrences"
+            }
+        }
+        catch {
+            $summary += "  - Unable to parse on this system"
+        }
+        
+        $summary += ""
+    }
+    
+    Show-PagedContent -Content $summary -Title "EVENT LOG SUMMARY"
+}
+
+# Browse all files
+function Browse-Files {
+    param([string]$IncidentPath)
+    
+    Show-Header "FILE BROWSER"
+    
+    Write-Host "Building file list..." -ForegroundColor $colors.Info
+    $allFiles = Get-ChildItem $IncidentPath -Recurse -File | Sort-Object DirectoryName, Name
+    
+    $fileList = @()
+    $currentDir = ""
+    
+    foreach ($file in $allFiles) {
+        $relPath = $file.DirectoryName.Replace($IncidentPath, "").TrimStart("\")
+        
+        if ($relPath -ne $currentDir) {
+            $fileList += ""
+            $fileList += "[$relPath]"
+            $currentDir = $relPath
+        }
+        
+        $fileList += "  $($file.Name) ($([Math]::Round($file.Length/1KB, 2)) KB)"
+    }
+    
+    Show-PagedContent -Content $fileList -Title "ALL FILES ($($allFiles.Count) total)"
+}
+
+# Export all data to text
+function Export-AllData {
+    param([string]$IncidentPath)
+    
+    Show-Header "EXPORT ALL DATA"
+    
+    Write-Host "This will export all data to a single text file." -ForegroundColor $colors.Info
+    $confirm = Read-Host "Continue? (Y/N)"
+    
+    if ($confirm -ne 'Y' -and $confirm -ne 'y') { return }
+    
+    $exportFile = Join-Path $IncidentPath "Export_$(Get-Date -Format 'yyyyMMdd_HHmmss').txt"
+    $output = @()
+    
+    # Header
+    $output += "="*80
+    $output += "INCIDENT RESPONSE DATA EXPORT"
+    $output += "="*80
+    $output += "Generated: $(Get-Date)"
+    $output += "Incident: $(Split-Path $IncidentPath -Leaf)"
+    $output += "Path: $IncidentPath"
+    $output += "="*80
+    $output += ""
+    
+    Write-Host "Exporting data..." -ForegroundColor $colors.Info
+    
+    # Process each directory
+    $directories = @(
+        @{Name="SUMMARY"; Path="SUMMARY.txt"; Type="File"},
+        @{Name="ALERTS"; Path="ALERTS"; Type="Directory"},
+        @{Name="NETWORK"; Path="Network"; Type="Directory"},
+        @{Name="PROCESSES"; Path="Processes"; Type="Directory"},
+        @{Name="PERSISTENCE"; Path="Persistence"; Type="Directory"},
+        @{Name="SYSTEM"; Path="System"; Type="Directory"},
+        @{Name="LOGS"; Path="Logs"; Type="Directory"}
+    )
+    
+    foreach ($dir in $directories) {
+        Write-Host "  Exporting $($dir.Name)..." -ForegroundColor $colors.Data
+        
+        $fullPath = Join-Path $IncidentPath $dir.Path
+        
+        if (Test-Path $fullPath) {
+            $output += ""
+            $output += "="*80
+            $output += $dir.Name
+            $output += "="*80
+            
+            if ($dir.Type -eq "File") {
+                $output += Get-Content $fullPath
+            }
+            else {
+                $files = Get-ChildItem $fullPath -File | Sort-Object Name
+                foreach ($file in $files) {
+                    $output += ""
+                    $output += "-"*60
+                    $output += "FILE: $($file.Name)"
+                    $output += "-"*60
+                    
+                    $content = Show-FileContent -FilePath $file.FullName
+                    $output += $content
+                }
+            }
+        }
+    }
+    
+    # Save export
+    $output | Out-File $exportFile -Encoding UTF8
+    
+    Write-Host ""
+    Write-Host "Export complete!" -ForegroundColor $colors.Low
+    Write-Host "File saved to: $exportFile" -ForegroundColor $colors.Info
+    Write-Host "Size: $([Math]::Round((Get-Item $exportFile).Length/1MB, 2)) MB" -ForegroundColor $colors.Data
+    Write-Host ""
+    
+    $open = Read-Host "Open file now? (Y/N)"
+    if ($open -eq 'Y' -or $open -eq 'y') {
+        notepad.exe $exportFile
+    }
+    
+    Read-Host "Press Enter to continue"
+}
+
+# Main execution
+Show-Header
+
+Write-Host "This viewer displays data collected by the Incident Response Triage Script" -ForegroundColor $colors.Info
+Write-Host "No live data collection will be performed" -ForegroundColor $colors.Info
+Write-Host ""
+
+# Main loop
+while ($true) {
+    $incidentPath = $Path
+    
+    if (!$incidentPath -or !(Test-Path $incidentPath)) {
+        $incidentPath = Select-IncidentDirectory
+    }
+    
+    if (!$incidentPath) {
+        Write-Host "Exiting..." -ForegroundColor $colors.Info
+        break
+    }
+    
+    Show-IncidentMenu -IncidentPath $incidentPath
+    
+    # Reset path to show selection menu again
+    $Path = ""
+}
+
+Write-Host ""
+Write-Host "Thank you for using IR Data Viewer" -ForegroundColor $colors.Info) {
+                    Get-WinEvent -Path $FilePath -MaxEvents ([int]$maxEvents) -ErrorAction Stop
+                } else {
+                    Get-WinEvent -Path $FilePath -MaxEvents 100 -ErrorAction Stop
+                }
+            }
+            default { Get-WinEvent -Path $FilePath -MaxEvents 100 -ErrorAction Stop }
+        }
+        
+        Write-Host "Processing $($events.Count) events..." -ForegroundColor $colors.Info
+        
+        $output = @()
+        $output += "Event Log: $(Split-Path $FilePath -Leaf)"
+        $output += "Total Events Loaded: $($events.Count)"
+        $output += ("=" * 60)
+        $output += ""
+        
+        # Add filter option
+        Write-Host "Filter events? (Y/N)" -NoNewline -ForegroundColor $colors.Info
+        $filter = Read-Host
+        
+        if ($filter -eq 'Y' -or $filter -eq 'y') {
+            Write-Host "Filter by:" -ForegroundColor $colors.Menu
+            Write-Host "1. Error/Critical only" -ForegroundColor $colors.Menu
+            Write-Host "2. Specific Event ID" -ForegroundColor $colors.Menu
+            Write-Host "3. Time range" -ForegroundColor $colors.Menu
+            Write-Host "4. No filter" -ForegroundColor $colors.Menu
+            
+            $filterChoice = Read-Host "Select filter (1-4)"
+            
+            $events = switch ($filterChoice) {
+                "1" { $events | Where-Object { $_.Level -le 2 } }
+                "2" {
+                    $eventId = Read-Host "Enter Event ID"
+                    if ($eventId -match '^\d+
+
+# Display file content based on type
+function Show-FileContent {
+    param([string]$FilePath)
+    
+    if (!(Test-Path $FilePath)) {
+        return @("File not found: $FilePath")
+    }
+    
+    $extension = [System.IO.Path]::GetExtension($FilePath).ToLower()
+    
+    switch ($extension) {
+        ".csv" { return Show-CsvFile -FilePath $FilePath }
+        ".json" { return Show-JsonFile -FilePath $FilePath }
+        ".evtx" { return Show-EventLog -FilePath $FilePath }
+        ".txt" { return Get-Content $FilePath }
+        ".log" { return Get-Content $FilePath }
+        default { return @("Cannot display file type: $extension") }
+    }
+}
+
+# Paged display
+function Show-PagedContent {
+    param(
+        [array]$Content,
+        [string]$Title
+    )
+    
+    if ($Content.Count -eq 0) {
+        Write-Host "No content to display" -ForegroundColor $colors.Info
+        Read-Host "Press Enter to continue"
+        return
+    }
+    
+    $totalPages = [Math]::Ceiling($Content.Count / $PageSize)
+    $currentPage = 0
+    
+    while ($true) {
+        Show-Header $Title
+        
+        $startIdx = $currentPage * $PageSize
+        $endIdx = [Math]::Min($startIdx + $PageSize, $Content.Count)
+        
+        # Display page content
+        for ($i = $startIdx; $i -lt $endIdx; $i++) {
+            $line = $Content[$i]
+            
+            # Color coding based on content
+            if ($line -match "CRITICAL|ERROR|FAIL") {
+                Write-Host $line -ForegroundColor $colors.Critical
+            }
+            elseif ($line -match "WARNING|ALERT|SUSPICIOUS") {
+                Write-Host $line -ForegroundColor $colors.High
+            }
+            elseif ($line -match "SUCCESS|PASS") {
+                Write-Host $line -ForegroundColor $colors.Low
+            }
+            else {
+                Write-Host $line -ForegroundColor $colors.Data
+            }
+        }
+        
+        # Navigation
+        Write-Host ""
+        Write-Host ("-" * 80) -ForegroundColor $colors.Menu
+        Write-Host "Page $($currentPage + 1) of $totalPages | Showing items $($startIdx + 1)-$endIdx of $($Content.Count)" -ForegroundColor $colors.Info
+        Write-Host "[N]ext [P]revious [F]irst [L]ast [Q]uit: " -NoNewline -ForegroundColor $colors.Menu
+        
+        $key = Read-Host
+        
+        switch ($key.ToUpper()) {
+            "N" { if ($currentPage -lt $totalPages - 1) { $currentPage++ } }
+            "P" { if ($currentPage -gt 0) { $currentPage-- } }
+            "F" { $currentPage = 0 }
+            "L" { $currentPage = $totalPages - 1 }
+            "Q" { return }
+        }
+    }
+}
+
+# Main menu for incident data
+function Show-IncidentMenu {
+    param([string]$IncidentPath)
+    
+    while ($true) {
+        Show-Header "INCIDENT DATA BROWSER"
+        
+        # Display incident info
+        $incidentName = Split-Path $IncidentPath -Leaf
+        Write-Host "Incident: $incidentName" -ForegroundColor $colors.Info
+        Write-Host "Path: $IncidentPath" -ForegroundColor $colors.Data
+        
+        # Get summary info if available
+        $summaryPath = Join-Path $IncidentPath "SUMMARY.txt"
+        if (Test-Path $summaryPath) {
+            $summaryLines = Get-Content $summaryPath | Select-String "THREAT LEVEL:|TOTAL ALERTS:"
+            foreach ($line in $summaryLines) {
+                if ($line -match "THREAT LEVEL:") {
+                    $level = $line.Line.Split(":")[1].Trim()
+                    $color = switch ($level) {
+                        "CRITICAL" { $colors.Critical }
+                        "HIGH" { $colors.High }
+                        "MEDIUM" { $colors.Medium }
+                        "LOW" { $colors.Low }
+                        default { $colors.Data }
+                    }
+                    Write-Host $line.Line -ForegroundColor $color
+                }
+                else {
+                    Write-Host $line.Line -ForegroundColor $colors.Info
+                }
+            }
+        }
+        
+        Write-Host ""
+        Write-Host "MAIN MENU" -ForegroundColor $colors.Header
+        Write-Host "1. View Summary" -ForegroundColor $colors.Menu
+        Write-Host "2. View Alerts" -ForegroundColor $colors.Menu
+        Write-Host "3. Network Data" -ForegroundColor $colors.Menu
+        Write-Host "4. Process Data" -ForegroundColor $colors.Menu
+        Write-Host "5. Persistence Data" -ForegroundColor $colors.Menu
+        Write-Host "6. System Information" -ForegroundColor $colors.Menu
+        Write-Host "7. Event Logs" -ForegroundColor $colors.Menu
+        Write-Host "8. Browse All Files" -ForegroundColor $colors.Menu
+        Write-Host "9. Export All to Text" -ForegroundColor $colors.Menu
+        Write-Host "Q. Back to Directory Selection" -ForegroundColor $colors.Menu
+        Write-Host ""
+        
+        $choice = Read-Host "Select option"
+        
+        switch ($choice) {
+            "1" { Show-Summary -IncidentPath $IncidentPath }
+            "2" { Show-Alerts -IncidentPath $IncidentPath }
+            "3" { Show-NetworkData -IncidentPath $IncidentPath }
+            "4" { Show-ProcessData -IncidentPath $IncidentPath }
+            "5" { Show-PersistenceData -IncidentPath $IncidentPath }
+            "6" { Show-SystemInfo -IncidentPath $IncidentPath }
+            "7" { Show-EventLogs -IncidentPath $IncidentPath }
+            "8" { Browse-Files -IncidentPath $IncidentPath }
+            "9" { Export-AllData -IncidentPath $IncidentPath }
+            "Q" { return }
+            "q" { return }
+        }
+    }
+}
+
+# Show summary
+function Show-Summary {
+    param([string]$IncidentPath)
+    
+    $summaryFile = Join-Path $IncidentPath "SUMMARY.txt"
+    if (Test-Path $summaryFile) {
+        $content = Get-Content $summaryFile
+        Show-PagedContent -Content $content -Title "INCIDENT SUMMARY"
+    }
+    else {
+        Write-Host "Summary file not found" -ForegroundColor $colors.Critical
+        Read-Host "Press Enter to continue"
+    }
+}
+
+# Show alerts
+function Show-Alerts {
+    param([string]$IncidentPath)
+    
+    $alertsPath = Join-Path $IncidentPath "ALERTS"
+    if (!(Test-Path $alertsPath)) {
+        Write-Host "No alerts directory found" -ForegroundColor $colors.Info
+        Read-Host "Press Enter to continue"
+        return
+    }
+    
+    while ($true) {
+        Show-Header "ALERTS"
+        
+        $files = Get-ChildItem $alertsPath -File | Sort-Object Name
+        if ($files.Count -eq 0) {
+            Write-Host "No alert files found" -ForegroundColor $colors.Info
+            Read-Host "Press Enter to continue"
+            return
+        }
+        
+        Write-Host "Alert Files:" -ForegroundColor $colors.Header
+        for ($i = 0; $i -lt $files.Count; $i++) {
+            Write-Host ("{0,3}. {1}" -f ($i + 1), $files[$i].Name) -ForegroundColor $colors.High
+        }
+        
+        Write-Host ""
+        Write-Host "Enter file number to view or Q to go back: " -NoNewline
+        $choice = Read-Host
+        
+        if ($choice -match '^[Qq]') { return }
+        
+        if ($choice -match '^\d+$') {
+            $index = [int]$choice - 1
+            if ($index -ge 0 -and $index -lt $files.Count) {
+                $content = Show-FileContent -FilePath $files[$index].FullName
+                Show-PagedContent -Content $content -Title "ALERT: $($files[$index].Name)"
+            }
+        }
+    }
+}
+
+# Show network data
+function Show-NetworkData {
+    param([string]$IncidentPath)
+    
+    $networkPath = Join-Path $IncidentPath "Network"
+    if (!(Test-Path $networkPath)) {
+        Write-Host "No network data found" -ForegroundColor $colors.Info
+        Read-Host "Press Enter to continue"
+        return
+    }
+    
+    while ($true) {
+        Show-Header "NETWORK DATA"
+        
+        $files = Get-ChildItem $networkPath -File | Sort-Object Name
+        
+        Write-Host "Network Files:" -ForegroundColor $colors.Header
+        for ($i = 0; $i -lt $files.Count; $i++) {
+            Write-Host ("{0,3}. {1}" -f ($i + 1), $files[$i].Name) -ForegroundColor $colors.Menu
+        }
+        
+        Write-Host ""
+        Write-Host "Enter file number to view or Q to go back: " -NoNewline
+        $choice = Read-Host
+        
+        if ($choice -match '^[Qq]') { return }
+        
+        if ($choice -match '^\d+$') {
+            $index = [int]$choice - 1
+            if ($index -ge 0 -and $index -lt $files.Count) {
+                $content = Show-FileContent -FilePath $files[$index].FullName
+                Show-PagedContent -Content $content -Title "NETWORK: $($files[$index].Name)"
+            }
+        }
+    }
+}
+
+# Show process data
+function Show-ProcessData {
+    param([string]$IncidentPath)
+    
+    $processPath = Join-Path $IncidentPath "Processes"
+    $files = @()
+    
+    # Check both Processes folder and ALERTS for process files
+    if (Test-Path $processPath) {
+        $files += Get-ChildItem $processPath -File
+    }
+    
+    $alertsPath = Join-Path $IncidentPath "ALERTS"
+    if (Test-Path $alertsPath) {
+        $files += Get-ChildItem $alertsPath -Filter "*process*" -File
+        $files += Get-ChildItem $alertsPath -Filter "*pid*" -File
+    }
+    
+    if ($files.Count -eq 0) {
+        Write-Host "No process data found" -ForegroundColor $colors.Info
+        Read-Host "Press Enter to continue"
+        return
+    }
+    
+    while ($true) {
+        Show-Header "PROCESS DATA"
+        
+        Write-Host "Process Files:" -ForegroundColor $colors.Header
+        for ($i = 0; $i -lt $files.Count; $i++) {
+            $color = if ($files[$i].DirectoryName -match "ALERTS") { $colors.High } else { $colors.Menu }
+            Write-Host ("{0,3}. {1}" -f ($i + 1), $files[$i].Name) -ForegroundColor $color
+        }
+        
+        Write-Host ""
+        Write-Host "Enter file number to view or Q to go back: " -NoNewline
+        $choice = Read-Host
+        
+        if ($choice -match '^[Qq]') { return }
+        
+        if ($choice -match '^\d+$') {
+            $index = [int]$choice - 1
+            if ($index -ge 0 -and $index -lt $files.Count) {
+                $content = Show-FileContent -FilePath $files[$index].FullName
+                Show-PagedContent -Content $content -Title "PROCESS: $($files[$index].Name)"
+            }
+        }
+    }
+}
+
+# Show persistence data
+function Show-PersistenceData {
+    param([string]$IncidentPath)
+    
+    $persistPath = Join-Path $IncidentPath "Persistence"
+    $files = @()
+    
+    if (Test-Path $persistPath) {
+        $files += Get-ChildItem $persistPath -File
+    }
+    
+    # Also check ALERTS for persistence files
+    $alertsPath = Join-Path $IncidentPath "ALERTS"
+    if (Test-Path $alertsPath) {
+        $files += Get-ChildItem $alertsPath -Filter "*autorun*" -File
+        $files += Get-ChildItem $alertsPath -Filter "*service*" -File
+        $files += Get-ChildItem $alertsPath -Filter "*task*" -File
+    }
+    
+    if ($files.Count -eq 0) {
+        Write-Host "No persistence data found" -ForegroundColor $colors.Info
+        Read-Host "Press Enter to continue"
+        return
+    }
+    
+    while ($true) {
+        Show-Header "PERSISTENCE DATA"
+        
+        Write-Host "Persistence Files:" -ForegroundColor $colors.Header
+        for ($i = 0; $i -lt $files.Count; $i++) {
+            $color = if ($files[$i].DirectoryName -match "ALERTS") { $colors.High } else { $colors.Menu }
+            Write-Host ("{0,3}. {1}" -f ($i + 1), $files[$i].Name) -ForegroundColor $color
+        }
+        
+        Write-Host ""
+        Write-Host "Enter file number to view or Q to go back: " -NoNewline
+        $choice = Read-Host
+        
+        if ($choice -match '^[Qq]') { return }
+        
+        if ($choice -match '^\d+$') {
+            $index = [int]$choice - 1
+            if ($index -ge 0 -and $index -lt $files.Count) {
+                $content = Show-FileContent -FilePath $files[$index].FullName
+                Show-PagedContent -Content $content -Title "PERSISTENCE: $($files[$index].Name)"
+            }
+        }
+    }
+}
+
+# Show system info
+function Show-SystemInfo {
+    param([string]$IncidentPath)
+    
+    $systemPath = Join-Path $IncidentPath "System"
+    if (!(Test-Path $systemPath)) {
+        Write-Host "No system data found" -ForegroundColor $colors.Info
+        Read-Host "Press Enter to continue"
+        return
+    }
+    
+    while ($true) {
+        Show-Header "SYSTEM INFORMATION"
+        
+        $files = Get-ChildItem $systemPath -File | Sort-Object Name
+        
+        Write-Host "System Files:" -ForegroundColor $colors.Header
+        for ($i = 0; $i -lt $files.Count; $i++) {
+            Write-Host ("{0,3}. {1}" -f ($i + 1), $files[$i].Name) -ForegroundColor $colors.Menu
+        }
+        
+        Write-Host ""
+        Write-Host "Enter file number to view or Q to go back: " -NoNewline
+        $choice = Read-Host
+        
+        if ($choice -match '^[Qq]') { return }
+        
+        if ($choice -match '^\d+$') {
+            $index = [int]$choice - 1
+            if ($index -ge 0 -and $index -lt $files.Count) {
+                $content = Show-FileContent -FilePath $files[$index].FullName
+                Show-PagedContent -Content $content -Title "SYSTEM: $($files[$index].Name)"
+            }
+        }
+    }
+}
+
+# Show event logs
+function Show-EventLogs {
+    param([string]$IncidentPath)
+    
+    $logsPath = Join-Path $IncidentPath "Logs"
+    if (!(Test-Path $logsPath)) {
+        Write-Host "No event logs found" -ForegroundColor $colors.Info
+        Read-Host "Press Enter to continue"
+        return
+    }
+    
+    while ($true) {
+        Show-Header "EVENT LOGS"
+        
+        $files = Get-ChildItem $logsPath -File | Sort-Object Name
+        
+        Write-Host "Event Log Files:" -ForegroundColor $colors.Header
+        Write-Host "(Note: .evtx files can only be parsed on Windows systems)" -ForegroundColor $colors.Data
+        Write-Host ""
+        
+        for ($i = 0; $i -lt $files.Count; $i++) {
+            $color = if ($files[$i].Extension -eq ".evtx") { $colors.High } else { $colors.Menu }
+            Write-Host ("{0,3}. {1} ({2:N2} MB)" -f ($i + 1), $files[$i].Name, ($files[$i].Length/1MB)) -ForegroundColor $color
+        }
+        
+        Write-Host ""
+        Write-Host "Enter file number to view or Q to go back: " -NoNewline
+        $choice = Read-Host
+        
+        if ($choice -match '^[Qq]') { return }
+        
+        if ($choice -match '^\d+$') {
+            $index = [int]$choice - 1
+            if ($index -ge 0 -and $index -lt $files.Count) {
+                $content = Show-FileContent -FilePath $files[$index].FullName
+                Show-PagedContent -Content $content -Title "LOG: $($files[$index].Name)"
+            }
+        }
+    }
+}
+
+# Browse all files
+function Browse-Files {
+    param([string]$IncidentPath)
+    
+    Show-Header "FILE BROWSER"
+    
+    Write-Host "Building file list..." -ForegroundColor $colors.Info
+    $allFiles = Get-ChildItem $IncidentPath -Recurse -File | Sort-Object DirectoryName, Name
+    
+    $fileList = @()
+    $currentDir = ""
+    
+    foreach ($file in $allFiles) {
+        $relPath = $file.DirectoryName.Replace($IncidentPath, "").TrimStart("\")
+        
+        if ($relPath -ne $currentDir) {
+            $fileList += ""
+            $fileList += "[$relPath]"
+            $currentDir = $relPath
+        }
+        
+        $fileList += "  $($file.Name) ($([Math]::Round($file.Length/1KB, 2)) KB)"
+    }
+    
+    Show-PagedContent -Content $fileList -Title "ALL FILES ($($allFiles.Count) total)"
+}
+
+# Export all data to text
+function Export-AllData {
+    param([string]$IncidentPath)
+    
+    Show-Header "EXPORT ALL DATA"
+    
+    Write-Host "This will export all data to a single text file." -ForegroundColor $colors.Info
+    $confirm = Read-Host "Continue? (Y/N)"
+    
+    if ($confirm -ne 'Y' -and $confirm -ne 'y') { return }
+    
+    $exportFile = Join-Path $IncidentPath "Export_$(Get-Date -Format 'yyyyMMdd_HHmmss').txt"
+    $output = @()
+    
+    # Header
+    $output += "="*80
+    $output += "INCIDENT RESPONSE DATA EXPORT"
+    $output += "="*80
+    $output += "Generated: $(Get-Date)"
+    $output += "Incident: $(Split-Path $IncidentPath -Leaf)"
+    $output += "Path: $IncidentPath"
+    $output += "="*80
+    $output += ""
+    
+    Write-Host "Exporting data..." -ForegroundColor $colors.Info
+    
+    # Process each directory
+    $directories = @(
+        @{Name="SUMMARY"; Path="SUMMARY.txt"; Type="File"},
+        @{Name="ALERTS"; Path="ALERTS"; Type="Directory"},
+        @{Name="NETWORK"; Path="Network"; Type="Directory"},
+        @{Name="PROCESSES"; Path="Processes"; Type="Directory"},
+        @{Name="PERSISTENCE"; Path="Persistence"; Type="Directory"},
+        @{Name="SYSTEM"; Path="System"; Type="Directory"},
+        @{Name="LOGS"; Path="Logs"; Type="Directory"}
+    )
+    
+    foreach ($dir in $directories) {
+        Write-Host "  Exporting $($dir.Name)..." -ForegroundColor $colors.Data
+        
+        $fullPath = Join-Path $IncidentPath $dir.Path
+        
+        if (Test-Path $fullPath) {
+            $output += ""
+            $output += "="*80
+            $output += $dir.Name
+            $output += "="*80
+            
+            if ($dir.Type -eq "File") {
+                $output += Get-Content $fullPath
+            }
+            else {
+                $files = Get-ChildItem $fullPath -File | Sort-Object Name
+                foreach ($file in $files) {
+                    $output += ""
+                    $output += "-"*60
+                    $output += "FILE: $($file.Name)"
+                    $output += "-"*60
+                    
+                    $content = Show-FileContent -FilePath $file.FullName
+                    $output += $content
+                }
+            }
+        }
+    }
+    
+    # Save export
+    $output | Out-File $exportFile -Encoding UTF8
+    
+    Write-Host ""
+    Write-Host "Export complete!" -ForegroundColor $colors.Low
+    Write-Host "File saved to: $exportFile" -ForegroundColor $colors.Info
+    Write-Host "Size: $([Math]::Round((Get-Item $exportFile).Length/1MB, 2)) MB" -ForegroundColor $colors.Data
+    Write-Host ""
+    
+    $open = Read-Host "Open file now? (Y/N)"
+    if ($open -eq 'Y' -or $open -eq 'y') {
+        notepad.exe $exportFile
+    }
+    
+    Read-Host "Press Enter to continue"
+}
+
+# Main execution
+Show-Header
+
+Write-Host "This viewer displays data collected by the Incident Response Triage Script" -ForegroundColor $colors.Info
+Write-Host "No live data collection will be performed" -ForegroundColor $colors.Info
+Write-Host ""
+
+# Main loop
+while ($true) {
+    $incidentPath = $Path
+    
+    if (!$incidentPath -or !(Test-Path $incidentPath)) {
+        $incidentPath = Select-IncidentDirectory
+    }
+    
+    if (!$incidentPath) {
+        Write-Host "Exiting..." -ForegroundColor $colors.Info
+        break
+    }
+    
+    Show-IncidentMenu -IncidentPath $incidentPath
+    
+    # Reset path to show selection menu again
+    $Path = ""
+}
+
+Write-Host ""
+Write-Host "Thank you for using IR Data Viewer" -ForegroundColor $colors.Info) {
+                        $events | Where-Object { $_.Id -eq [int]$eventId }
+                    } else { $events }
+                }
+                "3" {
+                    $hours = Read-Host "Events from last X hours"
+                    if ($hours -match '^\d+
+
+# Display file content based on type
+function Show-FileContent {
+    param([string]$FilePath)
+    
+    if (!(Test-Path $FilePath)) {
+        return @("File not found: $FilePath")
+    }
+    
+    $extension = [System.IO.Path]::GetExtension($FilePath).ToLower()
+    
+    switch ($extension) {
+        ".csv" { return Show-CsvFile -FilePath $FilePath }
+        ".json" { return Show-JsonFile -FilePath $FilePath }
+        ".evtx" { return Show-EventLog -FilePath $FilePath }
+        ".txt" { return Get-Content $FilePath }
+        ".log" { return Get-Content $FilePath }
+        default { return @("Cannot display file type: $extension") }
+    }
+}
+
+# Paged display
+function Show-PagedContent {
+    param(
+        [array]$Content,
+        [string]$Title
+    )
+    
+    if ($Content.Count -eq 0) {
+        Write-Host "No content to display" -ForegroundColor $colors.Info
+        Read-Host "Press Enter to continue"
+        return
+    }
+    
+    $totalPages = [Math]::Ceiling($Content.Count / $PageSize)
+    $currentPage = 0
+    
+    while ($true) {
+        Show-Header $Title
+        
+        $startIdx = $currentPage * $PageSize
+        $endIdx = [Math]::Min($startIdx + $PageSize, $Content.Count)
+        
+        # Display page content
+        for ($i = $startIdx; $i -lt $endIdx; $i++) {
+            $line = $Content[$i]
+            
+            # Color coding based on content
+            if ($line -match "CRITICAL|ERROR|FAIL") {
+                Write-Host $line -ForegroundColor $colors.Critical
+            }
+            elseif ($line -match "WARNING|ALERT|SUSPICIOUS") {
+                Write-Host $line -ForegroundColor $colors.High
+            }
+            elseif ($line -match "SUCCESS|PASS") {
+                Write-Host $line -ForegroundColor $colors.Low
+            }
+            else {
+                Write-Host $line -ForegroundColor $colors.Data
+            }
+        }
+        
+        # Navigation
+        Write-Host ""
+        Write-Host ("-" * 80) -ForegroundColor $colors.Menu
+        Write-Host "Page $($currentPage + 1) of $totalPages | Showing items $($startIdx + 1)-$endIdx of $($Content.Count)" -ForegroundColor $colors.Info
+        Write-Host "[N]ext [P]revious [F]irst [L]ast [Q]uit: " -NoNewline -ForegroundColor $colors.Menu
+        
+        $key = Read-Host
+        
+        switch ($key.ToUpper()) {
+            "N" { if ($currentPage -lt $totalPages - 1) { $currentPage++ } }
+            "P" { if ($currentPage -gt 0) { $currentPage-- } }
+            "F" { $currentPage = 0 }
+            "L" { $currentPage = $totalPages - 1 }
+            "Q" { return }
+        }
+    }
+}
+
+# Main menu for incident data
+function Show-IncidentMenu {
+    param([string]$IncidentPath)
+    
+    while ($true) {
+        Show-Header "INCIDENT DATA BROWSER"
+        
+        # Display incident info
+        $incidentName = Split-Path $IncidentPath -Leaf
+        Write-Host "Incident: $incidentName" -ForegroundColor $colors.Info
+        Write-Host "Path: $IncidentPath" -ForegroundColor $colors.Data
+        
+        # Get summary info if available
+        $summaryPath = Join-Path $IncidentPath "SUMMARY.txt"
+        if (Test-Path $summaryPath) {
+            $summaryLines = Get-Content $summaryPath | Select-String "THREAT LEVEL:|TOTAL ALERTS:"
+            foreach ($line in $summaryLines) {
+                if ($line -match "THREAT LEVEL:") {
+                    $level = $line.Line.Split(":")[1].Trim()
+                    $color = switch ($level) {
+                        "CRITICAL" { $colors.Critical }
+                        "HIGH" { $colors.High }
+                        "MEDIUM" { $colors.Medium }
+                        "LOW" { $colors.Low }
+                        default { $colors.Data }
+                    }
+                    Write-Host $line.Line -ForegroundColor $color
+                }
+                else {
+                    Write-Host $line.Line -ForegroundColor $colors.Info
+                }
+            }
+        }
+        
+        Write-Host ""
+        Write-Host "MAIN MENU" -ForegroundColor $colors.Header
+        Write-Host "1. View Summary" -ForegroundColor $colors.Menu
+        Write-Host "2. View Alerts" -ForegroundColor $colors.Menu
+        Write-Host "3. Network Data" -ForegroundColor $colors.Menu
+        Write-Host "4. Process Data" -ForegroundColor $colors.Menu
+        Write-Host "5. Persistence Data" -ForegroundColor $colors.Menu
+        Write-Host "6. System Information" -ForegroundColor $colors.Menu
+        Write-Host "7. Event Logs" -ForegroundColor $colors.Menu
+        Write-Host "8. Browse All Files" -ForegroundColor $colors.Menu
+        Write-Host "9. Export All to Text" -ForegroundColor $colors.Menu
+        Write-Host "Q. Back to Directory Selection" -ForegroundColor $colors.Menu
+        Write-Host ""
+        
+        $choice = Read-Host "Select option"
+        
+        switch ($choice) {
+            "1" { Show-Summary -IncidentPath $IncidentPath }
+            "2" { Show-Alerts -IncidentPath $IncidentPath }
+            "3" { Show-NetworkData -IncidentPath $IncidentPath }
+            "4" { Show-ProcessData -IncidentPath $IncidentPath }
+            "5" { Show-PersistenceData -IncidentPath $IncidentPath }
+            "6" { Show-SystemInfo -IncidentPath $IncidentPath }
+            "7" { Show-EventLogs -IncidentPath $IncidentPath }
+            "8" { Browse-Files -IncidentPath $IncidentPath }
+            "9" { Export-AllData -IncidentPath $IncidentPath }
+            "Q" { return }
+            "q" { return }
+        }
+    }
+}
+
+# Show summary
+function Show-Summary {
+    param([string]$IncidentPath)
+    
+    $summaryFile = Join-Path $IncidentPath "SUMMARY.txt"
+    if (Test-Path $summaryFile) {
+        $content = Get-Content $summaryFile
+        Show-PagedContent -Content $content -Title "INCIDENT SUMMARY"
+    }
+    else {
+        Write-Host "Summary file not found" -ForegroundColor $colors.Critical
+        Read-Host "Press Enter to continue"
+    }
+}
+
+# Show alerts
+function Show-Alerts {
+    param([string]$IncidentPath)
+    
+    $alertsPath = Join-Path $IncidentPath "ALERTS"
+    if (!(Test-Path $alertsPath)) {
+        Write-Host "No alerts directory found" -ForegroundColor $colors.Info
+        Read-Host "Press Enter to continue"
+        return
+    }
+    
+    while ($true) {
+        Show-Header "ALERTS"
+        
+        $files = Get-ChildItem $alertsPath -File | Sort-Object Name
+        if ($files.Count -eq 0) {
+            Write-Host "No alert files found" -ForegroundColor $colors.Info
+            Read-Host "Press Enter to continue"
+            return
+        }
+        
+        Write-Host "Alert Files:" -ForegroundColor $colors.Header
+        for ($i = 0; $i -lt $files.Count; $i++) {
+            Write-Host ("{0,3}. {1}" -f ($i + 1), $files[$i].Name) -ForegroundColor $colors.High
+        }
+        
+        Write-Host ""
+        Write-Host "Enter file number to view or Q to go back: " -NoNewline
+        $choice = Read-Host
+        
+        if ($choice -match '^[Qq]') { return }
+        
+        if ($choice -match '^\d+$') {
+            $index = [int]$choice - 1
+            if ($index -ge 0 -and $index -lt $files.Count) {
+                $content = Show-FileContent -FilePath $files[$index].FullName
+                Show-PagedContent -Content $content -Title "ALERT: $($files[$index].Name)"
+            }
+        }
+    }
+}
+
+# Show network data
+function Show-NetworkData {
+    param([string]$IncidentPath)
+    
+    $networkPath = Join-Path $IncidentPath "Network"
+    if (!(Test-Path $networkPath)) {
+        Write-Host "No network data found" -ForegroundColor $colors.Info
+        Read-Host "Press Enter to continue"
+        return
+    }
+    
+    while ($true) {
+        Show-Header "NETWORK DATA"
+        
+        $files = Get-ChildItem $networkPath -File | Sort-Object Name
+        
+        Write-Host "Network Files:" -ForegroundColor $colors.Header
+        for ($i = 0; $i -lt $files.Count; $i++) {
+            Write-Host ("{0,3}. {1}" -f ($i + 1), $files[$i].Name) -ForegroundColor $colors.Menu
+        }
+        
+        Write-Host ""
+        Write-Host "Enter file number to view or Q to go back: " -NoNewline
+        $choice = Read-Host
+        
+        if ($choice -match '^[Qq]') { return }
+        
+        if ($choice -match '^\d+$') {
+            $index = [int]$choice - 1
+            if ($index -ge 0 -and $index -lt $files.Count) {
+                $content = Show-FileContent -FilePath $files[$index].FullName
+                Show-PagedContent -Content $content -Title "NETWORK: $($files[$index].Name)"
+            }
+        }
+    }
+}
+
+# Show process data
+function Show-ProcessData {
+    param([string]$IncidentPath)
+    
+    $processPath = Join-Path $IncidentPath "Processes"
+    $files = @()
+    
+    # Check both Processes folder and ALERTS for process files
+    if (Test-Path $processPath) {
+        $files += Get-ChildItem $processPath -File
+    }
+    
+    $alertsPath = Join-Path $IncidentPath "ALERTS"
+    if (Test-Path $alertsPath) {
+        $files += Get-ChildItem $alertsPath -Filter "*process*" -File
+        $files += Get-ChildItem $alertsPath -Filter "*pid*" -File
+    }
+    
+    if ($files.Count -eq 0) {
+        Write-Host "No process data found" -ForegroundColor $colors.Info
+        Read-Host "Press Enter to continue"
+        return
+    }
+    
+    while ($true) {
+        Show-Header "PROCESS DATA"
+        
+        Write-Host "Process Files:" -ForegroundColor $colors.Header
+        for ($i = 0; $i -lt $files.Count; $i++) {
+            $color = if ($files[$i].DirectoryName -match "ALERTS") { $colors.High } else { $colors.Menu }
+            Write-Host ("{0,3}. {1}" -f ($i + 1), $files[$i].Name) -ForegroundColor $color
+        }
+        
+        Write-Host ""
+        Write-Host "Enter file number to view or Q to go back: " -NoNewline
+        $choice = Read-Host
+        
+        if ($choice -match '^[Qq]') { return }
+        
+        if ($choice -match '^\d+$') {
+            $index = [int]$choice - 1
+            if ($index -ge 0 -and $index -lt $files.Count) {
+                $content = Show-FileContent -FilePath $files[$index].FullName
+                Show-PagedContent -Content $content -Title "PROCESS: $($files[$index].Name)"
+            }
+        }
+    }
+}
+
+# Show persistence data
+function Show-PersistenceData {
+    param([string]$IncidentPath)
+    
+    $persistPath = Join-Path $IncidentPath "Persistence"
+    $files = @()
+    
+    if (Test-Path $persistPath) {
+        $files += Get-ChildItem $persistPath -File
+    }
+    
+    # Also check ALERTS for persistence files
+    $alertsPath = Join-Path $IncidentPath "ALERTS"
+    if (Test-Path $alertsPath) {
+        $files += Get-ChildItem $alertsPath -Filter "*autorun*" -File
+        $files += Get-ChildItem $alertsPath -Filter "*service*" -File
+        $files += Get-ChildItem $alertsPath -Filter "*task*" -File
+    }
+    
+    if ($files.Count -eq 0) {
+        Write-Host "No persistence data found" -ForegroundColor $colors.Info
+        Read-Host "Press Enter to continue"
+        return
+    }
+    
+    while ($true) {
+        Show-Header "PERSISTENCE DATA"
+        
+        Write-Host "Persistence Files:" -ForegroundColor $colors.Header
+        for ($i = 0; $i -lt $files.Count; $i++) {
+            $color = if ($files[$i].DirectoryName -match "ALERTS") { $colors.High } else { $colors.Menu }
+            Write-Host ("{0,3}. {1}" -f ($i + 1), $files[$i].Name) -ForegroundColor $color
+        }
+        
+        Write-Host ""
+        Write-Host "Enter file number to view or Q to go back: " -NoNewline
+        $choice = Read-Host
+        
+        if ($choice -match '^[Qq]') { return }
+        
+        if ($choice -match '^\d+$') {
+            $index = [int]$choice - 1
+            if ($index -ge 0 -and $index -lt $files.Count) {
+                $content = Show-FileContent -FilePath $files[$index].FullName
+                Show-PagedContent -Content $content -Title "PERSISTENCE: $($files[$index].Name)"
+            }
+        }
+    }
+}
+
+# Show system info
+function Show-SystemInfo {
+    param([string]$IncidentPath)
+    
+    $systemPath = Join-Path $IncidentPath "System"
+    if (!(Test-Path $systemPath)) {
+        Write-Host "No system data found" -ForegroundColor $colors.Info
+        Read-Host "Press Enter to continue"
+        return
+    }
+    
+    while ($true) {
+        Show-Header "SYSTEM INFORMATION"
+        
+        $files = Get-ChildItem $systemPath -File | Sort-Object Name
+        
+        Write-Host "System Files:" -ForegroundColor $colors.Header
+        for ($i = 0; $i -lt $files.Count; $i++) {
+            Write-Host ("{0,3}. {1}" -f ($i + 1), $files[$i].Name) -ForegroundColor $colors.Menu
+        }
+        
+        Write-Host ""
+        Write-Host "Enter file number to view or Q to go back: " -NoNewline
+        $choice = Read-Host
+        
+        if ($choice -match '^[Qq]') { return }
+        
+        if ($choice -match '^\d+$') {
+            $index = [int]$choice - 1
+            if ($index -ge 0 -and $index -lt $files.Count) {
+                $content = Show-FileContent -FilePath $files[$index].FullName
+                Show-PagedContent -Content $content -Title "SYSTEM: $($files[$index].Name)"
+            }
+        }
+    }
+}
+
+# Show event logs
+function Show-EventLogs {
+    param([string]$IncidentPath)
+    
+    $logsPath = Join-Path $IncidentPath "Logs"
+    if (!(Test-Path $logsPath)) {
+        Write-Host "No event logs found" -ForegroundColor $colors.Info
+        Read-Host "Press Enter to continue"
+        return
+    }
+    
+    while ($true) {
+        Show-Header "EVENT LOGS"
+        
+        $files = Get-ChildItem $logsPath -File | Sort-Object Name
+        
+        Write-Host "Event Log Files:" -ForegroundColor $colors.Header
+        Write-Host "(Note: .evtx files can only be parsed on Windows systems)" -ForegroundColor $colors.Data
+        Write-Host ""
+        
+        for ($i = 0; $i -lt $files.Count; $i++) {
+            $color = if ($files[$i].Extension -eq ".evtx") { $colors.High } else { $colors.Menu }
+            Write-Host ("{0,3}. {1} ({2:N2} MB)" -f ($i + 1), $files[$i].Name, ($files[$i].Length/1MB)) -ForegroundColor $color
+        }
+        
+        Write-Host ""
+        Write-Host "Enter file number to view or Q to go back: " -NoNewline
+        $choice = Read-Host
+        
+        if ($choice -match '^[Qq]') { return }
+        
+        if ($choice -match '^\d+$') {
+            $index = [int]$choice - 1
+            if ($index -ge 0 -and $index -lt $files.Count) {
+                $content = Show-FileContent -FilePath $files[$index].FullName
+                Show-PagedContent -Content $content -Title "LOG: $($files[$index].Name)"
+            }
+        }
+    }
+}
+
+# Browse all files
+function Browse-Files {
+    param([string]$IncidentPath)
+    
+    Show-Header "FILE BROWSER"
+    
+    Write-Host "Building file list..." -ForegroundColor $colors.Info
+    $allFiles = Get-ChildItem $IncidentPath -Recurse -File | Sort-Object DirectoryName, Name
+    
+    $fileList = @()
+    $currentDir = ""
+    
+    foreach ($file in $allFiles) {
+        $relPath = $file.DirectoryName.Replace($IncidentPath, "").TrimStart("\")
+        
+        if ($relPath -ne $currentDir) {
+            $fileList += ""
+            $fileList += "[$relPath]"
+            $currentDir = $relPath
+        }
+        
+        $fileList += "  $($file.Name) ($([Math]::Round($file.Length/1KB, 2)) KB)"
+    }
+    
+    Show-PagedContent -Content $fileList -Title "ALL FILES ($($allFiles.Count) total)"
+}
+
+# Export all data to text
+function Export-AllData {
+    param([string]$IncidentPath)
+    
+    Show-Header "EXPORT ALL DATA"
+    
+    Write-Host "This will export all data to a single text file." -ForegroundColor $colors.Info
+    $confirm = Read-Host "Continue? (Y/N)"
+    
+    if ($confirm -ne 'Y' -and $confirm -ne 'y') { return }
+    
+    $exportFile = Join-Path $IncidentPath "Export_$(Get-Date -Format 'yyyyMMdd_HHmmss').txt"
+    $output = @()
+    
+    # Header
+    $output += "="*80
+    $output += "INCIDENT RESPONSE DATA EXPORT"
+    $output += "="*80
+    $output += "Generated: $(Get-Date)"
+    $output += "Incident: $(Split-Path $IncidentPath -Leaf)"
+    $output += "Path: $IncidentPath"
+    $output += "="*80
+    $output += ""
+    
+    Write-Host "Exporting data..." -ForegroundColor $colors.Info
+    
+    # Process each directory
+    $directories = @(
+        @{Name="SUMMARY"; Path="SUMMARY.txt"; Type="File"},
+        @{Name="ALERTS"; Path="ALERTS"; Type="Directory"},
+        @{Name="NETWORK"; Path="Network"; Type="Directory"},
+        @{Name="PROCESSES"; Path="Processes"; Type="Directory"},
+        @{Name="PERSISTENCE"; Path="Persistence"; Type="Directory"},
+        @{Name="SYSTEM"; Path="System"; Type="Directory"},
+        @{Name="LOGS"; Path="Logs"; Type="Directory"}
+    )
+    
+    foreach ($dir in $directories) {
+        Write-Host "  Exporting $($dir.Name)..." -ForegroundColor $colors.Data
+        
+        $fullPath = Join-Path $IncidentPath $dir.Path
+        
+        if (Test-Path $fullPath) {
+            $output += ""
+            $output += "="*80
+            $output += $dir.Name
+            $output += "="*80
+            
+            if ($dir.Type -eq "File") {
+                $output += Get-Content $fullPath
+            }
+            else {
+                $files = Get-ChildItem $fullPath -File | Sort-Object Name
+                foreach ($file in $files) {
+                    $output += ""
+                    $output += "-"*60
+                    $output += "FILE: $($file.Name)"
+                    $output += "-"*60
+                    
+                    $content = Show-FileContent -FilePath $file.FullName
+                    $output += $content
+                }
+            }
+        }
+    }
+    
+    # Save export
+    $output | Out-File $exportFile -Encoding UTF8
+    
+    Write-Host ""
+    Write-Host "Export complete!" -ForegroundColor $colors.Low
+    Write-Host "File saved to: $exportFile" -ForegroundColor $colors.Info
+    Write-Host "Size: $([Math]::Round((Get-Item $exportFile).Length/1MB, 2)) MB" -ForegroundColor $colors.Data
+    Write-Host ""
+    
+    $open = Read-Host "Open file now? (Y/N)"
+    if ($open -eq 'Y' -or $open -eq 'y') {
+        notepad.exe $exportFile
+    }
+    
+    Read-Host "Press Enter to continue"
+}
+
+# Main execution
+Show-Header
+
+Write-Host "This viewer displays data collected by the Incident Response Triage Script" -ForegroundColor $colors.Info
+Write-Host "No live data collection will be performed" -ForegroundColor $colors.Info
+Write-Host ""
+
+# Main loop
+while ($true) {
+    $incidentPath = $Path
+    
+    if (!$incidentPath -or !(Test-Path $incidentPath)) {
+        $incidentPath = Select-IncidentDirectory
+    }
+    
+    if (!$incidentPath) {
+        Write-Host "Exiting..." -ForegroundColor $colors.Info
+        break
+    }
+    
+    Show-IncidentMenu -IncidentPath $incidentPath
+    
+    # Reset path to show selection menu again
+    $Path = ""
+}
+
+Write-Host ""
+Write-Host "Thank you for using IR Data Viewer" -ForegroundColor $colors.Info) {
+                        $cutoff = (Get-Date).AddHours(-[int]$hours)
+                        $events | Where-Object { $_.TimeCreated -gt $cutoff }
+                    } else { $events }
+                }
+                default { $events }
+            }
+            
+            $output += "Filtered Events: $($events.Count)"
+            $output += ""
+        }
+        
+        # Format events
+        $eventNum = 1
+        foreach ($event in $events) {
+            $output += "===== Event #$eventNum ====="
+            $output += "Time: $($event.TimeCreated)"
+            $output += "Level: $($event.LevelDisplayName) | ID: $($event.Id)"
+            $output += "Source: $($event.ProviderName)"
+            $output += "Computer: $($event.MachineName)"
+            
+            if ($event.UserId) {
+                $output += "User: $($event.UserId)"
+            }
+            
+            if ($event.Message) {
+                # Option to show full or truncated messages
+                $output += "Message:"
+                $output += $event.Message -split "`n" | ForEach-Object { "  $_" }
+            }
+            
+            $output += ""
+            $eventNum++
+        }
+        
+        return $output
+    }
+    catch {
+        $output = @()
+        $output += "Unable to parse event log on this system."
+        $output += "Event logs can only be viewed on Windows systems with appropriate permissions."
+        $output += ""
+        $output += "Error: $_"
+        $output += ""
+        $output += "Raw file location: $FilePath"
+        $output += "File size: $([Math]::Round((Get-Item $FilePath).Length/1MB, 2)) MB"
+        
+        return $output
+    }
+}
+
+# Display file content based on type
+function Show-FileContent {
+    param([string]$FilePath)
+    
+    if (!(Test-Path $FilePath)) {
+        return @("File not found: $FilePath")
+    }
+    
+    $extension = [System.IO.Path]::GetExtension($FilePath).ToLower()
+    
+    switch ($extension) {
+        ".csv" { return Show-CsvFile -FilePath $FilePath }
+        ".json" { return Show-JsonFile -FilePath $FilePath }
+        ".evtx" { return Show-EventLog -FilePath $FilePath }
+        ".txt" { return Get-Content $FilePath }
+        ".log" { return Get-Content $FilePath }
+        default { return @("Cannot display file type: $extension") }
+    }
+}
+
+# Paged display
+function Show-PagedContent {
+    param(
+        [array]$Content,
+        [string]$Title
+    )
+    
+    if ($Content.Count -eq 0) {
+        Write-Host "No content to display" -ForegroundColor $colors.Info
+        Read-Host "Press Enter to continue"
+        return
+    }
+    
+    $totalPages = [Math]::Ceiling($Content.Count / $PageSize)
+    $currentPage = 0
+    
+    while ($true) {
+        Show-Header $Title
+        
+        $startIdx = $currentPage * $PageSize
+        $endIdx = [Math]::Min($startIdx + $PageSize, $Content.Count)
+        
+        # Display page content
+        for ($i = $startIdx; $i -lt $endIdx; $i++) {
+            $line = $Content[$i]
+            
+            # Color coding based on content
+            if ($line -match "CRITICAL|ERROR|FAIL") {
+                Write-Host $line -ForegroundColor $colors.Critical
+            }
+            elseif ($line -match "WARNING|ALERT|SUSPICIOUS") {
+                Write-Host $line -ForegroundColor $colors.High
+            }
+            elseif ($line -match "SUCCESS|PASS") {
+                Write-Host $line -ForegroundColor $colors.Low
+            }
+            else {
+                Write-Host $line -ForegroundColor $colors.Data
+            }
+        }
+        
+        # Navigation
+        Write-Host ""
+        Write-Host ("-" * 80) -ForegroundColor $colors.Menu
+        Write-Host "Page $($currentPage + 1) of $totalPages | Showing items $($startIdx + 1)-$endIdx of $($Content.Count)" -ForegroundColor $colors.Info
+        Write-Host "[N]ext [P]revious [F]irst [L]ast [Q]uit: " -NoNewline -ForegroundColor $colors.Menu
+        
+        $key = Read-Host
+        
+        switch ($key.ToUpper()) {
+            "N" { if ($currentPage -lt $totalPages - 1) { $currentPage++ } }
+            "P" { if ($currentPage -gt 0) { $currentPage-- } }
+            "F" { $currentPage = 0 }
+            "L" { $currentPage = $totalPages - 1 }
+            "Q" { return }
+        }
+    }
+}
+
+# Main menu for incident data
+function Show-IncidentMenu {
+    param([string]$IncidentPath)
+    
+    while ($true) {
+        Show-Header "INCIDENT DATA BROWSER"
+        
+        # Display incident info
+        $incidentName = Split-Path $IncidentPath -Leaf
+        Write-Host "Incident: $incidentName" -ForegroundColor $colors.Info
+        Write-Host "Path: $IncidentPath" -ForegroundColor $colors.Data
+        
+        # Get summary info if available
+        $summaryPath = Join-Path $IncidentPath "SUMMARY.txt"
+        if (Test-Path $summaryPath) {
+            $summaryLines = Get-Content $summaryPath | Select-String "THREAT LEVEL:|TOTAL ALERTS:"
+            foreach ($line in $summaryLines) {
+                if ($line -match "THREAT LEVEL:") {
+                    $level = $line.Line.Split(":")[1].Trim()
+                    $color = switch ($level) {
+                        "CRITICAL" { $colors.Critical }
+                        "HIGH" { $colors.High }
+                        "MEDIUM" { $colors.Medium }
+                        "LOW" { $colors.Low }
+                        default { $colors.Data }
+                    }
+                    Write-Host $line.Line -ForegroundColor $color
+                }
+                else {
+                    Write-Host $line.Line -ForegroundColor $colors.Info
+                }
+            }
+        }
+        
+        Write-Host ""
+        Write-Host "MAIN MENU" -ForegroundColor $colors.Header
+        Write-Host "1. View Summary" -ForegroundColor $colors.Menu
+        Write-Host "2. View Alerts" -ForegroundColor $colors.Menu
+        Write-Host "3. Network Data" -ForegroundColor $colors.Menu
+        Write-Host "4. Process Data" -ForegroundColor $colors.Menu
+        Write-Host "5. Persistence Data" -ForegroundColor $colors.Menu
+        Write-Host "6. System Information" -ForegroundColor $colors.Menu
+        Write-Host "7. Event Logs" -ForegroundColor $colors.Menu
+        Write-Host "8. Browse All Files" -ForegroundColor $colors.Menu
+        Write-Host "9. Export All to Text" -ForegroundColor $colors.Menu
+        Write-Host "Q. Back to Directory Selection" -ForegroundColor $colors.Menu
+        Write-Host ""
+        
+        $choice = Read-Host "Select option"
+        
+        switch ($choice) {
+            "1" { Show-Summary -IncidentPath $IncidentPath }
+            "2" { Show-Alerts -IncidentPath $IncidentPath }
+            "3" { Show-NetworkData -IncidentPath $IncidentPath }
+            "4" { Show-ProcessData -IncidentPath $IncidentPath }
+            "5" { Show-PersistenceData -IncidentPath $IncidentPath }
+            "6" { Show-SystemInfo -IncidentPath $IncidentPath }
+            "7" { Show-EventLogs -IncidentPath $IncidentPath }
+            "8" { Browse-Files -IncidentPath $IncidentPath }
+            "9" { Export-AllData -IncidentPath $IncidentPath }
+            "Q" { return }
+            "q" { return }
+        }
+    }
+}
+
+# Show summary
+function Show-Summary {
+    param([string]$IncidentPath)
+    
+    $summaryFile = Join-Path $IncidentPath "SUMMARY.txt"
+    if (Test-Path $summaryFile) {
+        $content = Get-Content $summaryFile
+        Show-PagedContent -Content $content -Title "INCIDENT SUMMARY"
+    }
+    else {
+        Write-Host "Summary file not found" -ForegroundColor $colors.Critical
+        Read-Host "Press Enter to continue"
+    }
+}
+
+# Show alerts
+function Show-Alerts {
+    param([string]$IncidentPath)
+    
+    $alertsPath = Join-Path $IncidentPath "ALERTS"
+    if (!(Test-Path $alertsPath)) {
+        Write-Host "No alerts directory found" -ForegroundColor $colors.Info
+        Read-Host "Press Enter to continue"
+        return
+    }
+    
+    while ($true) {
+        Show-Header "ALERTS"
+        
+        $files = Get-ChildItem $alertsPath -File | Sort-Object Name
+        if ($files.Count -eq 0) {
+            Write-Host "No alert files found" -ForegroundColor $colors.Info
+            Read-Host "Press Enter to continue"
+            return
+        }
+        
+        Write-Host "Alert Files:" -ForegroundColor $colors.Header
+        for ($i = 0; $i -lt $files.Count; $i++) {
+            Write-Host ("{0,3}. {1}" -f ($i + 1), $files[$i].Name) -ForegroundColor $colors.High
+        }
+        
+        Write-Host ""
+        Write-Host "Enter file number to view or Q to go back: " -NoNewline
+        $choice = Read-Host
+        
+        if ($choice -match '^[Qq]') { return }
+        
+        if ($choice -match '^\d+$') {
+            $index = [int]$choice - 1
+            if ($index -ge 0 -and $index -lt $files.Count) {
+                $content = Show-FileContent -FilePath $files[$index].FullName
+                Show-PagedContent -Content $content -Title "ALERT: $($files[$index].Name)"
+            }
+        }
+    }
+}
+
+# Show network data
+function Show-NetworkData {
+    param([string]$IncidentPath)
+    
+    $networkPath = Join-Path $IncidentPath "Network"
+    if (!(Test-Path $networkPath)) {
+        Write-Host "No network data found" -ForegroundColor $colors.Info
+        Read-Host "Press Enter to continue"
+        return
+    }
+    
+    while ($true) {
+        Show-Header "NETWORK DATA"
+        
+        $files = Get-ChildItem $networkPath -File | Sort-Object Name
+        
+        Write-Host "Network Files:" -ForegroundColor $colors.Header
+        for ($i = 0; $i -lt $files.Count; $i++) {
+            Write-Host ("{0,3}. {1}" -f ($i + 1), $files[$i].Name) -ForegroundColor $colors.Menu
+        }
+        
+        Write-Host ""
+        Write-Host "Enter file number to view or Q to go back: " -NoNewline
+        $choice = Read-Host
+        
+        if ($choice -match '^[Qq]') { return }
+        
+        if ($choice -match '^\d+$') {
+            $index = [int]$choice - 1
+            if ($index -ge 0 -and $index -lt $files.Count) {
+                $content = Show-FileContent -FilePath $files[$index].FullName
+                Show-PagedContent -Content $content -Title "NETWORK: $($files[$index].Name)"
+            }
+        }
+    }
+}
+
+# Show process data
+function Show-ProcessData {
+    param([string]$IncidentPath)
+    
+    $processPath = Join-Path $IncidentPath "Processes"
+    $files = @()
+    
+    # Check both Processes folder and ALERTS for process files
+    if (Test-Path $processPath) {
+        $files += Get-ChildItem $processPath -File
+    }
+    
+    $alertsPath = Join-Path $IncidentPath "ALERTS"
+    if (Test-Path $alertsPath) {
+        $files += Get-ChildItem $alertsPath -Filter "*process*" -File
+        $files += Get-ChildItem $alertsPath -Filter "*pid*" -File
+    }
+    
+    if ($files.Count -eq 0) {
+        Write-Host "No process data found" -ForegroundColor $colors.Info
+        Read-Host "Press Enter to continue"
+        return
+    }
+    
+    while ($true) {
+        Show-Header "PROCESS DATA"
+        
+        Write-Host "Process Files:" -ForegroundColor $colors.Header
+        for ($i = 0; $i -lt $files.Count; $i++) {
+            $color = if ($files[$i].DirectoryName -match "ALERTS") { $colors.High } else { $colors.Menu }
+            Write-Host ("{0,3}. {1}" -f ($i + 1), $files[$i].Name) -ForegroundColor $color
+        }
+        
+        Write-Host ""
+        Write-Host "Enter file number to view or Q to go back: " -NoNewline
+        $choice = Read-Host
+        
+        if ($choice -match '^[Qq]') { return }
+        
+        if ($choice -match '^\d+$') {
+            $index = [int]$choice - 1
+            if ($index -ge 0 -and $index -lt $files.Count) {
+                $content = Show-FileContent -FilePath $files[$index].FullName
+                Show-PagedContent -Content $content -Title "PROCESS: $($files[$index].Name)"
+            }
+        }
+    }
+}
+
+# Show persistence data
+function Show-PersistenceData {
+    param([string]$IncidentPath)
+    
+    $persistPath = Join-Path $IncidentPath "Persistence"
+    $files = @()
+    
+    if (Test-Path $persistPath) {
+        $files += Get-ChildItem $persistPath -File
+    }
+    
+    # Also check ALERTS for persistence files
+    $alertsPath = Join-Path $IncidentPath "ALERTS"
+    if (Test-Path $alertsPath) {
+        $files += Get-ChildItem $alertsPath -Filter "*autorun*" -File
+        $files += Get-ChildItem $alertsPath -Filter "*service*" -File
+        $files += Get-ChildItem $alertsPath -Filter "*task*" -File
+    }
+    
+    if ($files.Count -eq 0) {
+        Write-Host "No persistence data found" -ForegroundColor $colors.Info
+        Read-Host "Press Enter to continue"
+        return
+    }
+    
+    while ($true) {
+        Show-Header "PERSISTENCE DATA"
+        
+        Write-Host "Persistence Files:" -ForegroundColor $colors.Header
+        for ($i = 0; $i -lt $files.Count; $i++) {
+            $color = if ($files[$i].DirectoryName -match "ALERTS") { $colors.High } else { $colors.Menu }
+            Write-Host ("{0,3}. {1}" -f ($i + 1), $files[$i].Name) -ForegroundColor $color
+        }
+        
+        Write-Host ""
+        Write-Host "Enter file number to view or Q to go back: " -NoNewline
+        $choice = Read-Host
+        
+        if ($choice -match '^[Qq]') { return }
+        
+        if ($choice -match '^\d+$') {
+            $index = [int]$choice - 1
+            if ($index -ge 0 -and $index -lt $files.Count) {
+                $content = Show-FileContent -FilePath $files[$index].FullName
+                Show-PagedContent -Content $content -Title "PERSISTENCE: $($files[$index].Name)"
+            }
+        }
+    }
+}
+
+# Show system info
+function Show-SystemInfo {
+    param([string]$IncidentPath)
+    
+    $systemPath = Join-Path $IncidentPath "System"
+    if (!(Test-Path $systemPath)) {
+        Write-Host "No system data found" -ForegroundColor $colors.Info
+        Read-Host "Press Enter to continue"
+        return
+    }
+    
+    while ($true) {
+        Show-Header "SYSTEM INFORMATION"
+        
+        $files = Get-ChildItem $systemPath -File | Sort-Object Name
+        
+        Write-Host "System Files:" -ForegroundColor $colors.Header
+        for ($i = 0; $i -lt $files.Count; $i++) {
+            Write-Host ("{0,3}. {1}" -f ($i + 1), $files[$i].Name) -ForegroundColor $colors.Menu
+        }
+        
+        Write-Host ""
+        Write-Host "Enter file number to view or Q to go back: " -NoNewline
+        $choice = Read-Host
+        
+        if ($choice -match '^[Qq]') { return }
+        
+        if ($choice -match '^\d+$') {
+            $index = [int]$choice - 1
+            if ($index -ge 0 -and $index -lt $files.Count) {
+                $content = Show-FileContent -FilePath $files[$index].FullName
+                Show-PagedContent -Content $content -Title "SYSTEM: $($files[$index].Name)"
+            }
+        }
+    }
+}
+
+# Show event logs
+function Show-EventLogs {
+    param([string]$IncidentPath)
+    
+    $logsPath = Join-Path $IncidentPath "Logs"
+    if (!(Test-Path $logsPath)) {
+        Write-Host "No event logs found" -ForegroundColor $colors.Info
+        Read-Host "Press Enter to continue"
+        return
+    }
+    
+    while ($true) {
+        Show-Header "EVENT LOGS"
+        
+        $files = Get-ChildItem $logsPath -File | Sort-Object Name
+        
+        Write-Host "Event Log Files:" -ForegroundColor $colors.Header
+        Write-Host "(Note: .evtx files can only be parsed on Windows systems)" -ForegroundColor $colors.Data
+        Write-Host ""
+        
+        for ($i = 0; $i -lt $files.Count; $i++) {
+            $color = if ($files[$i].Extension -eq ".evtx") { $colors.High } else { $colors.Menu }
+            Write-Host ("{0,3}. {1} ({2:N2} MB)" -f ($i + 1), $files[$i].Name, ($files[$i].Length/1MB)) -ForegroundColor $color
+        }
+        
+        Write-Host ""
+        Write-Host "Enter file number to view or Q to go back: " -NoNewline
+        $choice = Read-Host
+        
+        if ($choice -match '^[Qq]') { return }
+        
+        if ($choice -match '^\d+$') {
+            $index = [int]$choice - 1
+            if ($index -ge 0 -and $index -lt $files.Count) {
+                $content = Show-FileContent -FilePath $files[$index].FullName
+                Show-PagedContent -Content $content -Title "LOG: $($files[$index].Name)"
+            }
+        }
+    }
+}
+
+# Browse all files
+function Browse-Files {
+    param([string]$IncidentPath)
+    
+    Show-Header "FILE BROWSER"
+    
+    Write-Host "Building file list..." -ForegroundColor $colors.Info
+    $allFiles = Get-ChildItem $IncidentPath -Recurse -File | Sort-Object DirectoryName, Name
+    
+    $fileList = @()
+    $currentDir = ""
+    
+    foreach ($file in $allFiles) {
+        $relPath = $file.DirectoryName.Replace($IncidentPath, "").TrimStart("\")
+        
+        if ($relPath -ne $currentDir) {
+            $fileList += ""
+            $fileList += "[$relPath]"
+            $currentDir = $relPath
+        }
+        
+        $fileList += "  $($file.Name) ($([Math]::Round($file.Length/1KB, 2)) KB)"
+    }
+    
+    Show-PagedContent -Content $fileList -Title "ALL FILES ($($allFiles.Count) total)"
+}
+
+# Export all data to text
+function Export-AllData {
+    param([string]$IncidentPath)
+    
+    Show-Header "EXPORT ALL DATA"
+    
+    Write-Host "This will export all data to a single text file." -ForegroundColor $colors.Info
+    $confirm = Read-Host "Continue? (Y/N)"
+    
+    if ($confirm -ne 'Y' -and $confirm -ne 'y') { return }
+    
+    $exportFile = Join-Path $IncidentPath "Export_$(Get-Date -Format 'yyyyMMdd_HHmmss').txt"
+    $output = @()
+    
+    # Header
+    $output += "="*80
+    $output += "INCIDENT RESPONSE DATA EXPORT"
+    $output += "="*80
+    $output += "Generated: $(Get-Date)"
+    $output += "Incident: $(Split-Path $IncidentPath -Leaf)"
+    $output += "Path: $IncidentPath"
+    $output += "="*80
+    $output += ""
+    
+    Write-Host "Exporting data..." -ForegroundColor $colors.Info
+    
+    # Process each directory
+    $directories = @(
+        @{Name="SUMMARY"; Path="SUMMARY.txt"; Type="File"},
+        @{Name="ALERTS"; Path="ALERTS"; Type="Directory"},
+        @{Name="NETWORK"; Path="Network"; Type="Directory"},
+        @{Name="PROCESSES"; Path="Processes"; Type="Directory"},
+        @{Name="PERSISTENCE"; Path="Persistence"; Type="Directory"},
+        @{Name="SYSTEM"; Path="System"; Type="Directory"},
+        @{Name="LOGS"; Path="Logs"; Type="Directory"}
+    )
+    
+    foreach ($dir in $directories) {
+        Write-Host "  Exporting $($dir.Name)..." -ForegroundColor $colors.Data
+        
+        $fullPath = Join-Path $IncidentPath $dir.Path
+        
+        if (Test-Path $fullPath) {
+            $output += ""
+            $output += "="*80
+            $output += $dir.Name
+            $output += "="*80
+            
+            if ($dir.Type -eq "File") {
+                $output += Get-Content $fullPath
+            }
+            else {
+                $files = Get-ChildItem $fullPath -File | Sort-Object Name
+                foreach ($file in $files) {
+                    $output += ""
+                    $output += "-"*60
+                    $output += "FILE: $($file.Name)"
+                    $output += "-"*60
+                    
+                    $content = Show-FileContent -FilePath $file.FullName
+                    $output += $content
+                }
+            }
+        }
+    }
+    
+    # Save export
+    $output | Out-File $exportFile -Encoding UTF8
+    
+    Write-Host ""
+    Write-Host "Export complete!" -ForegroundColor $colors.Low
+    Write-Host "File saved to: $exportFile" -ForegroundColor $colors.Info
+    Write-Host "Size: $([Math]::Round((Get-Item $exportFile).Length/1MB, 2)) MB" -ForegroundColor $colors.Data
+    Write-Host ""
+    
+    $open = Read-Host "Open file now? (Y/N)"
+    if ($open -eq 'Y' -or $open -eq 'y') {
+        notepad.exe $exportFile
+    }
+    
+    Read-Host "Press Enter to continue"
+}
+
+# Main execution
+Show-Header
+
+Write-Host "This viewer displays data collected by the Incident Response Triage Script" -ForegroundColor $colors.Info
+Write-Host "No live data collection will be performed" -ForegroundColor $colors.Info
+Write-Host ""
+
+# Main loop
+while ($true) {
+    $incidentPath = $Path
+    
+    if (!$incidentPath -or !(Test-Path $incidentPath)) {
+        $incidentPath = Select-IncidentDirectory
+    }
+    
+    if (!$incidentPath) {
+        Write-Host "Exiting..." -ForegroundColor $colors.Info
+        break
+    }
+    
+    Show-IncidentMenu -IncidentPath $incidentPath
+    
+    # Reset path to show selection menu again
+    $Path = ""
+}
+
+Write-Host ""
+Write-Host "Thank you for using IR Data Viewer" -ForegroundColor $colors.Info) {
+                    $pageNum = [int]$goto - 1
+                    if ($pageNum -ge 0 -and $pageNum -lt $totalPages) {
+                        $currentPage = $pageNum
+                    }
+                }
+            }
+            "S" {
+                $searchTerm = Read-Host "Enter search term"
+                if ($searchTerm) {
+                    Write-Host "Searching..." -ForegroundColor $colors.Info
+                    $matches = @()
+                    for ($i = 0; $i -lt $Content.Count; $i++) {
+                        if ($Content[$i] -match [regex]::Escape($searchTerm)) {
+                            $matches += "Line $($i+1): $($Content[$i])"
+                        }
+                    }
+                    if ($matches.Count -gt 0) {
+                        Write-Host "Found $($matches.Count) matches" -ForegroundColor $colors.Info
+                        Read-Host "Press Enter to view"
+                        Show-PagedContent -Content $matches -Title "Search Results: '$searchTerm'"
+                    } else {
+                        Write-Host "No matches found" -ForegroundColor $colors.High
+                        Start-Sleep -Seconds 2
+                    }
+                }
+            }
+            "E" {
+                $exportPath = Join-Path ([System.IO.Path]::GetTempPath()) "IR_Export_$(Get-Date -Format 'yyyyMMdd_HHmmss').txt"
+                $Content | Out-File $exportPath -Encoding UTF8
+                Write-Host "Exported to: $exportPath" -ForegroundColor $colors.Low
+                Start-Sleep -Seconds 2
+            }
+            "Q" { return }
+        }
+    }
+}
+
+# Main menu for incident data
+function Show-IncidentMenu {
+    param([string]$IncidentPath)
+    
+    while ($true) {
+        Show-Header "INCIDENT DATA BROWSER"
+        
+        # Display incident info
+        $incidentName = Split-Path $IncidentPath -Leaf
+        Write-Host "Incident: $incidentName" -ForegroundColor $colors.Info
+        Write-Host "Path: $IncidentPath" -ForegroundColor $colors.Data
+        
+        # Get summary info if available
+        $summaryPath = Join-Path $IncidentPath "SUMMARY.txt"
+        if (Test-Path $summaryPath) {
+            $summaryLines = Get-Content $summaryPath | Select-String "THREAT LEVEL:|TOTAL ALERTS:"
+            foreach ($line in $summaryLines) {
+                if ($line -match "THREAT LEVEL:") {
+                    $level = $line.Line.Split(":")[1].Trim()
+                    $color = switch ($level) {
+                        "CRITICAL" { $colors.Critical }
+                        "HIGH" { $colors.High }
+                        "MEDIUM" { $colors.Medium }
+                        "LOW" { $colors.Low }
+                        default { $colors.Data }
+                    }
+                    Write-Host $line.Line -ForegroundColor $color
+                }
+                else {
+                    Write-Host $line.Line -ForegroundColor $colors.Info
+                }
+            }
+        }
+        
+        Write-Host ""
+        Write-Host "MAIN MENU" -ForegroundColor $colors.Header
+        Write-Host "1. View Summary" -ForegroundColor $colors.Menu
+        Write-Host "2. View Alerts" -ForegroundColor $colors.Menu
+        Write-Host "3. Network Data" -ForegroundColor $colors.Menu
+        Write-Host "4. Process Data" -ForegroundColor $colors.Menu
+        Write-Host "5. Persistence Data" -ForegroundColor $colors.Menu
+        Write-Host "6. System Information" -ForegroundColor $colors.Menu
+        Write-Host "7. Event Logs" -ForegroundColor $colors.Menu
+        Write-Host "8. Browse All Files" -ForegroundColor $colors.Menu
+        Write-Host "9. Export All to Text" -ForegroundColor $colors.Menu
+        Write-Host "Q. Back to Directory Selection" -ForegroundColor $colors.Menu
+        Write-Host ""
+        
+        $choice = Read-Host "Select option"
+        
+        switch ($choice) {
+            "1" { Show-Summary -IncidentPath $IncidentPath }
+            "2" { Show-Alerts -IncidentPath $IncidentPath }
+            "3" { Show-NetworkData -IncidentPath $IncidentPath }
+            "4" { Show-ProcessData -IncidentPath $IncidentPath }
+            "5" { Show-PersistenceData -IncidentPath $IncidentPath }
+            "6" { Show-SystemInfo -IncidentPath $IncidentPath }
+            "7" { Show-EventLogs -IncidentPath $IncidentPath }
+            "8" { Browse-Files -IncidentPath $IncidentPath }
+            "9" { Export-AllData -IncidentPath $IncidentPath }
+            "Q" { return }
+            "q" { return }
+        }
+    }
+}
+
+# Show summary
+function Show-Summary {
+    param([string]$IncidentPath)
+    
+    $summaryFile = Join-Path $IncidentPath "SUMMARY.txt"
+    if (Test-Path $summaryFile) {
+        $content = Get-Content $summaryFile
+        Show-PagedContent -Content $content -Title "INCIDENT SUMMARY"
+    }
+    else {
+        Write-Host "Summary file not found" -ForegroundColor $colors.Critical
+        Read-Host "Press Enter to continue"
+    }
+}
+
+# Show alerts
+function Show-Alerts {
+    param([string]$IncidentPath)
+    
+    $alertsPath = Join-Path $IncidentPath "ALERTS"
+    if (!(Test-Path $alertsPath)) {
+        Write-Host "No alerts directory found" -ForegroundColor $colors.Info
+        Read-Host "Press Enter to continue"
+        return
+    }
+    
+    while ($true) {
+        Show-Header "ALERTS"
+        
+        $files = Get-ChildItem $alertsPath -File | Sort-Object Name
+        if ($files.Count -eq 0) {
+            Write-Host "No alert files found" -ForegroundColor $colors.Info
+            Read-Host "Press Enter to continue"
+            return
+        }
+        
+        Write-Host "Alert Files:" -ForegroundColor $colors.Header
+        for ($i = 0; $i -lt $files.Count; $i++) {
+            Write-Host ("{0,3}. {1}" -f ($i + 1), $files[$i].Name) -ForegroundColor $colors.High
+        }
+        
+        Write-Host ""
+        Write-Host "Enter file number to view or Q to go back: " -NoNewline
+        $choice = Read-Host
+        
+        if ($choice -match '^[Qq]') { return }
+        
+        if ($choice -match '^\d+$') {
+            $index = [int]$choice - 1
+            if ($index -ge 0 -and $index -lt $files.Count) {
+                $content = Show-FileContent -FilePath $files[$index].FullName
+                Show-PagedContent -Content $content -Title "ALERT: $($files[$index].Name)"
+            }
+        }
+    }
+}
+
+# Show network data
+function Show-NetworkData {
+    param([string]$IncidentPath)
+    
+    $networkPath = Join-Path $IncidentPath "Network"
+    if (!(Test-Path $networkPath)) {
+        Write-Host "No network data found" -ForegroundColor $colors.Info
+        Read-Host "Press Enter to continue"
+        return
+    }
+    
+    while ($true) {
+        Show-Header "NETWORK DATA"
+        
+        $files = Get-ChildItem $networkPath -File | Sort-Object Name
+        
+        Write-Host "Network Files:" -ForegroundColor $colors.Header
+        for ($i = 0; $i -lt $files.Count; $i++) {
+            Write-Host ("{0,3}. {1}" -f ($i + 1), $files[$i].Name) -ForegroundColor $colors.Menu
+        }
+        
+        Write-Host ""
+        Write-Host "Enter file number to view or Q to go back: " -NoNewline
+        $choice = Read-Host
+        
+        if ($choice -match '^[Qq]') { return }
+        
+        if ($choice -match '^\d+$') {
+            $index = [int]$choice - 1
+            if ($index -ge 0 -and $index -lt $files.Count) {
+                $content = Show-FileContent -FilePath $files[$index].FullName
+                Show-PagedContent -Content $content -Title "NETWORK: $($files[$index].Name)"
+            }
+        }
+    }
+}
+
+# Show process data
+function Show-ProcessData {
+    param([string]$IncidentPath)
+    
+    $processPath = Join-Path $IncidentPath "Processes"
+    $files = @()
+    
+    # Check both Processes folder and ALERTS for process files
+    if (Test-Path $processPath) {
+        $files += Get-ChildItem $processPath -File
+    }
+    
+    $alertsPath = Join-Path $IncidentPath "ALERTS"
+    if (Test-Path $alertsPath) {
+        $files += Get-ChildItem $alertsPath -Filter "*process*" -File
+        $files += Get-ChildItem $alertsPath -Filter "*pid*" -File
+    }
+    
+    if ($files.Count -eq 0) {
+        Write-Host "No process data found" -ForegroundColor $colors.Info
+        Read-Host "Press Enter to continue"
+        return
+    }
+    
+    while ($true) {
+        Show-Header "PROCESS DATA"
+        
+        Write-Host "Process Files:" -ForegroundColor $colors.Header
+        for ($i = 0; $i -lt $files.Count; $i++) {
+            $color = if ($files[$i].DirectoryName -match "ALERTS") { $colors.High } else { $colors.Menu }
+            Write-Host ("{0,3}. {1}" -f ($i + 1), $files[$i].Name) -ForegroundColor $color
+        }
+        
+        Write-Host ""
+        Write-Host "Enter file number to view or Q to go back: " -NoNewline
+        $choice = Read-Host
+        
+        if ($choice -match '^[Qq]') { return }
+        
+        if ($choice -match '^\d+$') {
+            $index = [int]$choice - 1
+            if ($index -ge 0 -and $index -lt $files.Count) {
+                $content = Show-FileContent -FilePath $files[$index].FullName
+                Show-PagedContent -Content $content -Title "PROCESS: $($files[$index].Name)"
+            }
+        }
+    }
+}
+
+# Show persistence data
+function Show-PersistenceData {
+    param([string]$IncidentPath)
+    
+    $persistPath = Join-Path $IncidentPath "Persistence"
+    $files = @()
+    
+    if (Test-Path $persistPath) {
+        $files += Get-ChildItem $persistPath -File
+    }
+    
+    # Also check ALERTS for persistence files
+    $alertsPath = Join-Path $IncidentPath "ALERTS"
+    if (Test-Path $alertsPath) {
+        $files += Get-ChildItem $alertsPath -Filter "*autorun*" -File
+        $files += Get-ChildItem $alertsPath -Filter "*service*" -File
+        $files += Get-ChildItem $alertsPath -Filter "*task*" -File
+    }
+    
+    if ($files.Count -eq 0) {
+        Write-Host "No persistence data found" -ForegroundColor $colors.Info
+        Read-Host "Press Enter to continue"
+        return
+    }
+    
+    while ($true) {
+        Show-Header "PERSISTENCE DATA"
+        
+        Write-Host "Persistence Files:" -ForegroundColor $colors.Header
+        for ($i = 0; $i -lt $files.Count; $i++) {
+            $color = if ($files[$i].DirectoryName -match "ALERTS") { $colors.High } else { $colors.Menu }
+            Write-Host ("{0,3}. {1}" -f ($i + 1), $files[$i].Name) -ForegroundColor $color
+        }
+        
+        Write-Host ""
+        Write-Host "Enter file number to view or Q to go back: " -NoNewline
+        $choice = Read-Host
+        
+        if ($choice -match '^[Qq]') { return }
+        
+        if ($choice -match '^\d+$') {
+            $index = [int]$choice - 1
+            if ($index -ge 0 -and $index -lt $files.Count) {
+                $content = Show-FileContent -FilePath $files[$index].FullName
+                Show-PagedContent -Content $content -Title "PERSISTENCE: $($files[$index].Name)"
+            }
+        }
+    }
+}
+
+# Show system info
+function Show-SystemInfo {
+    param([string]$IncidentPath)
+    
+    $systemPath = Join-Path $IncidentPath "System"
+    if (!(Test-Path $systemPath)) {
+        Write-Host "No system data found" -ForegroundColor $colors.Info
+        Read-Host "Press Enter to continue"
+        return
+    }
+    
+    while ($true) {
+        Show-Header "SYSTEM INFORMATION"
+        
+        $files = Get-ChildItem $systemPath -File | Sort-Object Name
+        
+        Write-Host "System Files:" -ForegroundColor $colors.Header
+        for ($i = 0; $i -lt $files.Count; $i++) {
+            Write-Host ("{0,3}. {1}" -f ($i + 1), $files[$i].Name) -ForegroundColor $colors.Menu
+        }
+        
+        Write-Host ""
+        Write-Host "Enter file number to view or Q to go back: " -NoNewline
+        $choice = Read-Host
+        
+        if ($choice -match '^[Qq]') { return }
+        
+        if ($choice -match '^\d+$') {
+            $index = [int]$choice - 1
+            if ($index -ge 0 -and $index -lt $files.Count) {
+                $content = Show-FileContent -FilePath $files[$index].FullName
+                Show-PagedContent -Content $content -Title "SYSTEM: $($files[$index].Name)"
+            }
+        }
+    }
+}
+
+# Show event logs
+function Show-EventLogs {
+    param([string]$IncidentPath)
+    
+    $logsPath = Join-Path $IncidentPath "Logs"
+    if (!(Test-Path $logsPath)) {
+        Write-Host "No event logs found" -ForegroundColor $colors.Info
+        Read-Host "Press Enter to continue"
+        return
+    }
+    
+    while ($true) {
+        Show-Header "EVENT LOGS"
+        
+        $files = Get-ChildItem $logsPath -File | Sort-Object Name
+        
+        Write-Host "Event Log Files:" -ForegroundColor $colors.Header
+        Write-Host "(Note: .evtx files can only be parsed on Windows systems)" -ForegroundColor $colors.Data
+        Write-Host ""
+        
+        for ($i = 0; $i -lt $files.Count; $i++) {
+            $color = if ($files[$i].Extension -eq ".evtx") { $colors.High } else { $colors.Menu }
+            Write-Host ("{0,3}. {1} ({2:N2} MB)" -f ($i + 1), $files[$i].Name, ($files[$i].Length/1MB)) -ForegroundColor $color
+        }
+        
+        Write-Host ""
+        Write-Host "Enter file number to view or Q to go back: " -NoNewline
+        $choice = Read-Host
+        
+        if ($choice -match '^[Qq]') { return }
+        
+        if ($choice -match '^\d+$') {
+            $index = [int]$choice - 1
+            if ($index -ge 0 -and $index -lt $files.Count) {
+                $content = Show-FileContent -FilePath $files[$index].FullName
+                Show-PagedContent -Content $content -Title "LOG: $($files[$index].Name)"
+            }
+        }
+    }
+}
+
+# Browse all files
+function Browse-Files {
+    param([string]$IncidentPath)
+    
+    Show-Header "FILE BROWSER"
+    
+    Write-Host "Building file list..." -ForegroundColor $colors.Info
+    $allFiles = Get-ChildItem $IncidentPath -Recurse -File | Sort-Object DirectoryName, Name
+    
+    $fileList = @()
+    $currentDir = ""
+    
+    foreach ($file in $allFiles) {
+        $relPath = $file.DirectoryName.Replace($IncidentPath, "").TrimStart("\")
+        
+        if ($relPath -ne $currentDir) {
+            $fileList += ""
+            $fileList += "[$relPath]"
+            $currentDir = $relPath
+        }
+        
+        $fileList += "  $($file.Name) ($([Math]::Round($file.Length/1KB, 2)) KB)"
+    }
+    
+    Show-PagedContent -Content $fileList -Title "ALL FILES ($($allFiles.Count) total)"
+}
+
+# Export all data to text
+function Export-AllData {
+    param([string]$IncidentPath)
+    
+    Show-Header "EXPORT ALL DATA"
+    
+    Write-Host "This will export all data to a single text file." -ForegroundColor $colors.Info
+    $confirm = Read-Host "Continue? (Y/N)"
+    
+    if ($confirm -ne 'Y' -and $confirm -ne 'y') { return }
+    
+    $exportFile = Join-Path $IncidentPath "Export_$(Get-Date -Format 'yyyyMMdd_HHmmss').txt"
+    $output = @()
+    
+    # Header
+    $output += "="*80
+    $output += "INCIDENT RESPONSE DATA EXPORT"
+    $output += "="*80
+    $output += "Generated: $(Get-Date)"
+    $output += "Incident: $(Split-Path $IncidentPath -Leaf)"
+    $output += "Path: $IncidentPath"
+    $output += "="*80
+    $output += ""
+    
+    Write-Host "Exporting data..." -ForegroundColor $colors.Info
+    
+    # Process each directory
+    $directories = @(
+        @{Name="SUMMARY"; Path="SUMMARY.txt"; Type="File"},
+        @{Name="ALERTS"; Path="ALERTS"; Type="Directory"},
+        @{Name="NETWORK"; Path="Network"; Type="Directory"},
+        @{Name="PROCESSES"; Path="Processes"; Type="Directory"},
+        @{Name="PERSISTENCE"; Path="Persistence"; Type="Directory"},
+        @{Name="SYSTEM"; Path="System"; Type="Directory"},
+        @{Name="LOGS"; Path="Logs"; Type="Directory"}
+    )
+    
+    foreach ($dir in $directories) {
+        Write-Host "  Exporting $($dir.Name)..." -ForegroundColor $colors.Data
+        
+        $fullPath = Join-Path $IncidentPath $dir.Path
+        
+        if (Test-Path $fullPath) {
+            $output += ""
+            $output += "="*80
+            $output += $dir.Name
+            $output += "="*80
+            
+            if ($dir.Type -eq "File") {
+                $output += Get-Content $fullPath
+            }
+            else {
+                $files = Get-ChildItem $fullPath -File | Sort-Object Name
+                foreach ($file in $files) {
+                    $output += ""
+                    $output += "-"*60
+                    $output += "FILE: $($file.Name)"
+                    $output += "-"*60
+                    
+                    $content = Show-FileContent -FilePath $file.FullName
+                    $output += $content
+                }
+            }
+        }
+    }
+    
+    # Save export
+    $output | Out-File $exportFile -Encoding UTF8
+    
+    Write-Host ""
+    Write-Host "Export complete!" -ForegroundColor $colors.Low
+    Write-Host "File saved to: $exportFile" -ForegroundColor $colors.Info
+    Write-Host "Size: $([Math]::Round((Get-Item $exportFile).Length/1MB, 2)) MB" -ForegroundColor $colors.Data
+    Write-Host ""
+    
+    $open = Read-Host "Open file now? (Y/N)"
+    if ($open -eq 'Y' -or $open -eq 'y') {
+        notepad.exe $exportFile
+    }
+    
+    Read-Host "Press Enter to continue"
+}
+
+# Main execution
+Show-Header
+
+Write-Host "This viewer displays data collected by the Incident Response Triage Script" -ForegroundColor $colors.Info
+Write-Host "No live data collection will be performed" -ForegroundColor $colors.Info
+Write-Host ""
+
+# Main loop
+while ($true) {
+    $incidentPath = $Path
+    
+    if (!$incidentPath -or !(Test-Path $incidentPath)) {
+        $incidentPath = Select-IncidentDirectory
+    }
+    
+    if (!$incidentPath) {
+        Write-Host "Exiting..." -ForegroundColor $colors.Info
+        break
+    }
+    
+    Show-IncidentMenu -IncidentPath $incidentPath
+    
+    # Reset path to show selection menu again
+    $Path = ""
+}
+
+Write-Host ""
+Write-Host "Thank you for using IR Data Viewer" -ForegroundColor $colors.Info) {
+                    Get-WinEvent -Path $FilePath -MaxEvents ([int]$maxEvents) -ErrorAction Stop
+                } else {
+                    Get-WinEvent -Path $FilePath -MaxEvents 100 -ErrorAction Stop
+                }
+            }
+            default { Get-WinEvent -Path $FilePath -MaxEvents 100 -ErrorAction Stop }
+        }
+        
+        Write-Host "Processing $($events.Count) events..." -ForegroundColor $colors.Info
+        
+        $output = @()
+        $output += "Event Log: $(Split-Path $FilePath -Leaf)"
+        $output += "Total Events Loaded: $($events.Count)"
+        $output += ("=" * 60)
+        $output += ""
+        
+        # Add filter option
+        Write-Host "Filter events? (Y/N)" -NoNewline -ForegroundColor $colors.Info
+        $filter = Read-Host
+        
+        if ($filter -eq 'Y' -or $filter -eq 'y') {
+            Write-Host "Filter by:" -ForegroundColor $colors.Menu
+            Write-Host "1. Error/Critical only" -ForegroundColor $colors.Menu
+            Write-Host "2. Specific Event ID" -ForegroundColor $colors.Menu
+            Write-Host "3. Time range" -ForegroundColor $colors.Menu
+            Write-Host "4. No filter" -ForegroundColor $colors.Menu
+            
+            $filterChoice = Read-Host "Select filter (1-4)"
+            
+            $events = switch ($filterChoice) {
+                "1" { $events | Where-Object { $_.Level -le 2 } }
+                "2" {
+                    $eventId = Read-Host "Enter Event ID"
+                    if ($eventId -match '^\d+
+
+# Display file content based on type
+function Show-FileContent {
+    param([string]$FilePath)
+    
+    if (!(Test-Path $FilePath)) {
+        return @("File not found: $FilePath")
+    }
+    
+    $extension = [System.IO.Path]::GetExtension($FilePath).ToLower()
+    
+    switch ($extension) {
+        ".csv" { return Show-CsvFile -FilePath $FilePath }
+        ".json" { return Show-JsonFile -FilePath $FilePath }
+        ".evtx" { return Show-EventLog -FilePath $FilePath }
+        ".txt" { return Get-Content $FilePath }
+        ".log" { return Get-Content $FilePath }
+        default { return @("Cannot display file type: $extension") }
+    }
+}
+
+# Paged display
+function Show-PagedContent {
+    param(
+        [array]$Content,
+        [string]$Title
+    )
+    
+    if ($Content.Count -eq 0) {
+        Write-Host "No content to display" -ForegroundColor $colors.Info
+        Read-Host "Press Enter to continue"
+        return
+    }
+    
+    $totalPages = [Math]::Ceiling($Content.Count / $PageSize)
+    $currentPage = 0
+    
+    while ($true) {
+        Show-Header $Title
+        
+        $startIdx = $currentPage * $PageSize
+        $endIdx = [Math]::Min($startIdx + $PageSize, $Content.Count)
+        
+        # Display page content
+        for ($i = $startIdx; $i -lt $endIdx; $i++) {
+            $line = $Content[$i]
+            
+            # Color coding based on content
+            if ($line -match "CRITICAL|ERROR|FAIL") {
+                Write-Host $line -ForegroundColor $colors.Critical
+            }
+            elseif ($line -match "WARNING|ALERT|SUSPICIOUS") {
+                Write-Host $line -ForegroundColor $colors.High
+            }
+            elseif ($line -match "SUCCESS|PASS") {
+                Write-Host $line -ForegroundColor $colors.Low
+            }
+            else {
+                Write-Host $line -ForegroundColor $colors.Data
+            }
+        }
+        
+        # Navigation
+        Write-Host ""
+        Write-Host ("-" * 80) -ForegroundColor $colors.Menu
+        Write-Host "Page $($currentPage + 1) of $totalPages | Showing items $($startIdx + 1)-$endIdx of $($Content.Count)" -ForegroundColor $colors.Info
+        Write-Host "[N]ext [P]revious [F]irst [L]ast [Q]uit: " -NoNewline -ForegroundColor $colors.Menu
+        
+        $key = Read-Host
+        
+        switch ($key.ToUpper()) {
+            "N" { if ($currentPage -lt $totalPages - 1) { $currentPage++ } }
+            "P" { if ($currentPage -gt 0) { $currentPage-- } }
+            "F" { $currentPage = 0 }
+            "L" { $currentPage = $totalPages - 1 }
+            "Q" { return }
+        }
+    }
+}
+
+# Main menu for incident data
+function Show-IncidentMenu {
+    param([string]$IncidentPath)
+    
+    while ($true) {
+        Show-Header "INCIDENT DATA BROWSER"
+        
+        # Display incident info
+        $incidentName = Split-Path $IncidentPath -Leaf
+        Write-Host "Incident: $incidentName" -ForegroundColor $colors.Info
+        Write-Host "Path: $IncidentPath" -ForegroundColor $colors.Data
+        
+        # Get summary info if available
+        $summaryPath = Join-Path $IncidentPath "SUMMARY.txt"
+        if (Test-Path $summaryPath) {
+            $summaryLines = Get-Content $summaryPath | Select-String "THREAT LEVEL:|TOTAL ALERTS:"
+            foreach ($line in $summaryLines) {
+                if ($line -match "THREAT LEVEL:") {
+                    $level = $line.Line.Split(":")[1].Trim()
+                    $color = switch ($level) {
+                        "CRITICAL" { $colors.Critical }
+                        "HIGH" { $colors.High }
+                        "MEDIUM" { $colors.Medium }
+                        "LOW" { $colors.Low }
+                        default { $colors.Data }
+                    }
+                    Write-Host $line.Line -ForegroundColor $color
+                }
+                else {
+                    Write-Host $line.Line -ForegroundColor $colors.Info
+                }
+            }
+        }
+        
+        Write-Host ""
+        Write-Host "MAIN MENU" -ForegroundColor $colors.Header
+        Write-Host "1. View Summary" -ForegroundColor $colors.Menu
+        Write-Host "2. View Alerts" -ForegroundColor $colors.Menu
+        Write-Host "3. Network Data" -ForegroundColor $colors.Menu
+        Write-Host "4. Process Data" -ForegroundColor $colors.Menu
+        Write-Host "5. Persistence Data" -ForegroundColor $colors.Menu
+        Write-Host "6. System Information" -ForegroundColor $colors.Menu
+        Write-Host "7. Event Logs" -ForegroundColor $colors.Menu
+        Write-Host "8. Browse All Files" -ForegroundColor $colors.Menu
+        Write-Host "9. Export All to Text" -ForegroundColor $colors.Menu
+        Write-Host "Q. Back to Directory Selection" -ForegroundColor $colors.Menu
+        Write-Host ""
+        
+        $choice = Read-Host "Select option"
+        
+        switch ($choice) {
+            "1" { Show-Summary -IncidentPath $IncidentPath }
+            "2" { Show-Alerts -IncidentPath $IncidentPath }
+            "3" { Show-NetworkData -IncidentPath $IncidentPath }
+            "4" { Show-ProcessData -IncidentPath $IncidentPath }
+            "5" { Show-PersistenceData -IncidentPath $IncidentPath }
+            "6" { Show-SystemInfo -IncidentPath $IncidentPath }
+            "7" { Show-EventLogs -IncidentPath $IncidentPath }
+            "8" { Browse-Files -IncidentPath $IncidentPath }
+            "9" { Export-AllData -IncidentPath $IncidentPath }
+            "Q" { return }
+            "q" { return }
+        }
+    }
+}
+
+# Show summary
+function Show-Summary {
+    param([string]$IncidentPath)
+    
+    $summaryFile = Join-Path $IncidentPath "SUMMARY.txt"
+    if (Test-Path $summaryFile) {
+        $content = Get-Content $summaryFile
+        Show-PagedContent -Content $content -Title "INCIDENT SUMMARY"
+    }
+    else {
+        Write-Host "Summary file not found" -ForegroundColor $colors.Critical
+        Read-Host "Press Enter to continue"
+    }
+}
+
+# Show alerts
+function Show-Alerts {
+    param([string]$IncidentPath)
+    
+    $alertsPath = Join-Path $IncidentPath "ALERTS"
+    if (!(Test-Path $alertsPath)) {
+        Write-Host "No alerts directory found" -ForegroundColor $colors.Info
+        Read-Host "Press Enter to continue"
+        return
+    }
+    
+    while ($true) {
+        Show-Header "ALERTS"
+        
+        $files = Get-ChildItem $alertsPath -File | Sort-Object Name
+        if ($files.Count -eq 0) {
+            Write-Host "No alert files found" -ForegroundColor $colors.Info
+            Read-Host "Press Enter to continue"
+            return
+        }
+        
+        Write-Host "Alert Files:" -ForegroundColor $colors.Header
+        for ($i = 0; $i -lt $files.Count; $i++) {
+            Write-Host ("{0,3}. {1}" -f ($i + 1), $files[$i].Name) -ForegroundColor $colors.High
+        }
+        
+        Write-Host ""
+        Write-Host "Enter file number to view or Q to go back: " -NoNewline
+        $choice = Read-Host
+        
+        if ($choice -match '^[Qq]') { return }
+        
+        if ($choice -match '^\d+$') {
+            $index = [int]$choice - 1
+            if ($index -ge 0 -and $index -lt $files.Count) {
+                $content = Show-FileContent -FilePath $files[$index].FullName
+                Show-PagedContent -Content $content -Title "ALERT: $($files[$index].Name)"
+            }
+        }
+    }
+}
+
+# Show network data
+function Show-NetworkData {
+    param([string]$IncidentPath)
+    
+    $networkPath = Join-Path $IncidentPath "Network"
+    if (!(Test-Path $networkPath)) {
+        Write-Host "No network data found" -ForegroundColor $colors.Info
+        Read-Host "Press Enter to continue"
+        return
+    }
+    
+    while ($true) {
+        Show-Header "NETWORK DATA"
+        
+        $files = Get-ChildItem $networkPath -File | Sort-Object Name
+        
+        Write-Host "Network Files:" -ForegroundColor $colors.Header
+        for ($i = 0; $i -lt $files.Count; $i++) {
+            Write-Host ("{0,3}. {1}" -f ($i + 1), $files[$i].Name) -ForegroundColor $colors.Menu
+        }
+        
+        Write-Host ""
+        Write-Host "Enter file number to view or Q to go back: " -NoNewline
+        $choice = Read-Host
+        
+        if ($choice -match '^[Qq]') { return }
+        
+        if ($choice -match '^\d+$') {
+            $index = [int]$choice - 1
+            if ($index -ge 0 -and $index -lt $files.Count) {
+                $content = Show-FileContent -FilePath $files[$index].FullName
+                Show-PagedContent -Content $content -Title "NETWORK: $($files[$index].Name)"
+            }
+        }
+    }
+}
+
+# Show process data
+function Show-ProcessData {
+    param([string]$IncidentPath)
+    
+    $processPath = Join-Path $IncidentPath "Processes"
+    $files = @()
+    
+    # Check both Processes folder and ALERTS for process files
+    if (Test-Path $processPath) {
+        $files += Get-ChildItem $processPath -File
+    }
+    
+    $alertsPath = Join-Path $IncidentPath "ALERTS"
+    if (Test-Path $alertsPath) {
+        $files += Get-ChildItem $alertsPath -Filter "*process*" -File
+        $files += Get-ChildItem $alertsPath -Filter "*pid*" -File
+    }
+    
+    if ($files.Count -eq 0) {
+        Write-Host "No process data found" -ForegroundColor $colors.Info
+        Read-Host "Press Enter to continue"
+        return
+    }
+    
+    while ($true) {
+        Show-Header "PROCESS DATA"
+        
+        Write-Host "Process Files:" -ForegroundColor $colors.Header
+        for ($i = 0; $i -lt $files.Count; $i++) {
+            $color = if ($files[$i].DirectoryName -match "ALERTS") { $colors.High } else { $colors.Menu }
+            Write-Host ("{0,3}. {1}" -f ($i + 1), $files[$i].Name) -ForegroundColor $color
+        }
+        
+        Write-Host ""
+        Write-Host "Enter file number to view or Q to go back: " -NoNewline
+        $choice = Read-Host
+        
+        if ($choice -match '^[Qq]') { return }
+        
+        if ($choice -match '^\d+$') {
+            $index = [int]$choice - 1
+            if ($index -ge 0 -and $index -lt $files.Count) {
+                $content = Show-FileContent -FilePath $files[$index].FullName
+                Show-PagedContent -Content $content -Title "PROCESS: $($files[$index].Name)"
+            }
+        }
+    }
+}
+
+# Show persistence data
+function Show-PersistenceData {
+    param([string]$IncidentPath)
+    
+    $persistPath = Join-Path $IncidentPath "Persistence"
+    $files = @()
+    
+    if (Test-Path $persistPath) {
+        $files += Get-ChildItem $persistPath -File
+    }
+    
+    # Also check ALERTS for persistence files
+    $alertsPath = Join-Path $IncidentPath "ALERTS"
+    if (Test-Path $alertsPath) {
+        $files += Get-ChildItem $alertsPath -Filter "*autorun*" -File
+        $files += Get-ChildItem $alertsPath -Filter "*service*" -File
+        $files += Get-ChildItem $alertsPath -Filter "*task*" -File
+    }
+    
+    if ($files.Count -eq 0) {
+        Write-Host "No persistence data found" -ForegroundColor $colors.Info
+        Read-Host "Press Enter to continue"
+        return
+    }
+    
+    while ($true) {
+        Show-Header "PERSISTENCE DATA"
+        
+        Write-Host "Persistence Files:" -ForegroundColor $colors.Header
+        for ($i = 0; $i -lt $files.Count; $i++) {
+            $color = if ($files[$i].DirectoryName -match "ALERTS") { $colors.High } else { $colors.Menu }
+            Write-Host ("{0,3}. {1}" -f ($i + 1), $files[$i].Name) -ForegroundColor $color
+        }
+        
+        Write-Host ""
+        Write-Host "Enter file number to view or Q to go back: " -NoNewline
+        $choice = Read-Host
+        
+        if ($choice -match '^[Qq]') { return }
+        
+        if ($choice -match '^\d+$') {
+            $index = [int]$choice - 1
+            if ($index -ge 0 -and $index -lt $files.Count) {
+                $content = Show-FileContent -FilePath $files[$index].FullName
+                Show-PagedContent -Content $content -Title "PERSISTENCE: $($files[$index].Name)"
+            }
+        }
+    }
+}
+
+# Show system info
+function Show-SystemInfo {
+    param([string]$IncidentPath)
+    
+    $systemPath = Join-Path $IncidentPath "System"
+    if (!(Test-Path $systemPath)) {
+        Write-Host "No system data found" -ForegroundColor $colors.Info
+        Read-Host "Press Enter to continue"
+        return
+    }
+    
+    while ($true) {
+        Show-Header "SYSTEM INFORMATION"
+        
+        $files = Get-ChildItem $systemPath -File | Sort-Object Name
+        
+        Write-Host "System Files:" -ForegroundColor $colors.Header
+        for ($i = 0; $i -lt $files.Count; $i++) {
+            Write-Host ("{0,3}. {1}" -f ($i + 1), $files[$i].Name) -ForegroundColor $colors.Menu
+        }
+        
+        Write-Host ""
+        Write-Host "Enter file number to view or Q to go back: " -NoNewline
+        $choice = Read-Host
+        
+        if ($choice -match '^[Qq]') { return }
+        
+        if ($choice -match '^\d+$') {
+            $index = [int]$choice - 1
+            if ($index -ge 0 -and $index -lt $files.Count) {
+                $content = Show-FileContent -FilePath $files[$index].FullName
+                Show-PagedContent -Content $content -Title "SYSTEM: $($files[$index].Name)"
+            }
+        }
+    }
+}
+
+# Show event logs
+function Show-EventLogs {
+    param([string]$IncidentPath)
+    
+    $logsPath = Join-Path $IncidentPath "Logs"
+    if (!(Test-Path $logsPath)) {
+        Write-Host "No event logs found" -ForegroundColor $colors.Info
+        Read-Host "Press Enter to continue"
+        return
+    }
+    
+    while ($true) {
+        Show-Header "EVENT LOGS"
+        
+        $files = Get-ChildItem $logsPath -File | Sort-Object Name
+        
+        Write-Host "Event Log Files:" -ForegroundColor $colors.Header
+        Write-Host "(Note: .evtx files can only be parsed on Windows systems)" -ForegroundColor $colors.Data
+        Write-Host ""
+        
+        for ($i = 0; $i -lt $files.Count; $i++) {
+            $color = if ($files[$i].Extension -eq ".evtx") { $colors.High } else { $colors.Menu }
+            Write-Host ("{0,3}. {1} ({2:N2} MB)" -f ($i + 1), $files[$i].Name, ($files[$i].Length/1MB)) -ForegroundColor $color
+        }
+        
+        Write-Host ""
+        Write-Host "Enter file number to view or Q to go back: " -NoNewline
+        $choice = Read-Host
+        
+        if ($choice -match '^[Qq]') { return }
+        
+        if ($choice -match '^\d+$') {
+            $index = [int]$choice - 1
+            if ($index -ge 0 -and $index -lt $files.Count) {
+                $content = Show-FileContent -FilePath $files[$index].FullName
+                Show-PagedContent -Content $content -Title "LOG: $($files[$index].Name)"
+            }
+        }
+    }
+}
+
+# Browse all files
+function Browse-Files {
+    param([string]$IncidentPath)
+    
+    Show-Header "FILE BROWSER"
+    
+    Write-Host "Building file list..." -ForegroundColor $colors.Info
+    $allFiles = Get-ChildItem $IncidentPath -Recurse -File | Sort-Object DirectoryName, Name
+    
+    $fileList = @()
+    $currentDir = ""
+    
+    foreach ($file in $allFiles) {
+        $relPath = $file.DirectoryName.Replace($IncidentPath, "").TrimStart("\")
+        
+        if ($relPath -ne $currentDir) {
+            $fileList += ""
+            $fileList += "[$relPath]"
+            $currentDir = $relPath
+        }
+        
+        $fileList += "  $($file.Name) ($([Math]::Round($file.Length/1KB, 2)) KB)"
+    }
+    
+    Show-PagedContent -Content $fileList -Title "ALL FILES ($($allFiles.Count) total)"
+}
+
+# Export all data to text
+function Export-AllData {
+    param([string]$IncidentPath)
+    
+    Show-Header "EXPORT ALL DATA"
+    
+    Write-Host "This will export all data to a single text file." -ForegroundColor $colors.Info
+    $confirm = Read-Host "Continue? (Y/N)"
+    
+    if ($confirm -ne 'Y' -and $confirm -ne 'y') { return }
+    
+    $exportFile = Join-Path $IncidentPath "Export_$(Get-Date -Format 'yyyyMMdd_HHmmss').txt"
+    $output = @()
+    
+    # Header
+    $output += "="*80
+    $output += "INCIDENT RESPONSE DATA EXPORT"
+    $output += "="*80
+    $output += "Generated: $(Get-Date)"
+    $output += "Incident: $(Split-Path $IncidentPath -Leaf)"
+    $output += "Path: $IncidentPath"
+    $output += "="*80
+    $output += ""
+    
+    Write-Host "Exporting data..." -ForegroundColor $colors.Info
+    
+    # Process each directory
+    $directories = @(
+        @{Name="SUMMARY"; Path="SUMMARY.txt"; Type="File"},
+        @{Name="ALERTS"; Path="ALERTS"; Type="Directory"},
+        @{Name="NETWORK"; Path="Network"; Type="Directory"},
+        @{Name="PROCESSES"; Path="Processes"; Type="Directory"},
+        @{Name="PERSISTENCE"; Path="Persistence"; Type="Directory"},
+        @{Name="SYSTEM"; Path="System"; Type="Directory"},
+        @{Name="LOGS"; Path="Logs"; Type="Directory"}
+    )
+    
+    foreach ($dir in $directories) {
+        Write-Host "  Exporting $($dir.Name)..." -ForegroundColor $colors.Data
+        
+        $fullPath = Join-Path $IncidentPath $dir.Path
+        
+        if (Test-Path $fullPath) {
+            $output += ""
+            $output += "="*80
+            $output += $dir.Name
+            $output += "="*80
+            
+            if ($dir.Type -eq "File") {
+                $output += Get-Content $fullPath
+            }
+            else {
+                $files = Get-ChildItem $fullPath -File | Sort-Object Name
+                foreach ($file in $files) {
+                    $output += ""
+                    $output += "-"*60
+                    $output += "FILE: $($file.Name)"
+                    $output += "-"*60
+                    
+                    $content = Show-FileContent -FilePath $file.FullName
+                    $output += $content
+                }
+            }
+        }
+    }
+    
+    # Save export
+    $output | Out-File $exportFile -Encoding UTF8
+    
+    Write-Host ""
+    Write-Host "Export complete!" -ForegroundColor $colors.Low
+    Write-Host "File saved to: $exportFile" -ForegroundColor $colors.Info
+    Write-Host "Size: $([Math]::Round((Get-Item $exportFile).Length/1MB, 2)) MB" -ForegroundColor $colors.Data
+    Write-Host ""
+    
+    $open = Read-Host "Open file now? (Y/N)"
+    if ($open -eq 'Y' -or $open -eq 'y') {
+        notepad.exe $exportFile
+    }
+    
+    Read-Host "Press Enter to continue"
+}
+
+# Main execution
+Show-Header
+
+Write-Host "This viewer displays data collected by the Incident Response Triage Script" -ForegroundColor $colors.Info
+Write-Host "No live data collection will be performed" -ForegroundColor $colors.Info
+Write-Host ""
+
+# Main loop
+while ($true) {
+    $incidentPath = $Path
+    
+    if (!$incidentPath -or !(Test-Path $incidentPath)) {
+        $incidentPath = Select-IncidentDirectory
+    }
+    
+    if (!$incidentPath) {
+        Write-Host "Exiting..." -ForegroundColor $colors.Info
+        break
+    }
+    
+    Show-IncidentMenu -IncidentPath $incidentPath
+    
+    # Reset path to show selection menu again
+    $Path = ""
+}
+
+Write-Host ""
+Write-Host "Thank you for using IR Data Viewer" -ForegroundColor $colors.Info) {
+                        $events | Where-Object { $_.Id -eq [int]$eventId }
+                    } else { $events }
+                }
+                "3" {
+                    $hours = Read-Host "Events from last X hours"
+                    if ($hours -match '^\d+
+
+# Display file content based on type
+function Show-FileContent {
+    param([string]$FilePath)
+    
+    if (!(Test-Path $FilePath)) {
+        return @("File not found: $FilePath")
+    }
+    
+    $extension = [System.IO.Path]::GetExtension($FilePath).ToLower()
+    
+    switch ($extension) {
+        ".csv" { return Show-CsvFile -FilePath $FilePath }
+        ".json" { return Show-JsonFile -FilePath $FilePath }
+        ".evtx" { return Show-EventLog -FilePath $FilePath }
+        ".txt" { return Get-Content $FilePath }
+        ".log" { return Get-Content $FilePath }
+        default { return @("Cannot display file type: $extension") }
+    }
+}
+
+# Paged display
+function Show-PagedContent {
+    param(
+        [array]$Content,
+        [string]$Title
+    )
+    
+    if ($Content.Count -eq 0) {
+        Write-Host "No content to display" -ForegroundColor $colors.Info
+        Read-Host "Press Enter to continue"
+        return
+    }
+    
+    $totalPages = [Math]::Ceiling($Content.Count / $PageSize)
+    $currentPage = 0
+    
+    while ($true) {
+        Show-Header $Title
+        
+        $startIdx = $currentPage * $PageSize
+        $endIdx = [Math]::Min($startIdx + $PageSize, $Content.Count)
+        
+        # Display page content
+        for ($i = $startIdx; $i -lt $endIdx; $i++) {
+            $line = $Content[$i]
+            
+            # Color coding based on content
+            if ($line -match "CRITICAL|ERROR|FAIL") {
+                Write-Host $line -ForegroundColor $colors.Critical
+            }
+            elseif ($line -match "WARNING|ALERT|SUSPICIOUS") {
+                Write-Host $line -ForegroundColor $colors.High
+            }
+            elseif ($line -match "SUCCESS|PASS") {
+                Write-Host $line -ForegroundColor $colors.Low
+            }
+            else {
+                Write-Host $line -ForegroundColor $colors.Data
+            }
+        }
+        
+        # Navigation
+        Write-Host ""
+        Write-Host ("-" * 80) -ForegroundColor $colors.Menu
+        Write-Host "Page $($currentPage + 1) of $totalPages | Showing items $($startIdx + 1)-$endIdx of $($Content.Count)" -ForegroundColor $colors.Info
+        Write-Host "[N]ext [P]revious [F]irst [L]ast [Q]uit: " -NoNewline -ForegroundColor $colors.Menu
+        
+        $key = Read-Host
+        
+        switch ($key.ToUpper()) {
+            "N" { if ($currentPage -lt $totalPages - 1) { $currentPage++ } }
+            "P" { if ($currentPage -gt 0) { $currentPage-- } }
+            "F" { $currentPage = 0 }
+            "L" { $currentPage = $totalPages - 1 }
+            "Q" { return }
+        }
+    }
+}
+
+# Main menu for incident data
+function Show-IncidentMenu {
+    param([string]$IncidentPath)
+    
+    while ($true) {
+        Show-Header "INCIDENT DATA BROWSER"
+        
+        # Display incident info
+        $incidentName = Split-Path $IncidentPath -Leaf
+        Write-Host "Incident: $incidentName" -ForegroundColor $colors.Info
+        Write-Host "Path: $IncidentPath" -ForegroundColor $colors.Data
+        
+        # Get summary info if available
+        $summaryPath = Join-Path $IncidentPath "SUMMARY.txt"
+        if (Test-Path $summaryPath) {
+            $summaryLines = Get-Content $summaryPath | Select-String "THREAT LEVEL:|TOTAL ALERTS:"
+            foreach ($line in $summaryLines) {
+                if ($line -match "THREAT LEVEL:") {
+                    $level = $line.Line.Split(":")[1].Trim()
+                    $color = switch ($level) {
+                        "CRITICAL" { $colors.Critical }
+                        "HIGH" { $colors.High }
+                        "MEDIUM" { $colors.Medium }
+                        "LOW" { $colors.Low }
+                        default { $colors.Data }
+                    }
+                    Write-Host $line.Line -ForegroundColor $color
+                }
+                else {
+                    Write-Host $line.Line -ForegroundColor $colors.Info
+                }
+            }
+        }
+        
+        Write-Host ""
+        Write-Host "MAIN MENU" -ForegroundColor $colors.Header
+        Write-Host "1. View Summary" -ForegroundColor $colors.Menu
+        Write-Host "2. View Alerts" -ForegroundColor $colors.Menu
+        Write-Host "3. Network Data" -ForegroundColor $colors.Menu
+        Write-Host "4. Process Data" -ForegroundColor $colors.Menu
+        Write-Host "5. Persistence Data" -ForegroundColor $colors.Menu
+        Write-Host "6. System Information" -ForegroundColor $colors.Menu
+        Write-Host "7. Event Logs" -ForegroundColor $colors.Menu
+        Write-Host "8. Browse All Files" -ForegroundColor $colors.Menu
+        Write-Host "9. Export All to Text" -ForegroundColor $colors.Menu
+        Write-Host "Q. Back to Directory Selection" -ForegroundColor $colors.Menu
+        Write-Host ""
+        
+        $choice = Read-Host "Select option"
+        
+        switch ($choice) {
+            "1" { Show-Summary -IncidentPath $IncidentPath }
+            "2" { Show-Alerts -IncidentPath $IncidentPath }
+            "3" { Show-NetworkData -IncidentPath $IncidentPath }
+            "4" { Show-ProcessData -IncidentPath $IncidentPath }
+            "5" { Show-PersistenceData -IncidentPath $IncidentPath }
+            "6" { Show-SystemInfo -IncidentPath $IncidentPath }
+            "7" { Show-EventLogs -IncidentPath $IncidentPath }
+            "8" { Browse-Files -IncidentPath $IncidentPath }
+            "9" { Export-AllData -IncidentPath $IncidentPath }
+            "Q" { return }
+            "q" { return }
+        }
+    }
+}
+
+# Show summary
+function Show-Summary {
+    param([string]$IncidentPath)
+    
+    $summaryFile = Join-Path $IncidentPath "SUMMARY.txt"
+    if (Test-Path $summaryFile) {
+        $content = Get-Content $summaryFile
+        Show-PagedContent -Content $content -Title "INCIDENT SUMMARY"
+    }
+    else {
+        Write-Host "Summary file not found" -ForegroundColor $colors.Critical
+        Read-Host "Press Enter to continue"
+    }
+}
+
+# Show alerts
+function Show-Alerts {
+    param([string]$IncidentPath)
+    
+    $alertsPath = Join-Path $IncidentPath "ALERTS"
+    if (!(Test-Path $alertsPath)) {
+        Write-Host "No alerts directory found" -ForegroundColor $colors.Info
+        Read-Host "Press Enter to continue"
+        return
+    }
+    
+    while ($true) {
+        Show-Header "ALERTS"
+        
+        $files = Get-ChildItem $alertsPath -File | Sort-Object Name
+        if ($files.Count -eq 0) {
+            Write-Host "No alert files found" -ForegroundColor $colors.Info
+            Read-Host "Press Enter to continue"
+            return
+        }
+        
+        Write-Host "Alert Files:" -ForegroundColor $colors.Header
+        for ($i = 0; $i -lt $files.Count; $i++) {
+            Write-Host ("{0,3}. {1}" -f ($i + 1), $files[$i].Name) -ForegroundColor $colors.High
+        }
+        
+        Write-Host ""
+        Write-Host "Enter file number to view or Q to go back: " -NoNewline
+        $choice = Read-Host
+        
+        if ($choice -match '^[Qq]') { return }
+        
+        if ($choice -match '^\d+$') {
+            $index = [int]$choice - 1
+            if ($index -ge 0 -and $index -lt $files.Count) {
+                $content = Show-FileContent -FilePath $files[$index].FullName
+                Show-PagedContent -Content $content -Title "ALERT: $($files[$index].Name)"
+            }
+        }
+    }
+}
+
+# Show network data
+function Show-NetworkData {
+    param([string]$IncidentPath)
+    
+    $networkPath = Join-Path $IncidentPath "Network"
+    if (!(Test-Path $networkPath)) {
+        Write-Host "No network data found" -ForegroundColor $colors.Info
+        Read-Host "Press Enter to continue"
+        return
+    }
+    
+    while ($true) {
+        Show-Header "NETWORK DATA"
+        
+        $files = Get-ChildItem $networkPath -File | Sort-Object Name
+        
+        Write-Host "Network Files:" -ForegroundColor $colors.Header
+        for ($i = 0; $i -lt $files.Count; $i++) {
+            Write-Host ("{0,3}. {1}" -f ($i + 1), $files[$i].Name) -ForegroundColor $colors.Menu
+        }
+        
+        Write-Host ""
+        Write-Host "Enter file number to view or Q to go back: " -NoNewline
+        $choice = Read-Host
+        
+        if ($choice -match '^[Qq]') { return }
+        
+        if ($choice -match '^\d+$') {
+            $index = [int]$choice - 1
+            if ($index -ge 0 -and $index -lt $files.Count) {
+                $content = Show-FileContent -FilePath $files[$index].FullName
+                Show-PagedContent -Content $content -Title "NETWORK: $($files[$index].Name)"
+            }
+        }
+    }
+}
+
+# Show process data
+function Show-ProcessData {
+    param([string]$IncidentPath)
+    
+    $processPath = Join-Path $IncidentPath "Processes"
+    $files = @()
+    
+    # Check both Processes folder and ALERTS for process files
+    if (Test-Path $processPath) {
+        $files += Get-ChildItem $processPath -File
+    }
+    
+    $alertsPath = Join-Path $IncidentPath "ALERTS"
+    if (Test-Path $alertsPath) {
+        $files += Get-ChildItem $alertsPath -Filter "*process*" -File
+        $files += Get-ChildItem $alertsPath -Filter "*pid*" -File
+    }
+    
+    if ($files.Count -eq 0) {
+        Write-Host "No process data found" -ForegroundColor $colors.Info
+        Read-Host "Press Enter to continue"
+        return
+    }
+    
+    while ($true) {
+        Show-Header "PROCESS DATA"
+        
+        Write-Host "Process Files:" -ForegroundColor $colors.Header
+        for ($i = 0; $i -lt $files.Count; $i++) {
+            $color = if ($files[$i].DirectoryName -match "ALERTS") { $colors.High } else { $colors.Menu }
+            Write-Host ("{0,3}. {1}" -f ($i + 1), $files[$i].Name) -ForegroundColor $color
+        }
+        
+        Write-Host ""
+        Write-Host "Enter file number to view or Q to go back: " -NoNewline
+        $choice = Read-Host
+        
+        if ($choice -match '^[Qq]') { return }
+        
+        if ($choice -match '^\d+$') {
+            $index = [int]$choice - 1
+            if ($index -ge 0 -and $index -lt $files.Count) {
+                $content = Show-FileContent -FilePath $files[$index].FullName
+                Show-PagedContent -Content $content -Title "PROCESS: $($files[$index].Name)"
+            }
+        }
+    }
+}
+
+# Show persistence data
+function Show-PersistenceData {
+    param([string]$IncidentPath)
+    
+    $persistPath = Join-Path $IncidentPath "Persistence"
+    $files = @()
+    
+    if (Test-Path $persistPath) {
+        $files += Get-ChildItem $persistPath -File
+    }
+    
+    # Also check ALERTS for persistence files
+    $alertsPath = Join-Path $IncidentPath "ALERTS"
+    if (Test-Path $alertsPath) {
+        $files += Get-ChildItem $alertsPath -Filter "*autorun*" -File
+        $files += Get-ChildItem $alertsPath -Filter "*service*" -File
+        $files += Get-ChildItem $alertsPath -Filter "*task*" -File
+    }
+    
+    if ($files.Count -eq 0) {
+        Write-Host "No persistence data found" -ForegroundColor $colors.Info
+        Read-Host "Press Enter to continue"
+        return
+    }
+    
+    while ($true) {
+        Show-Header "PERSISTENCE DATA"
+        
+        Write-Host "Persistence Files:" -ForegroundColor $colors.Header
+        for ($i = 0; $i -lt $files.Count; $i++) {
+            $color = if ($files[$i].DirectoryName -match "ALERTS") { $colors.High } else { $colors.Menu }
+            Write-Host ("{0,3}. {1}" -f ($i + 1), $files[$i].Name) -ForegroundColor $color
+        }
+        
+        Write-Host ""
+        Write-Host "Enter file number to view or Q to go back: " -NoNewline
+        $choice = Read-Host
+        
+        if ($choice -match '^[Qq]') { return }
+        
+        if ($choice -match '^\d+$') {
+            $index = [int]$choice - 1
+            if ($index -ge 0 -and $index -lt $files.Count) {
+                $content = Show-FileContent -FilePath $files[$index].FullName
+                Show-PagedContent -Content $content -Title "PERSISTENCE: $($files[$index].Name)"
+            }
+        }
+    }
+}
+
+# Show system info
+function Show-SystemInfo {
+    param([string]$IncidentPath)
+    
+    $systemPath = Join-Path $IncidentPath "System"
+    if (!(Test-Path $systemPath)) {
+        Write-Host "No system data found" -ForegroundColor $colors.Info
+        Read-Host "Press Enter to continue"
+        return
+    }
+    
+    while ($true) {
+        Show-Header "SYSTEM INFORMATION"
+        
+        $files = Get-ChildItem $systemPath -File | Sort-Object Name
+        
+        Write-Host "System Files:" -ForegroundColor $colors.Header
+        for ($i = 0; $i -lt $files.Count; $i++) {
+            Write-Host ("{0,3}. {1}" -f ($i + 1), $files[$i].Name) -ForegroundColor $colors.Menu
+        }
+        
+        Write-Host ""
+        Write-Host "Enter file number to view or Q to go back: " -NoNewline
+        $choice = Read-Host
+        
+        if ($choice -match '^[Qq]') { return }
+        
+        if ($choice -match '^\d+$') {
+            $index = [int]$choice - 1
+            if ($index -ge 0 -and $index -lt $files.Count) {
+                $content = Show-FileContent -FilePath $files[$index].FullName
+                Show-PagedContent -Content $content -Title "SYSTEM: $($files[$index].Name)"
+            }
+        }
+    }
+}
+
+# Show event logs
+function Show-EventLogs {
+    param([string]$IncidentPath)
+    
+    $logsPath = Join-Path $IncidentPath "Logs"
+    if (!(Test-Path $logsPath)) {
+        Write-Host "No event logs found" -ForegroundColor $colors.Info
+        Read-Host "Press Enter to continue"
+        return
+    }
+    
+    while ($true) {
+        Show-Header "EVENT LOGS"
+        
+        $files = Get-ChildItem $logsPath -File | Sort-Object Name
+        
+        Write-Host "Event Log Files:" -ForegroundColor $colors.Header
+        Write-Host "(Note: .evtx files can only be parsed on Windows systems)" -ForegroundColor $colors.Data
+        Write-Host ""
+        
+        for ($i = 0; $i -lt $files.Count; $i++) {
+            $color = if ($files[$i].Extension -eq ".evtx") { $colors.High } else { $colors.Menu }
+            Write-Host ("{0,3}. {1} ({2:N2} MB)" -f ($i + 1), $files[$i].Name, ($files[$i].Length/1MB)) -ForegroundColor $color
+        }
+        
+        Write-Host ""
+        Write-Host "Enter file number to view or Q to go back: " -NoNewline
+        $choice = Read-Host
+        
+        if ($choice -match '^[Qq]') { return }
+        
+        if ($choice -match '^\d+$') {
+            $index = [int]$choice - 1
+            if ($index -ge 0 -and $index -lt $files.Count) {
+                $content = Show-FileContent -FilePath $files[$index].FullName
+                Show-PagedContent -Content $content -Title "LOG: $($files[$index].Name)"
+            }
+        }
+    }
+}
+
+# Browse all files
+function Browse-Files {
+    param([string]$IncidentPath)
+    
+    Show-Header "FILE BROWSER"
+    
+    Write-Host "Building file list..." -ForegroundColor $colors.Info
+    $allFiles = Get-ChildItem $IncidentPath -Recurse -File | Sort-Object DirectoryName, Name
+    
+    $fileList = @()
+    $currentDir = ""
+    
+    foreach ($file in $allFiles) {
+        $relPath = $file.DirectoryName.Replace($IncidentPath, "").TrimStart("\")
+        
+        if ($relPath -ne $currentDir) {
+            $fileList += ""
+            $fileList += "[$relPath]"
+            $currentDir = $relPath
+        }
+        
+        $fileList += "  $($file.Name) ($([Math]::Round($file.Length/1KB, 2)) KB)"
+    }
+    
+    Show-PagedContent -Content $fileList -Title "ALL FILES ($($allFiles.Count) total)"
+}
+
+# Export all data to text
+function Export-AllData {
+    param([string]$IncidentPath)
+    
+    Show-Header "EXPORT ALL DATA"
+    
+    Write-Host "This will export all data to a single text file." -ForegroundColor $colors.Info
+    $confirm = Read-Host "Continue? (Y/N)"
+    
+    if ($confirm -ne 'Y' -and $confirm -ne 'y') { return }
+    
+    $exportFile = Join-Path $IncidentPath "Export_$(Get-Date -Format 'yyyyMMdd_HHmmss').txt"
+    $output = @()
+    
+    # Header
+    $output += "="*80
+    $output += "INCIDENT RESPONSE DATA EXPORT"
+    $output += "="*80
+    $output += "Generated: $(Get-Date)"
+    $output += "Incident: $(Split-Path $IncidentPath -Leaf)"
+    $output += "Path: $IncidentPath"
+    $output += "="*80
+    $output += ""
+    
+    Write-Host "Exporting data..." -ForegroundColor $colors.Info
+    
+    # Process each directory
+    $directories = @(
+        @{Name="SUMMARY"; Path="SUMMARY.txt"; Type="File"},
+        @{Name="ALERTS"; Path="ALERTS"; Type="Directory"},
+        @{Name="NETWORK"; Path="Network"; Type="Directory"},
+        @{Name="PROCESSES"; Path="Processes"; Type="Directory"},
+        @{Name="PERSISTENCE"; Path="Persistence"; Type="Directory"},
+        @{Name="SYSTEM"; Path="System"; Type="Directory"},
+        @{Name="LOGS"; Path="Logs"; Type="Directory"}
+    )
+    
+    foreach ($dir in $directories) {
+        Write-Host "  Exporting $($dir.Name)..." -ForegroundColor $colors.Data
+        
+        $fullPath = Join-Path $IncidentPath $dir.Path
+        
+        if (Test-Path $fullPath) {
+            $output += ""
+            $output += "="*80
+            $output += $dir.Name
+            $output += "="*80
+            
+            if ($dir.Type -eq "File") {
+                $output += Get-Content $fullPath
+            }
+            else {
+                $files = Get-ChildItem $fullPath -File | Sort-Object Name
+                foreach ($file in $files) {
+                    $output += ""
+                    $output += "-"*60
+                    $output += "FILE: $($file.Name)"
+                    $output += "-"*60
+                    
+                    $content = Show-FileContent -FilePath $file.FullName
+                    $output += $content
+                }
+            }
+        }
+    }
+    
+    # Save export
+    $output | Out-File $exportFile -Encoding UTF8
+    
+    Write-Host ""
+    Write-Host "Export complete!" -ForegroundColor $colors.Low
+    Write-Host "File saved to: $exportFile" -ForegroundColor $colors.Info
+    Write-Host "Size: $([Math]::Round((Get-Item $exportFile).Length/1MB, 2)) MB" -ForegroundColor $colors.Data
+    Write-Host ""
+    
+    $open = Read-Host "Open file now? (Y/N)"
+    if ($open -eq 'Y' -or $open -eq 'y') {
+        notepad.exe $exportFile
+    }
+    
+    Read-Host "Press Enter to continue"
+}
+
+# Main execution
+Show-Header
+
+Write-Host "This viewer displays data collected by the Incident Response Triage Script" -ForegroundColor $colors.Info
+Write-Host "No live data collection will be performed" -ForegroundColor $colors.Info
+Write-Host ""
+
+# Main loop
+while ($true) {
+    $incidentPath = $Path
+    
+    if (!$incidentPath -or !(Test-Path $incidentPath)) {
+        $incidentPath = Select-IncidentDirectory
+    }
+    
+    if (!$incidentPath) {
+        Write-Host "Exiting..." -ForegroundColor $colors.Info
+        break
+    }
+    
+    Show-IncidentMenu -IncidentPath $incidentPath
+    
+    # Reset path to show selection menu again
+    $Path = ""
+}
+
+Write-Host ""
+Write-Host "Thank you for using IR Data Viewer" -ForegroundColor $colors.Info) {
+                        $cutoff = (Get-Date).AddHours(-[int]$hours)
+                        $events | Where-Object { $_.TimeCreated -gt $cutoff }
+                    } else { $events }
+                }
+                default { $events }
+            }
+            
+            $output += "Filtered Events: $($events.Count)"
+            $output += ""
+        }
+        
+        # Format events
+        $eventNum = 1
+        foreach ($event in $events) {
+            $output += "===== Event #$eventNum ====="
+            $output += "Time: $($event.TimeCreated)"
+            $output += "Level: $($event.LevelDisplayName) | ID: $($event.Id)"
+            $output += "Source: $($event.ProviderName)"
+            $output += "Computer: $($event.MachineName)"
+            
+            if ($event.UserId) {
+                $output += "User: $($event.UserId)"
+            }
+            
+            if ($event.Message) {
+                # Option to show full or truncated messages
+                $output += "Message:"
+                $output += $event.Message -split "`n" | ForEach-Object { "  $_" }
+            }
+            
+            $output += ""
+            $eventNum++
+        }
+        
+        return $output
+    }
+    catch {
+        $output = @()
+        $output += "Unable to parse event log on this system."
+        $output += "Event logs can only be viewed on Windows systems with appropriate permissions."
+        $output += ""
+        $output += "Error: $_"
+        $output += ""
+        $output += "Raw file location: $FilePath"
+        $output += "File size: $([Math]::Round((Get-Item $FilePath).Length/1MB, 2)) MB"
+        
+        return $output
+    }
+}
+
+# Display file content based on type
+function Show-FileContent {
+    param([string]$FilePath)
+    
+    if (!(Test-Path $FilePath)) {
+        return @("File not found: $FilePath")
+    }
+    
+    $extension = [System.IO.Path]::GetExtension($FilePath).ToLower()
+    
+    switch ($extension) {
+        ".csv" { return Show-CsvFile -FilePath $FilePath }
+        ".json" { return Show-JsonFile -FilePath $FilePath }
+        ".evtx" { return Show-EventLog -FilePath $FilePath }
+        ".txt" { return Get-Content $FilePath }
+        ".log" { return Get-Content $FilePath }
+        default { return @("Cannot display file type: $extension") }
+    }
+}
+
+# Paged display
+function Show-PagedContent {
+    param(
+        [array]$Content,
+        [string]$Title
+    )
+    
+    if ($Content.Count -eq 0) {
+        Write-Host "No content to display" -ForegroundColor $colors.Info
+        Read-Host "Press Enter to continue"
+        return
+    }
+    
+    $totalPages = [Math]::Ceiling($Content.Count / $PageSize)
+    $currentPage = 0
+    
+    while ($true) {
+        Show-Header $Title
+        
+        $startIdx = $currentPage * $PageSize
+        $endIdx = [Math]::Min($startIdx + $PageSize, $Content.Count)
+        
+        # Display page content
+        for ($i = $startIdx; $i -lt $endIdx; $i++) {
+            $line = $Content[$i]
+            
+            # Color coding based on content
+            if ($line -match "CRITICAL|ERROR|FAIL") {
+                Write-Host $line -ForegroundColor $colors.Critical
+            }
+            elseif ($line -match "WARNING|ALERT|SUSPICIOUS") {
+                Write-Host $line -ForegroundColor $colors.High
+            }
+            elseif ($line -match "SUCCESS|PASS") {
+                Write-Host $line -ForegroundColor $colors.Low
+            }
+            else {
+                Write-Host $line -ForegroundColor $colors.Data
+            }
+        }
+        
+        # Navigation
+        Write-Host ""
+        Write-Host ("-" * 80) -ForegroundColor $colors.Menu
+        Write-Host "Page $($currentPage + 1) of $totalPages | Showing items $($startIdx + 1)-$endIdx of $($Content.Count)" -ForegroundColor $colors.Info
+        Write-Host "[N]ext [P]revious [F]irst [L]ast [Q]uit: " -NoNewline -ForegroundColor $colors.Menu
+        
+        $key = Read-Host
+        
+        switch ($key.ToUpper()) {
+            "N" { if ($currentPage -lt $totalPages - 1) { $currentPage++ } }
+            "P" { if ($currentPage -gt 0) { $currentPage-- } }
+            "F" { $currentPage = 0 }
+            "L" { $currentPage = $totalPages - 1 }
+            "Q" { return }
+        }
+    }
+}
+
+# Main menu for incident data
+function Show-IncidentMenu {
+    param([string]$IncidentPath)
+    
+    while ($true) {
+        Show-Header "INCIDENT DATA BROWSER"
+        
+        # Display incident info
+        $incidentName = Split-Path $IncidentPath -Leaf
+        Write-Host "Incident: $incidentName" -ForegroundColor $colors.Info
+        Write-Host "Path: $IncidentPath" -ForegroundColor $colors.Data
+        
+        # Get summary info if available
+        $summaryPath = Join-Path $IncidentPath "SUMMARY.txt"
+        if (Test-Path $summaryPath) {
+            $summaryLines = Get-Content $summaryPath | Select-String "THREAT LEVEL:|TOTAL ALERTS:"
+            foreach ($line in $summaryLines) {
+                if ($line -match "THREAT LEVEL:") {
+                    $level = $line.Line.Split(":")[1].Trim()
+                    $color = switch ($level) {
+                        "CRITICAL" { $colors.Critical }
+                        "HIGH" { $colors.High }
+                        "MEDIUM" { $colors.Medium }
+                        "LOW" { $colors.Low }
+                        default { $colors.Data }
+                    }
+                    Write-Host $line.Line -ForegroundColor $color
+                }
+                else {
+                    Write-Host $line.Line -ForegroundColor $colors.Info
+                }
+            }
+        }
+        
+        Write-Host ""
+        Write-Host "MAIN MENU" -ForegroundColor $colors.Header
+        Write-Host "1. View Summary" -ForegroundColor $colors.Menu
+        Write-Host "2. View Alerts" -ForegroundColor $colors.Menu
+        Write-Host "3. Network Data" -ForegroundColor $colors.Menu
+        Write-Host "4. Process Data" -ForegroundColor $colors.Menu
+        Write-Host "5. Persistence Data" -ForegroundColor $colors.Menu
+        Write-Host "6. System Information" -ForegroundColor $colors.Menu
+        Write-Host "7. Event Logs" -ForegroundColor $colors.Menu
+        Write-Host "8. Browse All Files" -ForegroundColor $colors.Menu
+        Write-Host "9. Export All to Text" -ForegroundColor $colors.Menu
+        Write-Host "Q. Back to Directory Selection" -ForegroundColor $colors.Menu
+        Write-Host ""
+        
+        $choice = Read-Host "Select option"
+        
+        switch ($choice) {
+            "1" { Show-Summary -IncidentPath $IncidentPath }
+            "2" { Show-Alerts -IncidentPath $IncidentPath }
+            "3" { Show-NetworkData -IncidentPath $IncidentPath }
+            "4" { Show-ProcessData -IncidentPath $IncidentPath }
+            "5" { Show-PersistenceData -IncidentPath $IncidentPath }
+            "6" { Show-SystemInfo -IncidentPath $IncidentPath }
+            "7" { Show-EventLogs -IncidentPath $IncidentPath }
+            "8" { Browse-Files -IncidentPath $IncidentPath }
+            "9" { Export-AllData -IncidentPath $IncidentPath }
+            "Q" { return }
+            "q" { return }
+        }
+    }
+}
+
+# Show summary
+function Show-Summary {
+    param([string]$IncidentPath)
+    
+    $summaryFile = Join-Path $IncidentPath "SUMMARY.txt"
+    if (Test-Path $summaryFile) {
+        $content = Get-Content $summaryFile
+        Show-PagedContent -Content $content -Title "INCIDENT SUMMARY"
+    }
+    else {
+        Write-Host "Summary file not found" -ForegroundColor $colors.Critical
+        Read-Host "Press Enter to continue"
+    }
+}
+
+# Show alerts
+function Show-Alerts {
+    param([string]$IncidentPath)
+    
+    $alertsPath = Join-Path $IncidentPath "ALERTS"
+    if (!(Test-Path $alertsPath)) {
+        Write-Host "No alerts directory found" -ForegroundColor $colors.Info
+        Read-Host "Press Enter to continue"
+        return
+    }
+    
+    while ($true) {
+        Show-Header "ALERTS"
+        
+        $files = Get-ChildItem $alertsPath -File | Sort-Object Name
+        if ($files.Count -eq 0) {
+            Write-Host "No alert files found" -ForegroundColor $colors.Info
+            Read-Host "Press Enter to continue"
+            return
+        }
+        
+        Write-Host "Alert Files:" -ForegroundColor $colors.Header
+        for ($i = 0; $i -lt $files.Count; $i++) {
+            Write-Host ("{0,3}. {1}" -f ($i + 1), $files[$i].Name) -ForegroundColor $colors.High
+        }
+        
+        Write-Host ""
+        Write-Host "Enter file number to view or Q to go back: " -NoNewline
+        $choice = Read-Host
+        
+        if ($choice -match '^[Qq]') { return }
+        
+        if ($choice -match '^\d+$') {
+            $index = [int]$choice - 1
+            if ($index -ge 0 -and $index -lt $files.Count) {
+                $content = Show-FileContent -FilePath $files[$index].FullName
+                Show-PagedContent -Content $content -Title "ALERT: $($files[$index].Name)"
+            }
+        }
+    }
+}
+
+# Show network data
+function Show-NetworkData {
+    param([string]$IncidentPath)
+    
+    $networkPath = Join-Path $IncidentPath "Network"
+    if (!(Test-Path $networkPath)) {
+        Write-Host "No network data found" -ForegroundColor $colors.Info
+        Read-Host "Press Enter to continue"
+        return
+    }
+    
+    while ($true) {
+        Show-Header "NETWORK DATA"
+        
+        $files = Get-ChildItem $networkPath -File | Sort-Object Name
+        
+        Write-Host "Network Files:" -ForegroundColor $colors.Header
+        for ($i = 0; $i -lt $files.Count; $i++) {
+            Write-Host ("{0,3}. {1}" -f ($i + 1), $files[$i].Name) -ForegroundColor $colors.Menu
+        }
+        
+        Write-Host ""
+        Write-Host "Enter file number to view or Q to go back: " -NoNewline
+        $choice = Read-Host
+        
+        if ($choice -match '^[Qq]') { return }
+        
+        if ($choice -match '^\d+$') {
+            $index = [int]$choice - 1
+            if ($index -ge 0 -and $index -lt $files.Count) {
+                $content = Show-FileContent -FilePath $files[$index].FullName
+                Show-PagedContent -Content $content -Title "NETWORK: $($files[$index].Name)"
+            }
+        }
+    }
+}
+
+# Show process data
+function Show-ProcessData {
+    param([string]$IncidentPath)
+    
+    $processPath = Join-Path $IncidentPath "Processes"
+    $files = @()
+    
+    # Check both Processes folder and ALERTS for process files
+    if (Test-Path $processPath) {
+        $files += Get-ChildItem $processPath -File
+    }
+    
+    $alertsPath = Join-Path $IncidentPath "ALERTS"
+    if (Test-Path $alertsPath) {
+        $files += Get-ChildItem $alertsPath -Filter "*process*" -File
+        $files += Get-ChildItem $alertsPath -Filter "*pid*" -File
+    }
+    
+    if ($files.Count -eq 0) {
+        Write-Host "No process data found" -ForegroundColor $colors.Info
+        Read-Host "Press Enter to continue"
+        return
+    }
+    
+    while ($true) {
+        Show-Header "PROCESS DATA"
+        
+        Write-Host "Process Files:" -ForegroundColor $colors.Header
+        for ($i = 0; $i -lt $files.Count; $i++) {
+            $color = if ($files[$i].DirectoryName -match "ALERTS") { $colors.High } else { $colors.Menu }
+            Write-Host ("{0,3}. {1}" -f ($i + 1), $files[$i].Name) -ForegroundColor $color
+        }
+        
+        Write-Host ""
+        Write-Host "Enter file number to view or Q to go back: " -NoNewline
+        $choice = Read-Host
+        
+        if ($choice -match '^[Qq]') { return }
+        
+        if ($choice -match '^\d+$') {
+            $index = [int]$choice - 1
+            if ($index -ge 0 -and $index -lt $files.Count) {
+                $content = Show-FileContent -FilePath $files[$index].FullName
+                Show-PagedContent -Content $content -Title "PROCESS: $($files[$index].Name)"
+            }
+        }
+    }
+}
+
+# Show persistence data
+function Show-PersistenceData {
+    param([string]$IncidentPath)
+    
+    $persistPath = Join-Path $IncidentPath "Persistence"
+    $files = @()
+    
+    if (Test-Path $persistPath) {
+        $files += Get-ChildItem $persistPath -File
+    }
+    
+    # Also check ALERTS for persistence files
+    $alertsPath = Join-Path $IncidentPath "ALERTS"
+    if (Test-Path $alertsPath) {
+        $files += Get-ChildItem $alertsPath -Filter "*autorun*" -File
+        $files += Get-ChildItem $alertsPath -Filter "*service*" -File
+        $files += Get-ChildItem $alertsPath -Filter "*task*" -File
+    }
+    
+    if ($files.Count -eq 0) {
+        Write-Host "No persistence data found" -ForegroundColor $colors.Info
+        Read-Host "Press Enter to continue"
+        return
+    }
+    
+    while ($true) {
+        Show-Header "PERSISTENCE DATA"
+        
+        Write-Host "Persistence Files:" -ForegroundColor $colors.Header
+        for ($i = 0; $i -lt $files.Count; $i++) {
+            $color = if ($files[$i].DirectoryName -match "ALERTS") { $colors.High } else { $colors.Menu }
+            Write-Host ("{0,3}. {1}" -f ($i + 1), $files[$i].Name) -ForegroundColor $color
+        }
+        
+        Write-Host ""
+        Write-Host "Enter file number to view or Q to go back: " -NoNewline
+        $choice = Read-Host
+        
+        if ($choice -match '^[Qq]') { return }
+        
+        if ($choice -match '^\d+$') {
+            $index = [int]$choice - 1
+            if ($index -ge 0 -and $index -lt $files.Count) {
+                $content = Show-FileContent -FilePath $files[$index].FullName
+                Show-PagedContent -Content $content -Title "PERSISTENCE: $($files[$index].Name)"
+            }
+        }
+    }
+}
+
+# Show system info
+function Show-SystemInfo {
+    param([string]$IncidentPath)
+    
+    $systemPath = Join-Path $IncidentPath "System"
+    if (!(Test-Path $systemPath)) {
+        Write-Host "No system data found" -ForegroundColor $colors.Info
+        Read-Host "Press Enter to continue"
+        return
+    }
+    
+    while ($true) {
+        Show-Header "SYSTEM INFORMATION"
+        
+        $files = Get-ChildItem $systemPath -File | Sort-Object Name
+        
+        Write-Host "System Files:" -ForegroundColor $colors.Header
+        for ($i = 0; $i -lt $files.Count; $i++) {
+            Write-Host ("{0,3}. {1}" -f ($i + 1), $files[$i].Name) -ForegroundColor $colors.Menu
+        }
+        
+        Write-Host ""
+        Write-Host "Enter file number to view or Q to go back: " -NoNewline
+        $choice = Read-Host
+        
+        if ($choice -match '^[Qq]') { return }
+        
+        if ($choice -match '^\d+$') {
+            $index = [int]$choice - 1
+            if ($index -ge 0 -and $index -lt $files.Count) {
+                $content = Show-FileContent -FilePath $files[$index].FullName
+                Show-PagedContent -Content $content -Title "SYSTEM: $($files[$index].Name)"
+            }
+        }
+    }
+}
+
+# Show event logs
+function Show-EventLogs {
+    param([string]$IncidentPath)
+    
+    $logsPath = Join-Path $IncidentPath "Logs"
+    if (!(Test-Path $logsPath)) {
+        Write-Host "No event logs found" -ForegroundColor $colors.Info
+        Read-Host "Press Enter to continue"
+        return
+    }
+    
+    while ($true) {
+        Show-Header "EVENT LOGS"
+        
+        $files = Get-ChildItem $logsPath -File | Sort-Object Name
+        
+        Write-Host "Event Log Files:" -ForegroundColor $colors.Header
+        Write-Host "(Note: .evtx files can only be parsed on Windows systems)" -ForegroundColor $colors.Data
+        Write-Host ""
+        
+        for ($i = 0; $i -lt $files.Count; $i++) {
+            $color = if ($files[$i].Extension -eq ".evtx") { $colors.High } else { $colors.Menu }
+            Write-Host ("{0,3}. {1} ({2:N2} MB)" -f ($i + 1), $files[$i].Name, ($files[$i].Length/1MB)) -ForegroundColor $color
+        }
+        
+        Write-Host ""
+        Write-Host "Enter file number to view or Q to go back: " -NoNewline
+        $choice = Read-Host
+        
+        if ($choice -match '^[Qq]') { return }
+        
+        if ($choice -match '^\d+$') {
+            $index = [int]$choice - 1
+            if ($index -ge 0 -and $index -lt $files.Count) {
+                $content = Show-FileContent -FilePath $files[$index].FullName
+                Show-PagedContent -Content $content -Title "LOG: $($files[$index].Name)"
+            }
+        }
+    }
+}
+
+# Browse all files
+function Browse-Files {
+    param([string]$IncidentPath)
+    
+    Show-Header "FILE BROWSER"
+    
+    Write-Host "Building file list..." -ForegroundColor $colors.Info
+    $allFiles = Get-ChildItem $IncidentPath -Recurse -File | Sort-Object DirectoryName, Name
+    
+    $fileList = @()
+    $currentDir = ""
+    
+    foreach ($file in $allFiles) {
+        $relPath = $file.DirectoryName.Replace($IncidentPath, "").TrimStart("\")
+        
+        if ($relPath -ne $currentDir) {
+            $fileList += ""
+            $fileList += "[$relPath]"
+            $currentDir = $relPath
+        }
+        
+        $fileList += "  $($file.Name) ($([Math]::Round($file.Length/1KB, 2)) KB)"
+    }
+    
+    Show-PagedContent -Content $fileList -Title "ALL FILES ($($allFiles.Count) total)"
+}
+
+# Export all data to text
+function Export-AllData {
+    param([string]$IncidentPath)
+    
+    Show-Header "EXPORT ALL DATA"
+    
+    Write-Host "This will export all data to a single text file." -ForegroundColor $colors.Info
+    $confirm = Read-Host "Continue? (Y/N)"
+    
+    if ($confirm -ne 'Y' -and $confirm -ne 'y') { return }
+    
+    $exportFile = Join-Path $IncidentPath "Export_$(Get-Date -Format 'yyyyMMdd_HHmmss').txt"
+    $output = @()
+    
+    # Header
+    $output += "="*80
+    $output += "INCIDENT RESPONSE DATA EXPORT"
+    $output += "="*80
+    $output += "Generated: $(Get-Date)"
+    $output += "Incident: $(Split-Path $IncidentPath -Leaf)"
+    $output += "Path: $IncidentPath"
+    $output += "="*80
+    $output += ""
+    
+    Write-Host "Exporting data..." -ForegroundColor $colors.Info
+    
+    # Process each directory
+    $directories = @(
+        @{Name="SUMMARY"; Path="SUMMARY.txt"; Type="File"},
+        @{Name="ALERTS"; Path="ALERTS"; Type="Directory"},
+        @{Name="NETWORK"; Path="Network"; Type="Directory"},
+        @{Name="PROCESSES"; Path="Processes"; Type="Directory"},
+        @{Name="PERSISTENCE"; Path="Persistence"; Type="Directory"},
+        @{Name="SYSTEM"; Path="System"; Type="Directory"},
+        @{Name="LOGS"; Path="Logs"; Type="Directory"}
+    )
+    
+    foreach ($dir in $directories) {
+        Write-Host "  Exporting $($dir.Name)..." -ForegroundColor $colors.Data
+        
+        $fullPath = Join-Path $IncidentPath $dir.Path
+        
+        if (Test-Path $fullPath) {
+            $output += ""
+            $output += "="*80
+            $output += $dir.Name
+            $output += "="*80
+            
+            if ($dir.Type -eq "File") {
+                $output += Get-Content $fullPath
+            }
+            else {
+                $files = Get-ChildItem $fullPath -File | Sort-Object Name
+                foreach ($file in $files) {
+                    $output += ""
+                    $output += "-"*60
+                    $output += "FILE: $($file.Name)"
+                    $output += "-"*60
+                    
+                    $content = Show-FileContent -FilePath $file.FullName
+                    $output += $content
+                }
+            }
+        }
+    }
+    
+    # Save export
+    $output | Out-File $exportFile -Encoding UTF8
+    
+    Write-Host ""
+    Write-Host "Export complete!" -ForegroundColor $colors.Low
+    Write-Host "File saved to: $exportFile" -ForegroundColor $colors.Info
+    Write-Host "Size: $([Math]::Round((Get-Item $exportFile).Length/1MB, 2)) MB" -ForegroundColor $colors.Data
+    Write-Host ""
+    
+    $open = Read-Host "Open file now? (Y/N)"
+    if ($open -eq 'Y' -or $open -eq 'y') {
+        notepad.exe $exportFile
+    }
+    
+    Read-Host "Press Enter to continue"
+}
+
+# Main execution
+Show-Header
+
+Write-Host "This viewer displays data collected by the Incident Response Triage Script" -ForegroundColor $colors.Info
+Write-Host "No live data collection will be performed" -ForegroundColor $colors.Info
+Write-Host ""
+
+# Main loop
+while ($true) {
+    $incidentPath = $Path
+    
+    if (!$incidentPath -or !(Test-Path $incidentPath)) {
+        $incidentPath = Select-IncidentDirectory
+    }
+    
+    if (!$incidentPath) {
+        Write-Host "Exiting..." -ForegroundColor $colors.Info
+        break
+    }
+    
+    Show-IncidentMenu -IncidentPath $incidentPath
+    
+    # Reset path to show selection menu again
+    $Path = ""
+}
+
+Write-Host ""
+Write-Host "Thank you for using IR Data Viewer" -ForegroundColor $colors.Info) {
+                    $lineNum = [int]$jumpLine - 1
+                    if ($lineNum -ge 0 -and $lineNum -lt $Content.Count) {
+                        # Calculate which page contains this line
+                        $currentPage = [Math]::Floor($lineNum / $PageSize)
+                    }
+                }
+            }
+            "S" {
+                $searchTerm = Read-Host "Enter search term"
+                if ($searchTerm) {
+                    Write-Host "Searching..." -ForegroundColor $colors.Info
+                    $matches = @()
+                    for ($i = 0; $i -lt $Content.Count; $i++) {
+                        if ($Content[$i] -match [regex]::Escape($searchTerm)) {
+                            $matches += "Line $($i+1): $($Content[$i])"
+                        }
+                    }
+                    if ($matches.Count -gt 0) {
+                        Write-Host "Found $($matches.Count) matches" -ForegroundColor $colors.Info
+                        Read-Host "Press Enter to view"
+                        Show-PagedContent -Content $matches -Title "Search Results: '$searchTerm'"
+                    } else {
+                        Write-Host "No matches found" -ForegroundColor $colors.High
+                        Start-Sleep -Seconds 2
+                    }
+                }
+            }
+            "E" {
+                $exportPath = Join-Path ([System.IO.Path]::GetTempPath()) "IR_Export_$(Get-Date -Format 'yyyyMMdd_HHmmss').txt"
+                $Content | Out-File $exportPath -Encoding UTF8
+                Write-Host "Exported to: $exportPath" -ForegroundColor $colors.Low
+                Start-Sleep -Seconds 2
+            }
+            "Q" { return }
+        }
+    }
+}
+
+# Main menu for incident data
+function Show-IncidentMenu {
+    param([string]$IncidentPath)
+    
+    while ($true) {
+        Show-Header "INCIDENT DATA BROWSER"
+        
+        # Display incident info
+        $incidentName = Split-Path $IncidentPath -Leaf
+        Write-Host "Incident: $incidentName" -ForegroundColor $colors.Info
+        Write-Host "Path: $IncidentPath" -ForegroundColor $colors.Data
+        
+        # Get summary info if available
+        $summaryPath = Join-Path $IncidentPath "SUMMARY.txt"
+        if (Test-Path $summaryPath) {
+            $summaryLines = Get-Content $summaryPath | Select-String "THREAT LEVEL:|TOTAL ALERTS:"
+            foreach ($line in $summaryLines) {
+                if ($line -match "THREAT LEVEL:") {
+                    $level = $line.Line.Split(":")[1].Trim()
+                    $color = switch ($level) {
+                        "CRITICAL" { $colors.Critical }
+                        "HIGH" { $colors.High }
+                        "MEDIUM" { $colors.Medium }
+                        "LOW" { $colors.Low }
+                        default { $colors.Data }
+                    }
+                    Write-Host $line.Line -ForegroundColor $color
+                }
+                else {
+                    Write-Host $line.Line -ForegroundColor $colors.Info
+                }
+            }
+        }
+        
+        Write-Host ""
+        Write-Host "MAIN MENU" -ForegroundColor $colors.Header
+        Write-Host "1. View Summary" -ForegroundColor $colors.Menu
+        Write-Host "2. View Alerts" -ForegroundColor $colors.Menu
+        Write-Host "3. Network Data" -ForegroundColor $colors.Menu
+        Write-Host "4. Process Data" -ForegroundColor $colors.Menu
+        Write-Host "5. Persistence Data" -ForegroundColor $colors.Menu
+        Write-Host "6. System Information" -ForegroundColor $colors.Menu
+        Write-Host "7. Event Logs" -ForegroundColor $colors.Menu
+        Write-Host "8. Browse All Files" -ForegroundColor $colors.Menu
+        Write-Host "9. Export All to Text" -ForegroundColor $colors.Menu
+        Write-Host "Q. Back to Directory Selection" -ForegroundColor $colors.Menu
+        Write-Host ""
+        
+        $choice = Read-Host "Select option"
+        
+        switch ($choice) {
+            "1" { Show-Summary -IncidentPath $IncidentPath }
+            "2" { Show-Alerts -IncidentPath $IncidentPath }
+            "3" { Show-NetworkData -IncidentPath $IncidentPath }
+            "4" { Show-ProcessData -IncidentPath $IncidentPath }
+            "5" { Show-PersistenceData -IncidentPath $IncidentPath }
+            "6" { Show-SystemInfo -IncidentPath $IncidentPath }
+            "7" { Show-EventLogs -IncidentPath $IncidentPath }
+            "8" { Browse-Files -IncidentPath $IncidentPath }
+            "9" { Export-AllData -IncidentPath $IncidentPath }
+            "Q" { return }
+            "q" { return }
+        }
+    }
+}
+
+# Show summary
+function Show-Summary {
+    param([string]$IncidentPath)
+    
+    $summaryFile = Join-Path $IncidentPath "SUMMARY.txt"
+    if (Test-Path $summaryFile) {
+        $content = Get-Content $summaryFile
+        Show-PagedContent -Content $content -Title "INCIDENT SUMMARY"
+    }
+    else {
+        Write-Host "Summary file not found" -ForegroundColor $colors.Critical
+        Read-Host "Press Enter to continue"
+    }
+}
+
+# Show alerts
+function Show-Alerts {
+    param([string]$IncidentPath)
+    
+    $alertsPath = Join-Path $IncidentPath "ALERTS"
+    if (!(Test-Path $alertsPath)) {
+        Write-Host "No alerts directory found" -ForegroundColor $colors.Info
+        Read-Host "Press Enter to continue"
+        return
+    }
+    
+    while ($true) {
+        Show-Header "ALERTS"
+        
+        $files = Get-ChildItem $alertsPath -File | Sort-Object Name
+        if ($files.Count -eq 0) {
+            Write-Host "No alert files found" -ForegroundColor $colors.Info
+            Read-Host "Press Enter to continue"
+            return
+        }
+        
+        Write-Host "Alert Files:" -ForegroundColor $colors.Header
+        for ($i = 0; $i -lt $files.Count; $i++) {
+            Write-Host ("{0,3}. {1}" -f ($i + 1), $files[$i].Name) -ForegroundColor $colors.High
+        }
+        
+        Write-Host ""
+        Write-Host "Enter file number to view or Q to go back: " -NoNewline
+        $choice = Read-Host
+        
+        if ($choice -match '^[Qq]') { return }
+        
+        if ($choice -match '^\d+$') {
+            $index = [int]$choice - 1
+            if ($index -ge 0 -and $index -lt $files.Count) {
+                $content = Show-FileContent -FilePath $files[$index].FullName
+                Show-PagedContent -Content $content -Title "ALERT: $($files[$index].Name)"
+            }
+        }
+    }
+}
+
+# Show network data
+function Show-NetworkData {
+    param([string]$IncidentPath)
+    
+    $networkPath = Join-Path $IncidentPath "Network"
+    if (!(Test-Path $networkPath)) {
+        Write-Host "No network data found" -ForegroundColor $colors.Info
+        Read-Host "Press Enter to continue"
+        return
+    }
+    
+    while ($true) {
+        Show-Header "NETWORK DATA"
+        
+        $files = Get-ChildItem $networkPath -File | Sort-Object Name
+        
+        Write-Host "Network Files:" -ForegroundColor $colors.Header
+        for ($i = 0; $i -lt $files.Count; $i++) {
+            Write-Host ("{0,3}. {1}" -f ($i + 1), $files[$i].Name) -ForegroundColor $colors.Menu
+        }
+        
+        Write-Host ""
+        Write-Host "Enter file number to view or Q to go back: " -NoNewline
+        $choice = Read-Host
+        
+        if ($choice -match '^[Qq]') { return }
+        
+        if ($choice -match '^\d+$') {
+            $index = [int]$choice - 1
+            if ($index -ge 0 -and $index -lt $files.Count) {
+                $content = Show-FileContent -FilePath $files[$index].FullName
+                Show-PagedContent -Content $content -Title "NETWORK: $($files[$index].Name)"
+            }
+        }
+    }
+}
+
+# Show process data
+function Show-ProcessData {
+    param([string]$IncidentPath)
+    
+    $processPath = Join-Path $IncidentPath "Processes"
+    $files = @()
+    
+    # Check both Processes folder and ALERTS for process files
+    if (Test-Path $processPath) {
+        $files += Get-ChildItem $processPath -File
+    }
+    
+    $alertsPath = Join-Path $IncidentPath "ALERTS"
+    if (Test-Path $alertsPath) {
+        $files += Get-ChildItem $alertsPath -Filter "*process*" -File
+        $files += Get-ChildItem $alertsPath -Filter "*pid*" -File
+    }
+    
+    if ($files.Count -eq 0) {
+        Write-Host "No process data found" -ForegroundColor $colors.Info
+        Read-Host "Press Enter to continue"
+        return
+    }
+    
+    while ($true) {
+        Show-Header "PROCESS DATA"
+        
+        Write-Host "Process Files:" -ForegroundColor $colors.Header
+        for ($i = 0; $i -lt $files.Count; $i++) {
+            $color = if ($files[$i].DirectoryName -match "ALERTS") { $colors.High } else { $colors.Menu }
+            Write-Host ("{0,3}. {1}" -f ($i + 1), $files[$i].Name) -ForegroundColor $color
+        }
+        
+        Write-Host ""
+        Write-Host "Enter file number to view or Q to go back: " -NoNewline
+        $choice = Read-Host
+        
+        if ($choice -match '^[Qq]') { return }
+        
+        if ($choice -match '^\d+$') {
+            $index = [int]$choice - 1
+            if ($index -ge 0 -and $index -lt $files.Count) {
+                $content = Show-FileContent -FilePath $files[$index].FullName
+                Show-PagedContent -Content $content -Title "PROCESS: $($files[$index].Name)"
+            }
+        }
+    }
+}
+
+# Show persistence data
+function Show-PersistenceData {
+    param([string]$IncidentPath)
+    
+    $persistPath = Join-Path $IncidentPath "Persistence"
+    $files = @()
+    
+    if (Test-Path $persistPath) {
+        $files += Get-ChildItem $persistPath -File
+    }
+    
+    # Also check ALERTS for persistence files
+    $alertsPath = Join-Path $IncidentPath "ALERTS"
+    if (Test-Path $alertsPath) {
+        $files += Get-ChildItem $alertsPath -Filter "*autorun*" -File
+        $files += Get-ChildItem $alertsPath -Filter "*service*" -File
+        $files += Get-ChildItem $alertsPath -Filter "*task*" -File
+    }
+    
+    if ($files.Count -eq 0) {
+        Write-Host "No persistence data found" -ForegroundColor $colors.Info
+        Read-Host "Press Enter to continue"
+        return
+    }
+    
+    while ($true) {
+        Show-Header "PERSISTENCE DATA"
+        
+        Write-Host "Persistence Files:" -ForegroundColor $colors.Header
+        for ($i = 0; $i -lt $files.Count; $i++) {
+            $color = if ($files[$i].DirectoryName -match "ALERTS") { $colors.High } else { $colors.Menu }
+            Write-Host ("{0,3}. {1}" -f ($i + 1), $files[$i].Name) -ForegroundColor $color
+        }
+        
+        Write-Host ""
+        Write-Host "Enter file number to view or Q to go back: " -NoNewline
+        $choice = Read-Host
+        
+        if ($choice -match '^[Qq]') { return }
+        
+        if ($choice -match '^\d+$') {
+            $index = [int]$choice - 1
+            if ($index -ge 0 -and $index -lt $files.Count) {
+                $content = Show-FileContent -FilePath $files[$index].FullName
+                Show-PagedContent -Content $content -Title "PERSISTENCE: $($files[$index].Name)"
+            }
+        }
+    }
+}
+
+# Show system info
+function Show-SystemInfo {
+    param([string]$IncidentPath)
+    
+    $systemPath = Join-Path $IncidentPath "System"
+    if (!(Test-Path $systemPath)) {
+        Write-Host "No system data found" -ForegroundColor $colors.Info
+        Read-Host "Press Enter to continue"
+        return
+    }
+    
+    while ($true) {
+        Show-Header "SYSTEM INFORMATION"
+        
+        $files = Get-ChildItem $systemPath -File | Sort-Object Name
+        
+        Write-Host "System Files:" -ForegroundColor $colors.Header
+        for ($i = 0; $i -lt $files.Count; $i++) {
+            Write-Host ("{0,3}. {1}" -f ($i + 1), $files[$i].Name) -ForegroundColor $colors.Menu
+        }
+        
+        Write-Host ""
+        Write-Host "Enter file number to view or Q to go back: " -NoNewline
+        $choice = Read-Host
+        
+        if ($choice -match '^[Qq]') { return }
+        
+        if ($choice -match '^\d+$') {
+            $index = [int]$choice - 1
+            if ($index -ge 0 -and $index -lt $files.Count) {
+                $content = Show-FileContent -FilePath $files[$index].FullName
+                Show-PagedContent -Content $content -Title "SYSTEM: $($files[$index].Name)"
+            }
+        }
+    }
+}
+
+# Show event logs
+function Show-EventLogs {
+    param([string]$IncidentPath)
+    
+    $logsPath = Join-Path $IncidentPath "Logs"
+    if (!(Test-Path $logsPath)) {
+        Write-Host "No event logs found" -ForegroundColor $colors.Info
+        Read-Host "Press Enter to continue"
+        return
+    }
+    
+    while ($true) {
+        Show-Header "EVENT LOGS"
+        
+        $files = Get-ChildItem $logsPath -File | Sort-Object Name
+        
+        Write-Host "Event Log Files:" -ForegroundColor $colors.Header
+        Write-Host "(Note: .evtx files can only be parsed on Windows systems)" -ForegroundColor $colors.Data
+        Write-Host ""
+        
+        for ($i = 0; $i -lt $files.Count; $i++) {
+            $color = if ($files[$i].Extension -eq ".evtx") { $colors.High } else { $colors.Menu }
+            Write-Host ("{0,3}. {1} ({2:N2} MB)" -f ($i + 1), $files[$i].Name, ($files[$i].Length/1MB)) -ForegroundColor $color
+        }
+        
+        Write-Host ""
+        Write-Host "Enter file number to view or Q to go back: " -NoNewline
+        $choice = Read-Host
+        
+        if ($choice -match '^[Qq]') { return }
+        
+        if ($choice -match '^\d+$') {
+            $index = [int]$choice - 1
+            if ($index -ge 0 -and $index -lt $files.Count) {
+                $content = Show-FileContent -FilePath $files[$index].FullName
+                Show-PagedContent -Content $content -Title "LOG: $($files[$index].Name)"
+            }
+        }
+    }
+}
+
+# Browse all files
+function Browse-Files {
+    param([string]$IncidentPath)
+    
+    Show-Header "FILE BROWSER"
+    
+    Write-Host "Building file list..." -ForegroundColor $colors.Info
+    $allFiles = Get-ChildItem $IncidentPath -Recurse -File | Sort-Object DirectoryName, Name
+    
+    $fileList = @()
+    $currentDir = ""
+    
+    foreach ($file in $allFiles) {
+        $relPath = $file.DirectoryName.Replace($IncidentPath, "").TrimStart("\")
+        
+        if ($relPath -ne $currentDir) {
+            $fileList += ""
+            $fileList += "[$relPath]"
+            $currentDir = $relPath
+        }
+        
+        $fileList += "  $($file.Name) ($([Math]::Round($file.Length/1KB, 2)) KB)"
+    }
+    
+    Show-PagedContent -Content $fileList -Title "ALL FILES ($($allFiles.Count) total)"
+}
+
+# Export all data to text
+function Export-AllData {
+    param([string]$IncidentPath)
+    
+    Show-Header "EXPORT ALL DATA"
+    
+    Write-Host "This will export all data to a single text file." -ForegroundColor $colors.Info
+    $confirm = Read-Host "Continue? (Y/N)"
+    
+    if ($confirm -ne 'Y' -and $confirm -ne 'y') { return }
+    
+    $exportFile = Join-Path $IncidentPath "Export_$(Get-Date -Format 'yyyyMMdd_HHmmss').txt"
+    $output = @()
+    
+    # Header
+    $output += "="*80
+    $output += "INCIDENT RESPONSE DATA EXPORT"
+    $output += "="*80
+    $output += "Generated: $(Get-Date)"
+    $output += "Incident: $(Split-Path $IncidentPath -Leaf)"
+    $output += "Path: $IncidentPath"
+    $output += "="*80
+    $output += ""
+    
+    Write-Host "Exporting data..." -ForegroundColor $colors.Info
+    
+    # Process each directory
+    $directories = @(
+        @{Name="SUMMARY"; Path="SUMMARY.txt"; Type="File"},
+        @{Name="ALERTS"; Path="ALERTS"; Type="Directory"},
+        @{Name="NETWORK"; Path="Network"; Type="Directory"},
+        @{Name="PROCESSES"; Path="Processes"; Type="Directory"},
+        @{Name="PERSISTENCE"; Path="Persistence"; Type="Directory"},
+        @{Name="SYSTEM"; Path="System"; Type="Directory"},
+        @{Name="LOGS"; Path="Logs"; Type="Directory"}
+    )
+    
+    foreach ($dir in $directories) {
+        Write-Host "  Exporting $($dir.Name)..." -ForegroundColor $colors.Data
+        
+        $fullPath = Join-Path $IncidentPath $dir.Path
+        
+        if (Test-Path $fullPath) {
+            $output += ""
+            $output += "="*80
+            $output += $dir.Name
+            $output += "="*80
+            
+            if ($dir.Type -eq "File") {
+                $output += Get-Content $fullPath
+            }
+            else {
+                $files = Get-ChildItem $fullPath -File | Sort-Object Name
+                foreach ($file in $files) {
+                    $output += ""
+                    $output += "-"*60
+                    $output += "FILE: $($file.Name)"
+                    $output += "-"*60
+                    
+                    $content = Show-FileContent -FilePath $file.FullName
+                    $output += $content
+                }
+            }
+        }
+    }
+    
+    # Save export
+    $output | Out-File $exportFile -Encoding UTF8
+    
+    Write-Host ""
+    Write-Host "Export complete!" -ForegroundColor $colors.Low
+    Write-Host "File saved to: $exportFile" -ForegroundColor $colors.Info
+    Write-Host "Size: $([Math]::Round((Get-Item $exportFile).Length/1MB, 2)) MB" -ForegroundColor $colors.Data
+    Write-Host ""
+    
+    $open = Read-Host "Open file now? (Y/N)"
+    if ($open -eq 'Y' -or $open -eq 'y') {
+        notepad.exe $exportFile
+    }
+    
+    Read-Host "Press Enter to continue"
+}
+
+# Main execution
+Show-Header
+
+Write-Host "This viewer displays data collected by the Incident Response Triage Script" -ForegroundColor $colors.Info
+Write-Host "No live data collection will be performed" -ForegroundColor $colors.Info
+Write-Host ""
+
+# Main loop
+while ($true) {
+    $incidentPath = $Path
+    
+    if (!$incidentPath -or !(Test-Path $incidentPath)) {
+        $incidentPath = Select-IncidentDirectory
+    }
+    
+    if (!$incidentPath) {
+        Write-Host "Exiting..." -ForegroundColor $colors.Info
+        break
+    }
+    
+    Show-IncidentMenu -IncidentPath $incidentPath
+    
+    # Reset path to show selection menu again
+    $Path = ""
+}
+
+Write-Host ""
+Write-Host "Thank you for using IR Data Viewer" -ForegroundColor $colors.Info) {
+                    Get-WinEvent -Path $FilePath -MaxEvents ([int]$maxEvents) -ErrorAction Stop
+                } else {
+                    Get-WinEvent -Path $FilePath -MaxEvents 100 -ErrorAction Stop
+                }
+            }
+            default { Get-WinEvent -Path $FilePath -MaxEvents 100 -ErrorAction Stop }
+        }
+        
+        Write-Host "Processing $($events.Count) events..." -ForegroundColor $colors.Info
+        
+        $output = @()
+        $output += "Event Log: $(Split-Path $FilePath -Leaf)"
+        $output += "Total Events Loaded: $($events.Count)"
+        $output += ("=" * 60)
+        $output += ""
+        
+        # Add filter option
+        Write-Host "Filter events? (Y/N)" -NoNewline -ForegroundColor $colors.Info
+        $filter = Read-Host
+        
+        if ($filter -eq 'Y' -or $filter -eq 'y') {
+            Write-Host "Filter by:" -ForegroundColor $colors.Menu
+            Write-Host "1. Error/Critical only" -ForegroundColor $colors.Menu
+            Write-Host "2. Specific Event ID" -ForegroundColor $colors.Menu
+            Write-Host "3. Time range" -ForegroundColor $colors.Menu
+            Write-Host "4. No filter" -ForegroundColor $colors.Menu
+            
+            $filterChoice = Read-Host "Select filter (1-4)"
+            
+            $events = switch ($filterChoice) {
+                "1" { $events | Where-Object { $_.Level -le 2 } }
+                "2" {
+                    $eventId = Read-Host "Enter Event ID"
+                    if ($eventId -match '^\d+
+
+# Display file content based on type
+function Show-FileContent {
+    param([string]$FilePath)
+    
+    if (!(Test-Path $FilePath)) {
+        return @("File not found: $FilePath")
+    }
+    
+    $extension = [System.IO.Path]::GetExtension($FilePath).ToLower()
+    
+    switch ($extension) {
+        ".csv" { return Show-CsvFile -FilePath $FilePath }
+        ".json" { return Show-JsonFile -FilePath $FilePath }
+        ".evtx" { return Show-EventLog -FilePath $FilePath }
+        ".txt" { return Get-Content $FilePath }
+        ".log" { return Get-Content $FilePath }
+        default { return @("Cannot display file type: $extension") }
+    }
+}
+
+# Paged display
+function Show-PagedContent {
+    param(
+        [array]$Content,
+        [string]$Title
+    )
+    
+    if ($Content.Count -eq 0) {
+        Write-Host "No content to display" -ForegroundColor $colors.Info
+        Read-Host "Press Enter to continue"
+        return
+    }
+    
+    $totalPages = [Math]::Ceiling($Content.Count / $PageSize)
+    $currentPage = 0
+    
+    while ($true) {
+        Show-Header $Title
+        
+        $startIdx = $currentPage * $PageSize
+        $endIdx = [Math]::Min($startIdx + $PageSize, $Content.Count)
+        
+        # Display page content
+        for ($i = $startIdx; $i -lt $endIdx; $i++) {
+            $line = $Content[$i]
+            
+            # Color coding based on content
+            if ($line -match "CRITICAL|ERROR|FAIL") {
+                Write-Host $line -ForegroundColor $colors.Critical
+            }
+            elseif ($line -match "WARNING|ALERT|SUSPICIOUS") {
+                Write-Host $line -ForegroundColor $colors.High
+            }
+            elseif ($line -match "SUCCESS|PASS") {
+                Write-Host $line -ForegroundColor $colors.Low
+            }
+            else {
+                Write-Host $line -ForegroundColor $colors.Data
+            }
+        }
+        
+        # Navigation
+        Write-Host ""
+        Write-Host ("-" * 80) -ForegroundColor $colors.Menu
+        Write-Host "Page $($currentPage + 1) of $totalPages | Showing items $($startIdx + 1)-$endIdx of $($Content.Count)" -ForegroundColor $colors.Info
+        Write-Host "[N]ext [P]revious [F]irst [L]ast [Q]uit: " -NoNewline -ForegroundColor $colors.Menu
+        
+        $key = Read-Host
+        
+        switch ($key.ToUpper()) {
+            "N" { if ($currentPage -lt $totalPages - 1) { $currentPage++ } }
+            "P" { if ($currentPage -gt 0) { $currentPage-- } }
+            "F" { $currentPage = 0 }
+            "L" { $currentPage = $totalPages - 1 }
+            "Q" { return }
+        }
+    }
+}
+
+# Main menu for incident data
+function Show-IncidentMenu {
+    param([string]$IncidentPath)
+    
+    while ($true) {
+        Show-Header "INCIDENT DATA BROWSER"
+        
+        # Display incident info
+        $incidentName = Split-Path $IncidentPath -Leaf
+        Write-Host "Incident: $incidentName" -ForegroundColor $colors.Info
+        Write-Host "Path: $IncidentPath" -ForegroundColor $colors.Data
+        
+        # Get summary info if available
+        $summaryPath = Join-Path $IncidentPath "SUMMARY.txt"
+        if (Test-Path $summaryPath) {
+            $summaryLines = Get-Content $summaryPath | Select-String "THREAT LEVEL:|TOTAL ALERTS:"
+            foreach ($line in $summaryLines) {
+                if ($line -match "THREAT LEVEL:") {
+                    $level = $line.Line.Split(":")[1].Trim()
+                    $color = switch ($level) {
+                        "CRITICAL" { $colors.Critical }
+                        "HIGH" { $colors.High }
+                        "MEDIUM" { $colors.Medium }
+                        "LOW" { $colors.Low }
+                        default { $colors.Data }
+                    }
+                    Write-Host $line.Line -ForegroundColor $color
+                }
+                else {
+                    Write-Host $line.Line -ForegroundColor $colors.Info
+                }
+            }
+        }
+        
+        Write-Host ""
+        Write-Host "MAIN MENU" -ForegroundColor $colors.Header
+        Write-Host "1. View Summary" -ForegroundColor $colors.Menu
+        Write-Host "2. View Alerts" -ForegroundColor $colors.Menu
+        Write-Host "3. Network Data" -ForegroundColor $colors.Menu
+        Write-Host "4. Process Data" -ForegroundColor $colors.Menu
+        Write-Host "5. Persistence Data" -ForegroundColor $colors.Menu
+        Write-Host "6. System Information" -ForegroundColor $colors.Menu
+        Write-Host "7. Event Logs" -ForegroundColor $colors.Menu
+        Write-Host "8. Browse All Files" -ForegroundColor $colors.Menu
+        Write-Host "9. Export All to Text" -ForegroundColor $colors.Menu
+        Write-Host "Q. Back to Directory Selection" -ForegroundColor $colors.Menu
+        Write-Host ""
+        
+        $choice = Read-Host "Select option"
+        
+        switch ($choice) {
+            "1" { Show-Summary -IncidentPath $IncidentPath }
+            "2" { Show-Alerts -IncidentPath $IncidentPath }
+            "3" { Show-NetworkData -IncidentPath $IncidentPath }
+            "4" { Show-ProcessData -IncidentPath $IncidentPath }
+            "5" { Show-PersistenceData -IncidentPath $IncidentPath }
+            "6" { Show-SystemInfo -IncidentPath $IncidentPath }
+            "7" { Show-EventLogs -IncidentPath $IncidentPath }
+            "8" { Browse-Files -IncidentPath $IncidentPath }
+            "9" { Export-AllData -IncidentPath $IncidentPath }
+            "Q" { return }
+            "q" { return }
+        }
+    }
+}
+
+# Show summary
+function Show-Summary {
+    param([string]$IncidentPath)
+    
+    $summaryFile = Join-Path $IncidentPath "SUMMARY.txt"
+    if (Test-Path $summaryFile) {
+        $content = Get-Content $summaryFile
+        Show-PagedContent -Content $content -Title "INCIDENT SUMMARY"
+    }
+    else {
+        Write-Host "Summary file not found" -ForegroundColor $colors.Critical
+        Read-Host "Press Enter to continue"
+    }
+}
+
+# Show alerts
+function Show-Alerts {
+    param([string]$IncidentPath)
+    
+    $alertsPath = Join-Path $IncidentPath "ALERTS"
+    if (!(Test-Path $alertsPath)) {
+        Write-Host "No alerts directory found" -ForegroundColor $colors.Info
+        Read-Host "Press Enter to continue"
+        return
+    }
+    
+    while ($true) {
+        Show-Header "ALERTS"
+        
+        $files = Get-ChildItem $alertsPath -File | Sort-Object Name
+        if ($files.Count -eq 0) {
+            Write-Host "No alert files found" -ForegroundColor $colors.Info
+            Read-Host "Press Enter to continue"
+            return
+        }
+        
+        Write-Host "Alert Files:" -ForegroundColor $colors.Header
+        for ($i = 0; $i -lt $files.Count; $i++) {
+            Write-Host ("{0,3}. {1}" -f ($i + 1), $files[$i].Name) -ForegroundColor $colors.High
+        }
+        
+        Write-Host ""
+        Write-Host "Enter file number to view or Q to go back: " -NoNewline
+        $choice = Read-Host
+        
+        if ($choice -match '^[Qq]') { return }
+        
+        if ($choice -match '^\d+$') {
+            $index = [int]$choice - 1
+            if ($index -ge 0 -and $index -lt $files.Count) {
+                $content = Show-FileContent -FilePath $files[$index].FullName
+                Show-PagedContent -Content $content -Title "ALERT: $($files[$index].Name)"
+            }
+        }
+    }
+}
+
+# Show network data
+function Show-NetworkData {
+    param([string]$IncidentPath)
+    
+    $networkPath = Join-Path $IncidentPath "Network"
+    if (!(Test-Path $networkPath)) {
+        Write-Host "No network data found" -ForegroundColor $colors.Info
+        Read-Host "Press Enter to continue"
+        return
+    }
+    
+    while ($true) {
+        Show-Header "NETWORK DATA"
+        
+        $files = Get-ChildItem $networkPath -File | Sort-Object Name
+        
+        Write-Host "Network Files:" -ForegroundColor $colors.Header
+        for ($i = 0; $i -lt $files.Count; $i++) {
+            Write-Host ("{0,3}. {1}" -f ($i + 1), $files[$i].Name) -ForegroundColor $colors.Menu
+        }
+        
+        Write-Host ""
+        Write-Host "Enter file number to view or Q to go back: " -NoNewline
+        $choice = Read-Host
+        
+        if ($choice -match '^[Qq]') { return }
+        
+        if ($choice -match '^\d+$') {
+            $index = [int]$choice - 1
+            if ($index -ge 0 -and $index -lt $files.Count) {
+                $content = Show-FileContent -FilePath $files[$index].FullName
+                Show-PagedContent -Content $content -Title "NETWORK: $($files[$index].Name)"
+            }
+        }
+    }
+}
+
+# Show process data
+function Show-ProcessData {
+    param([string]$IncidentPath)
+    
+    $processPath = Join-Path $IncidentPath "Processes"
+    $files = @()
+    
+    # Check both Processes folder and ALERTS for process files
+    if (Test-Path $processPath) {
+        $files += Get-ChildItem $processPath -File
+    }
+    
+    $alertsPath = Join-Path $IncidentPath "ALERTS"
+    if (Test-Path $alertsPath) {
+        $files += Get-ChildItem $alertsPath -Filter "*process*" -File
+        $files += Get-ChildItem $alertsPath -Filter "*pid*" -File
+    }
+    
+    if ($files.Count -eq 0) {
+        Write-Host "No process data found" -ForegroundColor $colors.Info
+        Read-Host "Press Enter to continue"
+        return
+    }
+    
+    while ($true) {
+        Show-Header "PROCESS DATA"
+        
+        Write-Host "Process Files:" -ForegroundColor $colors.Header
+        for ($i = 0; $i -lt $files.Count; $i++) {
+            $color = if ($files[$i].DirectoryName -match "ALERTS") { $colors.High } else { $colors.Menu }
+            Write-Host ("{0,3}. {1}" -f ($i + 1), $files[$i].Name) -ForegroundColor $color
+        }
+        
+        Write-Host ""
+        Write-Host "Enter file number to view or Q to go back: " -NoNewline
+        $choice = Read-Host
+        
+        if ($choice -match '^[Qq]') { return }
+        
+        if ($choice -match '^\d+$') {
+            $index = [int]$choice - 1
+            if ($index -ge 0 -and $index -lt $files.Count) {
+                $content = Show-FileContent -FilePath $files[$index].FullName
+                Show-PagedContent -Content $content -Title "PROCESS: $($files[$index].Name)"
+            }
+        }
+    }
+}
+
+# Show persistence data
+function Show-PersistenceData {
+    param([string]$IncidentPath)
+    
+    $persistPath = Join-Path $IncidentPath "Persistence"
+    $files = @()
+    
+    if (Test-Path $persistPath) {
+        $files += Get-ChildItem $persistPath -File
+    }
+    
+    # Also check ALERTS for persistence files
+    $alertsPath = Join-Path $IncidentPath "ALERTS"
+    if (Test-Path $alertsPath) {
+        $files += Get-ChildItem $alertsPath -Filter "*autorun*" -File
+        $files += Get-ChildItem $alertsPath -Filter "*service*" -File
+        $files += Get-ChildItem $alertsPath -Filter "*task*" -File
+    }
+    
+    if ($files.Count -eq 0) {
+        Write-Host "No persistence data found" -ForegroundColor $colors.Info
+        Read-Host "Press Enter to continue"
+        return
+    }
+    
+    while ($true) {
+        Show-Header "PERSISTENCE DATA"
+        
+        Write-Host "Persistence Files:" -ForegroundColor $colors.Header
+        for ($i = 0; $i -lt $files.Count; $i++) {
+            $color = if ($files[$i].DirectoryName -match "ALERTS") { $colors.High } else { $colors.Menu }
+            Write-Host ("{0,3}. {1}" -f ($i + 1), $files[$i].Name) -ForegroundColor $color
+        }
+        
+        Write-Host ""
+        Write-Host "Enter file number to view or Q to go back: " -NoNewline
+        $choice = Read-Host
+        
+        if ($choice -match '^[Qq]') { return }
+        
+        if ($choice -match '^\d+$') {
+            $index = [int]$choice - 1
+            if ($index -ge 0 -and $index -lt $files.Count) {
+                $content = Show-FileContent -FilePath $files[$index].FullName
+                Show-PagedContent -Content $content -Title "PERSISTENCE: $($files[$index].Name)"
+            }
+        }
+    }
+}
+
+# Show system info
+function Show-SystemInfo {
+    param([string]$IncidentPath)
+    
+    $systemPath = Join-Path $IncidentPath "System"
+    if (!(Test-Path $systemPath)) {
+        Write-Host "No system data found" -ForegroundColor $colors.Info
+        Read-Host "Press Enter to continue"
+        return
+    }
+    
+    while ($true) {
+        Show-Header "SYSTEM INFORMATION"
+        
+        $files = Get-ChildItem $systemPath -File | Sort-Object Name
+        
+        Write-Host "System Files:" -ForegroundColor $colors.Header
+        for ($i = 0; $i -lt $files.Count; $i++) {
+            Write-Host ("{0,3}. {1}" -f ($i + 1), $files[$i].Name) -ForegroundColor $colors.Menu
+        }
+        
+        Write-Host ""
+        Write-Host "Enter file number to view or Q to go back: " -NoNewline
+        $choice = Read-Host
+        
+        if ($choice -match '^[Qq]') { return }
+        
+        if ($choice -match '^\d+$') {
+            $index = [int]$choice - 1
+            if ($index -ge 0 -and $index -lt $files.Count) {
+                $content = Show-FileContent -FilePath $files[$index].FullName
+                Show-PagedContent -Content $content -Title "SYSTEM: $($files[$index].Name)"
+            }
+        }
+    }
+}
+
+# Show event logs
+function Show-EventLogs {
+    param([string]$IncidentPath)
+    
+    $logsPath = Join-Path $IncidentPath "Logs"
+    if (!(Test-Path $logsPath)) {
+        Write-Host "No event logs found" -ForegroundColor $colors.Info
+        Read-Host "Press Enter to continue"
+        return
+    }
+    
+    while ($true) {
+        Show-Header "EVENT LOGS"
+        
+        $files = Get-ChildItem $logsPath -File | Sort-Object Name
+        
+        Write-Host "Event Log Files:" -ForegroundColor $colors.Header
+        Write-Host "(Note: .evtx files can only be parsed on Windows systems)" -ForegroundColor $colors.Data
+        Write-Host ""
+        
+        for ($i = 0; $i -lt $files.Count; $i++) {
+            $color = if ($files[$i].Extension -eq ".evtx") { $colors.High } else { $colors.Menu }
+            Write-Host ("{0,3}. {1} ({2:N2} MB)" -f ($i + 1), $files[$i].Name, ($files[$i].Length/1MB)) -ForegroundColor $color
+        }
+        
+        Write-Host ""
+        Write-Host "Enter file number to view or Q to go back: " -NoNewline
+        $choice = Read-Host
+        
+        if ($choice -match '^[Qq]') { return }
+        
+        if ($choice -match '^\d+$') {
+            $index = [int]$choice - 1
+            if ($index -ge 0 -and $index -lt $files.Count) {
+                $content = Show-FileContent -FilePath $files[$index].FullName
+                Show-PagedContent -Content $content -Title "LOG: $($files[$index].Name)"
+            }
+        }
+    }
+}
+
+# Browse all files
+function Browse-Files {
+    param([string]$IncidentPath)
+    
+    Show-Header "FILE BROWSER"
+    
+    Write-Host "Building file list..." -ForegroundColor $colors.Info
+    $allFiles = Get-ChildItem $IncidentPath -Recurse -File | Sort-Object DirectoryName, Name
+    
+    $fileList = @()
+    $currentDir = ""
+    
+    foreach ($file in $allFiles) {
+        $relPath = $file.DirectoryName.Replace($IncidentPath, "").TrimStart("\")
+        
+        if ($relPath -ne $currentDir) {
+            $fileList += ""
+            $fileList += "[$relPath]"
+            $currentDir = $relPath
+        }
+        
+        $fileList += "  $($file.Name) ($([Math]::Round($file.Length/1KB, 2)) KB)"
+    }
+    
+    Show-PagedContent -Content $fileList -Title "ALL FILES ($($allFiles.Count) total)"
+}
+
+# Export all data to text
+function Export-AllData {
+    param([string]$IncidentPath)
+    
+    Show-Header "EXPORT ALL DATA"
+    
+    Write-Host "This will export all data to a single text file." -ForegroundColor $colors.Info
+    $confirm = Read-Host "Continue? (Y/N)"
+    
+    if ($confirm -ne 'Y' -and $confirm -ne 'y') { return }
+    
+    $exportFile = Join-Path $IncidentPath "Export_$(Get-Date -Format 'yyyyMMdd_HHmmss').txt"
+    $output = @()
+    
+    # Header
+    $output += "="*80
+    $output += "INCIDENT RESPONSE DATA EXPORT"
+    $output += "="*80
+    $output += "Generated: $(Get-Date)"
+    $output += "Incident: $(Split-Path $IncidentPath -Leaf)"
+    $output += "Path: $IncidentPath"
+    $output += "="*80
+    $output += ""
+    
+    Write-Host "Exporting data..." -ForegroundColor $colors.Info
+    
+    # Process each directory
+    $directories = @(
+        @{Name="SUMMARY"; Path="SUMMARY.txt"; Type="File"},
+        @{Name="ALERTS"; Path="ALERTS"; Type="Directory"},
+        @{Name="NETWORK"; Path="Network"; Type="Directory"},
+        @{Name="PROCESSES"; Path="Processes"; Type="Directory"},
+        @{Name="PERSISTENCE"; Path="Persistence"; Type="Directory"},
+        @{Name="SYSTEM"; Path="System"; Type="Directory"},
+        @{Name="LOGS"; Path="Logs"; Type="Directory"}
+    )
+    
+    foreach ($dir in $directories) {
+        Write-Host "  Exporting $($dir.Name)..." -ForegroundColor $colors.Data
+        
+        $fullPath = Join-Path $IncidentPath $dir.Path
+        
+        if (Test-Path $fullPath) {
+            $output += ""
+            $output += "="*80
+            $output += $dir.Name
+            $output += "="*80
+            
+            if ($dir.Type -eq "File") {
+                $output += Get-Content $fullPath
+            }
+            else {
+                $files = Get-ChildItem $fullPath -File | Sort-Object Name
+                foreach ($file in $files) {
+                    $output += ""
+                    $output += "-"*60
+                    $output += "FILE: $($file.Name)"
+                    $output += "-"*60
+                    
+                    $content = Show-FileContent -FilePath $file.FullName
+                    $output += $content
+                }
+            }
+        }
+    }
+    
+    # Save export
+    $output | Out-File $exportFile -Encoding UTF8
+    
+    Write-Host ""
+    Write-Host "Export complete!" -ForegroundColor $colors.Low
+    Write-Host "File saved to: $exportFile" -ForegroundColor $colors.Info
+    Write-Host "Size: $([Math]::Round((Get-Item $exportFile).Length/1MB, 2)) MB" -ForegroundColor $colors.Data
+    Write-Host ""
+    
+    $open = Read-Host "Open file now? (Y/N)"
+    if ($open -eq 'Y' -or $open -eq 'y') {
+        notepad.exe $exportFile
+    }
+    
+    Read-Host "Press Enter to continue"
+}
+
+# Main execution
+Show-Header
+
+Write-Host "This viewer displays data collected by the Incident Response Triage Script" -ForegroundColor $colors.Info
+Write-Host "No live data collection will be performed" -ForegroundColor $colors.Info
+Write-Host ""
+
+# Main loop
+while ($true) {
+    $incidentPath = $Path
+    
+    if (!$incidentPath -or !(Test-Path $incidentPath)) {
+        $incidentPath = Select-IncidentDirectory
+    }
+    
+    if (!$incidentPath) {
+        Write-Host "Exiting..." -ForegroundColor $colors.Info
+        break
+    }
+    
+    Show-IncidentMenu -IncidentPath $incidentPath
+    
+    # Reset path to show selection menu again
+    $Path = ""
+}
+
+Write-Host ""
+Write-Host "Thank you for using IR Data Viewer" -ForegroundColor $colors.Info) {
+                        $events | Where-Object { $_.Id -eq [int]$eventId }
+                    } else { $events }
+                }
+                "3" {
+                    $hours = Read-Host "Events from last X hours"
+                    if ($hours -match '^\d+
+
+# Display file content based on type
+function Show-FileContent {
+    param([string]$FilePath)
+    
+    if (!(Test-Path $FilePath)) {
+        return @("File not found: $FilePath")
+    }
+    
+    $extension = [System.IO.Path]::GetExtension($FilePath).ToLower()
+    
+    switch ($extension) {
+        ".csv" { return Show-CsvFile -FilePath $FilePath }
+        ".json" { return Show-JsonFile -FilePath $FilePath }
+        ".evtx" { return Show-EventLog -FilePath $FilePath }
+        ".txt" { return Get-Content $FilePath }
+        ".log" { return Get-Content $FilePath }
+        default { return @("Cannot display file type: $extension") }
+    }
+}
+
+# Paged display
+function Show-PagedContent {
+    param(
+        [array]$Content,
+        [string]$Title
+    )
+    
+    if ($Content.Count -eq 0) {
+        Write-Host "No content to display" -ForegroundColor $colors.Info
+        Read-Host "Press Enter to continue"
+        return
+    }
+    
+    $totalPages = [Math]::Ceiling($Content.Count / $PageSize)
+    $currentPage = 0
+    
+    while ($true) {
+        Show-Header $Title
+        
+        $startIdx = $currentPage * $PageSize
+        $endIdx = [Math]::Min($startIdx + $PageSize, $Content.Count)
+        
+        # Display page content
+        for ($i = $startIdx; $i -lt $endIdx; $i++) {
+            $line = $Content[$i]
+            
+            # Color coding based on content
+            if ($line -match "CRITICAL|ERROR|FAIL") {
+                Write-Host $line -ForegroundColor $colors.Critical
+            }
+            elseif ($line -match "WARNING|ALERT|SUSPICIOUS") {
+                Write-Host $line -ForegroundColor $colors.High
+            }
+            elseif ($line -match "SUCCESS|PASS") {
+                Write-Host $line -ForegroundColor $colors.Low
+            }
+            else {
+                Write-Host $line -ForegroundColor $colors.Data
+            }
+        }
+        
+        # Navigation
+        Write-Host ""
+        Write-Host ("-" * 80) -ForegroundColor $colors.Menu
+        Write-Host "Page $($currentPage + 1) of $totalPages | Showing items $($startIdx + 1)-$endIdx of $($Content.Count)" -ForegroundColor $colors.Info
+        Write-Host "[N]ext [P]revious [F]irst [L]ast [Q]uit: " -NoNewline -ForegroundColor $colors.Menu
+        
+        $key = Read-Host
+        
+        switch ($key.ToUpper()) {
+            "N" { if ($currentPage -lt $totalPages - 1) { $currentPage++ } }
+            "P" { if ($currentPage -gt 0) { $currentPage-- } }
+            "F" { $currentPage = 0 }
+            "L" { $currentPage = $totalPages - 1 }
+            "Q" { return }
+        }
+    }
+}
+
+# Main menu for incident data
+function Show-IncidentMenu {
+    param([string]$IncidentPath)
+    
+    while ($true) {
+        Show-Header "INCIDENT DATA BROWSER"
+        
+        # Display incident info
+        $incidentName = Split-Path $IncidentPath -Leaf
+        Write-Host "Incident: $incidentName" -ForegroundColor $colors.Info
+        Write-Host "Path: $IncidentPath" -ForegroundColor $colors.Data
+        
+        # Get summary info if available
+        $summaryPath = Join-Path $IncidentPath "SUMMARY.txt"
+        if (Test-Path $summaryPath) {
+            $summaryLines = Get-Content $summaryPath | Select-String "THREAT LEVEL:|TOTAL ALERTS:"
+            foreach ($line in $summaryLines) {
+                if ($line -match "THREAT LEVEL:") {
+                    $level = $line.Line.Split(":")[1].Trim()
+                    $color = switch ($level) {
+                        "CRITICAL" { $colors.Critical }
+                        "HIGH" { $colors.High }
+                        "MEDIUM" { $colors.Medium }
+                        "LOW" { $colors.Low }
+                        default { $colors.Data }
+                    }
+                    Write-Host $line.Line -ForegroundColor $color
+                }
+                else {
+                    Write-Host $line.Line -ForegroundColor $colors.Info
+                }
+            }
+        }
+        
+        Write-Host ""
+        Write-Host "MAIN MENU" -ForegroundColor $colors.Header
+        Write-Host "1. View Summary" -ForegroundColor $colors.Menu
+        Write-Host "2. View Alerts" -ForegroundColor $colors.Menu
+        Write-Host "3. Network Data" -ForegroundColor $colors.Menu
+        Write-Host "4. Process Data" -ForegroundColor $colors.Menu
+        Write-Host "5. Persistence Data" -ForegroundColor $colors.Menu
+        Write-Host "6. System Information" -ForegroundColor $colors.Menu
+        Write-Host "7. Event Logs" -ForegroundColor $colors.Menu
+        Write-Host "8. Browse All Files" -ForegroundColor $colors.Menu
+        Write-Host "9. Export All to Text" -ForegroundColor $colors.Menu
+        Write-Host "Q. Back to Directory Selection" -ForegroundColor $colors.Menu
+        Write-Host ""
+        
+        $choice = Read-Host "Select option"
+        
+        switch ($choice) {
+            "1" { Show-Summary -IncidentPath $IncidentPath }
+            "2" { Show-Alerts -IncidentPath $IncidentPath }
+            "3" { Show-NetworkData -IncidentPath $IncidentPath }
+            "4" { Show-ProcessData -IncidentPath $IncidentPath }
+            "5" { Show-PersistenceData -IncidentPath $IncidentPath }
+            "6" { Show-SystemInfo -IncidentPath $IncidentPath }
+            "7" { Show-EventLogs -IncidentPath $IncidentPath }
+            "8" { Browse-Files -IncidentPath $IncidentPath }
+            "9" { Export-AllData -IncidentPath $IncidentPath }
+            "Q" { return }
+            "q" { return }
+        }
+    }
+}
+
+# Show summary
+function Show-Summary {
+    param([string]$IncidentPath)
+    
+    $summaryFile = Join-Path $IncidentPath "SUMMARY.txt"
+    if (Test-Path $summaryFile) {
+        $content = Get-Content $summaryFile
+        Show-PagedContent -Content $content -Title "INCIDENT SUMMARY"
+    }
+    else {
+        Write-Host "Summary file not found" -ForegroundColor $colors.Critical
+        Read-Host "Press Enter to continue"
+    }
+}
+
+# Show alerts
+function Show-Alerts {
+    param([string]$IncidentPath)
+    
+    $alertsPath = Join-Path $IncidentPath "ALERTS"
+    if (!(Test-Path $alertsPath)) {
+        Write-Host "No alerts directory found" -ForegroundColor $colors.Info
+        Read-Host "Press Enter to continue"
+        return
+    }
+    
+    while ($true) {
+        Show-Header "ALERTS"
+        
+        $files = Get-ChildItem $alertsPath -File | Sort-Object Name
+        if ($files.Count -eq 0) {
+            Write-Host "No alert files found" -ForegroundColor $colors.Info
+            Read-Host "Press Enter to continue"
+            return
+        }
+        
+        Write-Host "Alert Files:" -ForegroundColor $colors.Header
+        for ($i = 0; $i -lt $files.Count; $i++) {
+            Write-Host ("{0,3}. {1}" -f ($i + 1), $files[$i].Name) -ForegroundColor $colors.High
+        }
+        
+        Write-Host ""
+        Write-Host "Enter file number to view or Q to go back: " -NoNewline
+        $choice = Read-Host
+        
+        if ($choice -match '^[Qq]') { return }
+        
+        if ($choice -match '^\d+$') {
+            $index = [int]$choice - 1
+            if ($index -ge 0 -and $index -lt $files.Count) {
+                $content = Show-FileContent -FilePath $files[$index].FullName
+                Show-PagedContent -Content $content -Title "ALERT: $($files[$index].Name)"
+            }
+        }
+    }
+}
+
+# Show network data
+function Show-NetworkData {
+    param([string]$IncidentPath)
+    
+    $networkPath = Join-Path $IncidentPath "Network"
+    if (!(Test-Path $networkPath)) {
+        Write-Host "No network data found" -ForegroundColor $colors.Info
+        Read-Host "Press Enter to continue"
+        return
+    }
+    
+    while ($true) {
+        Show-Header "NETWORK DATA"
+        
+        $files = Get-ChildItem $networkPath -File | Sort-Object Name
+        
+        Write-Host "Network Files:" -ForegroundColor $colors.Header
+        for ($i = 0; $i -lt $files.Count; $i++) {
+            Write-Host ("{0,3}. {1}" -f ($i + 1), $files[$i].Name) -ForegroundColor $colors.Menu
+        }
+        
+        Write-Host ""
+        Write-Host "Enter file number to view or Q to go back: " -NoNewline
+        $choice = Read-Host
+        
+        if ($choice -match '^[Qq]') { return }
+        
+        if ($choice -match '^\d+$') {
+            $index = [int]$choice - 1
+            if ($index -ge 0 -and $index -lt $files.Count) {
+                $content = Show-FileContent -FilePath $files[$index].FullName
+                Show-PagedContent -Content $content -Title "NETWORK: $($files[$index].Name)"
+            }
+        }
+    }
+}
+
+# Show process data
+function Show-ProcessData {
+    param([string]$IncidentPath)
+    
+    $processPath = Join-Path $IncidentPath "Processes"
+    $files = @()
+    
+    # Check both Processes folder and ALERTS for process files
+    if (Test-Path $processPath) {
+        $files += Get-ChildItem $processPath -File
+    }
+    
+    $alertsPath = Join-Path $IncidentPath "ALERTS"
+    if (Test-Path $alertsPath) {
+        $files += Get-ChildItem $alertsPath -Filter "*process*" -File
+        $files += Get-ChildItem $alertsPath -Filter "*pid*" -File
+    }
+    
+    if ($files.Count -eq 0) {
+        Write-Host "No process data found" -ForegroundColor $colors.Info
+        Read-Host "Press Enter to continue"
+        return
+    }
+    
+    while ($true) {
+        Show-Header "PROCESS DATA"
+        
+        Write-Host "Process Files:" -ForegroundColor $colors.Header
+        for ($i = 0; $i -lt $files.Count; $i++) {
+            $color = if ($files[$i].DirectoryName -match "ALERTS") { $colors.High } else { $colors.Menu }
+            Write-Host ("{0,3}. {1}" -f ($i + 1), $files[$i].Name) -ForegroundColor $color
+        }
+        
+        Write-Host ""
+        Write-Host "Enter file number to view or Q to go back: " -NoNewline
+        $choice = Read-Host
+        
+        if ($choice -match '^[Qq]') { return }
+        
+        if ($choice -match '^\d+$') {
+            $index = [int]$choice - 1
+            if ($index -ge 0 -and $index -lt $files.Count) {
+                $content = Show-FileContent -FilePath $files[$index].FullName
+                Show-PagedContent -Content $content -Title "PROCESS: $($files[$index].Name)"
+            }
+        }
+    }
+}
+
+# Show persistence data
+function Show-PersistenceData {
+    param([string]$IncidentPath)
+    
+    $persistPath = Join-Path $IncidentPath "Persistence"
+    $files = @()
+    
+    if (Test-Path $persistPath) {
+        $files += Get-ChildItem $persistPath -File
+    }
+    
+    # Also check ALERTS for persistence files
+    $alertsPath = Join-Path $IncidentPath "ALERTS"
+    if (Test-Path $alertsPath) {
+        $files += Get-ChildItem $alertsPath -Filter "*autorun*" -File
+        $files += Get-ChildItem $alertsPath -Filter "*service*" -File
+        $files += Get-ChildItem $alertsPath -Filter "*task*" -File
+    }
+    
+    if ($files.Count -eq 0) {
+        Write-Host "No persistence data found" -ForegroundColor $colors.Info
+        Read-Host "Press Enter to continue"
+        return
+    }
+    
+    while ($true) {
+        Show-Header "PERSISTENCE DATA"
+        
+        Write-Host "Persistence Files:" -ForegroundColor $colors.Header
+        for ($i = 0; $i -lt $files.Count; $i++) {
+            $color = if ($files[$i].DirectoryName -match "ALERTS") { $colors.High } else { $colors.Menu }
+            Write-Host ("{0,3}. {1}" -f ($i + 1), $files[$i].Name) -ForegroundColor $color
+        }
+        
+        Write-Host ""
+        Write-Host "Enter file number to view or Q to go back: " -NoNewline
+        $choice = Read-Host
+        
+        if ($choice -match '^[Qq]') { return }
+        
+        if ($choice -match '^\d+$') {
+            $index = [int]$choice - 1
+            if ($index -ge 0 -and $index -lt $files.Count) {
+                $content = Show-FileContent -FilePath $files[$index].FullName
+                Show-PagedContent -Content $content -Title "PERSISTENCE: $($files[$index].Name)"
+            }
+        }
+    }
+}
+
+# Show system info
+function Show-SystemInfo {
+    param([string]$IncidentPath)
+    
+    $systemPath = Join-Path $IncidentPath "System"
+    if (!(Test-Path $systemPath)) {
+        Write-Host "No system data found" -ForegroundColor $colors.Info
+        Read-Host "Press Enter to continue"
+        return
+    }
+    
+    while ($true) {
+        Show-Header "SYSTEM INFORMATION"
+        
+        $files = Get-ChildItem $systemPath -File | Sort-Object Name
+        
+        Write-Host "System Files:" -ForegroundColor $colors.Header
+        for ($i = 0; $i -lt $files.Count; $i++) {
+            Write-Host ("{0,3}. {1}" -f ($i + 1), $files[$i].Name) -ForegroundColor $colors.Menu
+        }
+        
+        Write-Host ""
+        Write-Host "Enter file number to view or Q to go back: " -NoNewline
+        $choice = Read-Host
+        
+        if ($choice -match '^[Qq]') { return }
+        
+        if ($choice -match '^\d+$') {
+            $index = [int]$choice - 1
+            if ($index -ge 0 -and $index -lt $files.Count) {
+                $content = Show-FileContent -FilePath $files[$index].FullName
+                Show-PagedContent -Content $content -Title "SYSTEM: $($files[$index].Name)"
+            }
+        }
+    }
+}
+
+# Show event logs
+function Show-EventLogs {
+    param([string]$IncidentPath)
+    
+    $logsPath = Join-Path $IncidentPath "Logs"
+    if (!(Test-Path $logsPath)) {
+        Write-Host "No event logs found" -ForegroundColor $colors.Info
+        Read-Host "Press Enter to continue"
+        return
+    }
+    
+    while ($true) {
+        Show-Header "EVENT LOGS"
+        
+        $files = Get-ChildItem $logsPath -File | Sort-Object Name
+        
+        Write-Host "Event Log Files:" -ForegroundColor $colors.Header
+        Write-Host "(Note: .evtx files can only be parsed on Windows systems)" -ForegroundColor $colors.Data
+        Write-Host ""
+        
+        for ($i = 0; $i -lt $files.Count; $i++) {
+            $color = if ($files[$i].Extension -eq ".evtx") { $colors.High } else { $colors.Menu }
+            Write-Host ("{0,3}. {1} ({2:N2} MB)" -f ($i + 1), $files[$i].Name, ($files[$i].Length/1MB)) -ForegroundColor $color
+        }
+        
+        Write-Host ""
+        Write-Host "Enter file number to view or Q to go back: " -NoNewline
+        $choice = Read-Host
+        
+        if ($choice -match '^[Qq]') { return }
+        
+        if ($choice -match '^\d+$') {
+            $index = [int]$choice - 1
+            if ($index -ge 0 -and $index -lt $files.Count) {
+                $content = Show-FileContent -FilePath $files[$index].FullName
+                Show-PagedContent -Content $content -Title "LOG: $($files[$index].Name)"
+            }
+        }
+    }
+}
+
+# Browse all files
+function Browse-Files {
+    param([string]$IncidentPath)
+    
+    Show-Header "FILE BROWSER"
+    
+    Write-Host "Building file list..." -ForegroundColor $colors.Info
+    $allFiles = Get-ChildItem $IncidentPath -Recurse -File | Sort-Object DirectoryName, Name
+    
+    $fileList = @()
+    $currentDir = ""
+    
+    foreach ($file in $allFiles) {
+        $relPath = $file.DirectoryName.Replace($IncidentPath, "").TrimStart("\")
+        
+        if ($relPath -ne $currentDir) {
+            $fileList += ""
+            $fileList += "[$relPath]"
+            $currentDir = $relPath
+        }
+        
+        $fileList += "  $($file.Name) ($([Math]::Round($file.Length/1KB, 2)) KB)"
+    }
+    
+    Show-PagedContent -Content $fileList -Title "ALL FILES ($($allFiles.Count) total)"
+}
+
+# Export all data to text
+function Export-AllData {
+    param([string]$IncidentPath)
+    
+    Show-Header "EXPORT ALL DATA"
+    
+    Write-Host "This will export all data to a single text file." -ForegroundColor $colors.Info
+    $confirm = Read-Host "Continue? (Y/N)"
+    
+    if ($confirm -ne 'Y' -and $confirm -ne 'y') { return }
+    
+    $exportFile = Join-Path $IncidentPath "Export_$(Get-Date -Format 'yyyyMMdd_HHmmss').txt"
+    $output = @()
+    
+    # Header
+    $output += "="*80
+    $output += "INCIDENT RESPONSE DATA EXPORT"
+    $output += "="*80
+    $output += "Generated: $(Get-Date)"
+    $output += "Incident: $(Split-Path $IncidentPath -Leaf)"
+    $output += "Path: $IncidentPath"
+    $output += "="*80
+    $output += ""
+    
+    Write-Host "Exporting data..." -ForegroundColor $colors.Info
+    
+    # Process each directory
+    $directories = @(
+        @{Name="SUMMARY"; Path="SUMMARY.txt"; Type="File"},
+        @{Name="ALERTS"; Path="ALERTS"; Type="Directory"},
+        @{Name="NETWORK"; Path="Network"; Type="Directory"},
+        @{Name="PROCESSES"; Path="Processes"; Type="Directory"},
+        @{Name="PERSISTENCE"; Path="Persistence"; Type="Directory"},
+        @{Name="SYSTEM"; Path="System"; Type="Directory"},
+        @{Name="LOGS"; Path="Logs"; Type="Directory"}
+    )
+    
+    foreach ($dir in $directories) {
+        Write-Host "  Exporting $($dir.Name)..." -ForegroundColor $colors.Data
+        
+        $fullPath = Join-Path $IncidentPath $dir.Path
+        
+        if (Test-Path $fullPath) {
+            $output += ""
+            $output += "="*80
+            $output += $dir.Name
+            $output += "="*80
+            
+            if ($dir.Type -eq "File") {
+                $output += Get-Content $fullPath
+            }
+            else {
+                $files = Get-ChildItem $fullPath -File | Sort-Object Name
+                foreach ($file in $files) {
+                    $output += ""
+                    $output += "-"*60
+                    $output += "FILE: $($file.Name)"
+                    $output += "-"*60
+                    
+                    $content = Show-FileContent -FilePath $file.FullName
+                    $output += $content
+                }
+            }
+        }
+    }
+    
+    # Save export
+    $output | Out-File $exportFile -Encoding UTF8
+    
+    Write-Host ""
+    Write-Host "Export complete!" -ForegroundColor $colors.Low
+    Write-Host "File saved to: $exportFile" -ForegroundColor $colors.Info
+    Write-Host "Size: $([Math]::Round((Get-Item $exportFile).Length/1MB, 2)) MB" -ForegroundColor $colors.Data
+    Write-Host ""
+    
+    $open = Read-Host "Open file now? (Y/N)"
+    if ($open -eq 'Y' -or $open -eq 'y') {
+        notepad.exe $exportFile
+    }
+    
+    Read-Host "Press Enter to continue"
+}
+
+# Main execution
+Show-Header
+
+Write-Host "This viewer displays data collected by the Incident Response Triage Script" -ForegroundColor $colors.Info
+Write-Host "No live data collection will be performed" -ForegroundColor $colors.Info
+Write-Host ""
+
+# Main loop
+while ($true) {
+    $incidentPath = $Path
+    
+    if (!$incidentPath -or !(Test-Path $incidentPath)) {
+        $incidentPath = Select-IncidentDirectory
+    }
+    
+    if (!$incidentPath) {
+        Write-Host "Exiting..." -ForegroundColor $colors.Info
+        break
+    }
+    
+    Show-IncidentMenu -IncidentPath $incidentPath
+    
+    # Reset path to show selection menu again
+    $Path = ""
+}
+
+Write-Host ""
+Write-Host "Thank you for using IR Data Viewer" -ForegroundColor $colors.Info) {
+                        $cutoff = (Get-Date).AddHours(-[int]$hours)
+                        $events | Where-Object { $_.TimeCreated -gt $cutoff }
+                    } else { $events }
+                }
+                default { $events }
+            }
+            
+            $output += "Filtered Events: $($events.Count)"
+            $output += ""
+        }
+        
+        # Format events
+        $eventNum = 1
+        foreach ($event in $events) {
+            $output += "===== Event #$eventNum ====="
+            $output += "Time: $($event.TimeCreated)"
+            $output += "Level: $($event.LevelDisplayName) | ID: $($event.Id)"
+            $output += "Source: $($event.ProviderName)"
+            $output += "Computer: $($event.MachineName)"
+            
+            if ($event.UserId) {
+                $output += "User: $($event.UserId)"
+            }
+            
+            if ($event.Message) {
+                # Option to show full or truncated messages
+                $output += "Message:"
+                $output += $event.Message -split "`n" | ForEach-Object { "  $_" }
+            }
+            
+            $output += ""
+            $eventNum++
+        }
+        
+        return $output
+    }
+    catch {
+        $output = @()
+        $output += "Unable to parse event log on this system."
+        $output += "Event logs can only be viewed on Windows systems with appropriate permissions."
+        $output += ""
+        $output += "Error: $_"
+        $output += ""
+        $output += "Raw file location: $FilePath"
+        $output += "File size: $([Math]::Round((Get-Item $FilePath).Length/1MB, 2)) MB"
+        
+        return $output
+    }
+}
+
+# Display file content based on type
+function Show-FileContent {
+    param([string]$FilePath)
+    
+    if (!(Test-Path $FilePath)) {
+        return @("File not found: $FilePath")
+    }
+    
+    $extension = [System.IO.Path]::GetExtension($FilePath).ToLower()
+    
+    switch ($extension) {
+        ".csv" { return Show-CsvFile -FilePath $FilePath }
+        ".json" { return Show-JsonFile -FilePath $FilePath }
+        ".evtx" { return Show-EventLog -FilePath $FilePath }
+        ".txt" { return Get-Content $FilePath }
+        ".log" { return Get-Content $FilePath }
+        default { return @("Cannot display file type: $extension") }
+    }
+}
+
+# Paged display
+function Show-PagedContent {
+    param(
+        [array]$Content,
+        [string]$Title
+    )
+    
+    if ($Content.Count -eq 0) {
+        Write-Host "No content to display" -ForegroundColor $colors.Info
+        Read-Host "Press Enter to continue"
+        return
+    }
+    
+    $totalPages = [Math]::Ceiling($Content.Count / $PageSize)
+    $currentPage = 0
+    
+    while ($true) {
+        Show-Header $Title
+        
+        $startIdx = $currentPage * $PageSize
+        $endIdx = [Math]::Min($startIdx + $PageSize, $Content.Count)
+        
+        # Display page content
+        for ($i = $startIdx; $i -lt $endIdx; $i++) {
+            $line = $Content[$i]
+            
+            # Color coding based on content
+            if ($line -match "CRITICAL|ERROR|FAIL") {
+                Write-Host $line -ForegroundColor $colors.Critical
+            }
+            elseif ($line -match "WARNING|ALERT|SUSPICIOUS") {
+                Write-Host $line -ForegroundColor $colors.High
+            }
+            elseif ($line -match "SUCCESS|PASS") {
+                Write-Host $line -ForegroundColor $colors.Low
+            }
+            else {
+                Write-Host $line -ForegroundColor $colors.Data
+            }
+        }
+        
+        # Navigation
+        Write-Host ""
+        Write-Host ("-" * 80) -ForegroundColor $colors.Menu
+        Write-Host "Page $($currentPage + 1) of $totalPages | Showing items $($startIdx + 1)-$endIdx of $($Content.Count)" -ForegroundColor $colors.Info
+        Write-Host "[N]ext [P]revious [F]irst [L]ast [Q]uit: " -NoNewline -ForegroundColor $colors.Menu
+        
+        $key = Read-Host
+        
+        switch ($key.ToUpper()) {
+            "N" { if ($currentPage -lt $totalPages - 1) { $currentPage++ } }
+            "P" { if ($currentPage -gt 0) { $currentPage-- } }
+            "F" { $currentPage = 0 }
+            "L" { $currentPage = $totalPages - 1 }
+            "Q" { return }
+        }
+    }
+}
+
+# Main menu for incident data
+function Show-IncidentMenu {
+    param([string]$IncidentPath)
+    
+    while ($true) {
+        Show-Header "INCIDENT DATA BROWSER"
+        
+        # Display incident info
+        $incidentName = Split-Path $IncidentPath -Leaf
+        Write-Host "Incident: $incidentName" -ForegroundColor $colors.Info
+        Write-Host "Path: $IncidentPath" -ForegroundColor $colors.Data
+        
+        # Get summary info if available
+        $summaryPath = Join-Path $IncidentPath "SUMMARY.txt"
+        if (Test-Path $summaryPath) {
+            $summaryLines = Get-Content $summaryPath | Select-String "THREAT LEVEL:|TOTAL ALERTS:"
+            foreach ($line in $summaryLines) {
+                if ($line -match "THREAT LEVEL:") {
+                    $level = $line.Line.Split(":")[1].Trim()
+                    $color = switch ($level) {
+                        "CRITICAL" { $colors.Critical }
+                        "HIGH" { $colors.High }
+                        "MEDIUM" { $colors.Medium }
+                        "LOW" { $colors.Low }
+                        default { $colors.Data }
+                    }
+                    Write-Host $line.Line -ForegroundColor $color
+                }
+                else {
+                    Write-Host $line.Line -ForegroundColor $colors.Info
+                }
+            }
+        }
+        
+        Write-Host ""
+        Write-Host "MAIN MENU" -ForegroundColor $colors.Header
+        Write-Host "1. View Summary" -ForegroundColor $colors.Menu
+        Write-Host "2. View Alerts" -ForegroundColor $colors.Menu
+        Write-Host "3. Network Data" -ForegroundColor $colors.Menu
+        Write-Host "4. Process Data" -ForegroundColor $colors.Menu
+        Write-Host "5. Persistence Data" -ForegroundColor $colors.Menu
+        Write-Host "6. System Information" -ForegroundColor $colors.Menu
+        Write-Host "7. Event Logs" -ForegroundColor $colors.Menu
+        Write-Host "8. Browse All Files" -ForegroundColor $colors.Menu
+        Write-Host "9. Export All to Text" -ForegroundColor $colors.Menu
+        Write-Host "Q. Back to Directory Selection" -ForegroundColor $colors.Menu
+        Write-Host ""
+        
+        $choice = Read-Host "Select option"
+        
+        switch ($choice) {
+            "1" { Show-Summary -IncidentPath $IncidentPath }
+            "2" { Show-Alerts -IncidentPath $IncidentPath }
+            "3" { Show-NetworkData -IncidentPath $IncidentPath }
+            "4" { Show-ProcessData -IncidentPath $IncidentPath }
+            "5" { Show-PersistenceData -IncidentPath $IncidentPath }
+            "6" { Show-SystemInfo -IncidentPath $IncidentPath }
+            "7" { Show-EventLogs -IncidentPath $IncidentPath }
+            "8" { Browse-Files -IncidentPath $IncidentPath }
+            "9" { Export-AllData -IncidentPath $IncidentPath }
+            "Q" { return }
+            "q" { return }
+        }
+    }
+}
+
+# Show summary
+function Show-Summary {
+    param([string]$IncidentPath)
+    
+    $summaryFile = Join-Path $IncidentPath "SUMMARY.txt"
+    if (Test-Path $summaryFile) {
+        $content = Get-Content $summaryFile
+        Show-PagedContent -Content $content -Title "INCIDENT SUMMARY"
+    }
+    else {
+        Write-Host "Summary file not found" -ForegroundColor $colors.Critical
+        Read-Host "Press Enter to continue"
+    }
+}
+
+# Show alerts
+function Show-Alerts {
+    param([string]$IncidentPath)
+    
+    $alertsPath = Join-Path $IncidentPath "ALERTS"
+    if (!(Test-Path $alertsPath)) {
+        Write-Host "No alerts directory found" -ForegroundColor $colors.Info
+        Read-Host "Press Enter to continue"
+        return
+    }
+    
+    while ($true) {
+        Show-Header "ALERTS"
+        
+        $files = Get-ChildItem $alertsPath -File | Sort-Object Name
+        if ($files.Count -eq 0) {
+            Write-Host "No alert files found" -ForegroundColor $colors.Info
+            Read-Host "Press Enter to continue"
+            return
+        }
+        
+        Write-Host "Alert Files:" -ForegroundColor $colors.Header
+        for ($i = 0; $i -lt $files.Count; $i++) {
+            Write-Host ("{0,3}. {1}" -f ($i + 1), $files[$i].Name) -ForegroundColor $colors.High
+        }
+        
+        Write-Host ""
+        Write-Host "Enter file number to view or Q to go back: " -NoNewline
+        $choice = Read-Host
+        
+        if ($choice -match '^[Qq]') { return }
+        
+        if ($choice -match '^\d+$') {
+            $index = [int]$choice - 1
+            if ($index -ge 0 -and $index -lt $files.Count) {
+                $content = Show-FileContent -FilePath $files[$index].FullName
+                Show-PagedContent -Content $content -Title "ALERT: $($files[$index].Name)"
+            }
+        }
+    }
+}
+
+# Show network data
+function Show-NetworkData {
+    param([string]$IncidentPath)
+    
+    $networkPath = Join-Path $IncidentPath "Network"
+    if (!(Test-Path $networkPath)) {
+        Write-Host "No network data found" -ForegroundColor $colors.Info
+        Read-Host "Press Enter to continue"
+        return
+    }
+    
+    while ($true) {
+        Show-Header "NETWORK DATA"
+        
+        $files = Get-ChildItem $networkPath -File | Sort-Object Name
+        
+        Write-Host "Network Files:" -ForegroundColor $colors.Header
+        for ($i = 0; $i -lt $files.Count; $i++) {
+            Write-Host ("{0,3}. {1}" -f ($i + 1), $files[$i].Name) -ForegroundColor $colors.Menu
+        }
+        
+        Write-Host ""
+        Write-Host "Enter file number to view or Q to go back: " -NoNewline
+        $choice = Read-Host
+        
+        if ($choice -match '^[Qq]') { return }
+        
+        if ($choice -match '^\d+$') {
+            $index = [int]$choice - 1
+            if ($index -ge 0 -and $index -lt $files.Count) {
+                $content = Show-FileContent -FilePath $files[$index].FullName
+                Show-PagedContent -Content $content -Title "NETWORK: $($files[$index].Name)"
+            }
+        }
+    }
+}
+
+# Show process data
+function Show-ProcessData {
+    param([string]$IncidentPath)
+    
+    $processPath = Join-Path $IncidentPath "Processes"
+    $files = @()
+    
+    # Check both Processes folder and ALERTS for process files
+    if (Test-Path $processPath) {
+        $files += Get-ChildItem $processPath -File
+    }
+    
+    $alertsPath = Join-Path $IncidentPath "ALERTS"
+    if (Test-Path $alertsPath) {
+        $files += Get-ChildItem $alertsPath -Filter "*process*" -File
+        $files += Get-ChildItem $alertsPath -Filter "*pid*" -File
+    }
+    
+    if ($files.Count -eq 0) {
+        Write-Host "No process data found" -ForegroundColor $colors.Info
+        Read-Host "Press Enter to continue"
+        return
+    }
+    
+    while ($true) {
+        Show-Header "PROCESS DATA"
+        
+        Write-Host "Process Files:" -ForegroundColor $colors.Header
+        for ($i = 0; $i -lt $files.Count; $i++) {
+            $color = if ($files[$i].DirectoryName -match "ALERTS") { $colors.High } else { $colors.Menu }
+            Write-Host ("{0,3}. {1}" -f ($i + 1), $files[$i].Name) -ForegroundColor $color
+        }
+        
+        Write-Host ""
+        Write-Host "Enter file number to view or Q to go back: " -NoNewline
+        $choice = Read-Host
+        
+        if ($choice -match '^[Qq]') { return }
+        
+        if ($choice -match '^\d+$') {
+            $index = [int]$choice - 1
+            if ($index -ge 0 -and $index -lt $files.Count) {
+                $content = Show-FileContent -FilePath $files[$index].FullName
+                Show-PagedContent -Content $content -Title "PROCESS: $($files[$index].Name)"
+            }
+        }
+    }
+}
+
+# Show persistence data
+function Show-PersistenceData {
+    param([string]$IncidentPath)
+    
+    $persistPath = Join-Path $IncidentPath "Persistence"
+    $files = @()
+    
+    if (Test-Path $persistPath) {
+        $files += Get-ChildItem $persistPath -File
+    }
+    
+    # Also check ALERTS for persistence files
+    $alertsPath = Join-Path $IncidentPath "ALERTS"
+    if (Test-Path $alertsPath) {
+        $files += Get-ChildItem $alertsPath -Filter "*autorun*" -File
+        $files += Get-ChildItem $alertsPath -Filter "*service*" -File
+        $files += Get-ChildItem $alertsPath -Filter "*task*" -File
+    }
+    
+    if ($files.Count -eq 0) {
+        Write-Host "No persistence data found" -ForegroundColor $colors.Info
+        Read-Host "Press Enter to continue"
+        return
+    }
+    
+    while ($true) {
+        Show-Header "PERSISTENCE DATA"
+        
+        Write-Host "Persistence Files:" -ForegroundColor $colors.Header
+        for ($i = 0; $i -lt $files.Count; $i++) {
+            $color = if ($files[$i].DirectoryName -match "ALERTS") { $colors.High } else { $colors.Menu }
+            Write-Host ("{0,3}. {1}" -f ($i + 1), $files[$i].Name) -ForegroundColor $color
+        }
+        
+        Write-Host ""
+        Write-Host "Enter file number to view or Q to go back: " -NoNewline
+        $choice = Read-Host
+        
+        if ($choice -match '^[Qq]') { return }
+        
+        if ($choice -match '^\d+$') {
+            $index = [int]$choice - 1
+            if ($index -ge 0 -and $index -lt $files.Count) {
+                $content = Show-FileContent -FilePath $files[$index].FullName
+                Show-PagedContent -Content $content -Title "PERSISTENCE: $($files[$index].Name)"
+            }
+        }
+    }
+}
+
+# Show system info
+function Show-SystemInfo {
+    param([string]$IncidentPath)
+    
+    $systemPath = Join-Path $IncidentPath "System"
+    if (!(Test-Path $systemPath)) {
+        Write-Host "No system data found" -ForegroundColor $colors.Info
+        Read-Host "Press Enter to continue"
+        return
+    }
+    
+    while ($true) {
+        Show-Header "SYSTEM INFORMATION"
+        
+        $files = Get-ChildItem $systemPath -File | Sort-Object Name
+        
+        Write-Host "System Files:" -ForegroundColor $colors.Header
+        for ($i = 0; $i -lt $files.Count; $i++) {
+            Write-Host ("{0,3}. {1}" -f ($i + 1), $files[$i].Name) -ForegroundColor $colors.Menu
+        }
+        
+        Write-Host ""
+        Write-Host "Enter file number to view or Q to go back: " -NoNewline
+        $choice = Read-Host
+        
+        if ($choice -match '^[Qq]') { return }
+        
+        if ($choice -match '^\d+$') {
+            $index = [int]$choice - 1
+            if ($index -ge 0 -and $index -lt $files.Count) {
+                $content = Show-FileContent -FilePath $files[$index].FullName
+                Show-PagedContent -Content $content -Title "SYSTEM: $($files[$index].Name)"
+            }
+        }
+    }
+}
+
+# Show event logs
+function Show-EventLogs {
+    param([string]$IncidentPath)
+    
+    $logsPath = Join-Path $IncidentPath "Logs"
+    if (!(Test-Path $logsPath)) {
+        Write-Host "No event logs found" -ForegroundColor $colors.Info
+        Read-Host "Press Enter to continue"
+        return
+    }
+    
+    while ($true) {
+        Show-Header "EVENT LOGS"
+        
+        $files = Get-ChildItem $logsPath -File | Sort-Object Name
+        
+        Write-Host "Event Log Files:" -ForegroundColor $colors.Header
+        Write-Host "(Note: .evtx files can only be parsed on Windows systems)" -ForegroundColor $colors.Data
+        Write-Host ""
+        
+        for ($i = 0; $i -lt $files.Count; $i++) {
+            $color = if ($files[$i].Extension -eq ".evtx") { $colors.High } else { $colors.Menu }
+            Write-Host ("{0,3}. {1} ({2:N2} MB)" -f ($i + 1), $files[$i].Name, ($files[$i].Length/1MB)) -ForegroundColor $color
+        }
+        
+        Write-Host ""
+        Write-Host "Enter file number to view or Q to go back: " -NoNewline
+        $choice = Read-Host
+        
+        if ($choice -match '^[Qq]') { return }
+        
+        if ($choice -match '^\d+$') {
+            $index = [int]$choice - 1
+            if ($index -ge 0 -and $index -lt $files.Count) {
+                $content = Show-FileContent -FilePath $files[$index].FullName
+                Show-PagedContent -Content $content -Title "LOG: $($files[$index].Name)"
+            }
+        }
+    }
+}
+
+# Browse all files
+function Browse-Files {
+    param([string]$IncidentPath)
+    
+    Show-Header "FILE BROWSER"
+    
+    Write-Host "Building file list..." -ForegroundColor $colors.Info
+    $allFiles = Get-ChildItem $IncidentPath -Recurse -File | Sort-Object DirectoryName, Name
+    
+    $fileList = @()
+    $currentDir = ""
+    
+    foreach ($file in $allFiles) {
+        $relPath = $file.DirectoryName.Replace($IncidentPath, "").TrimStart("\")
+        
+        if ($relPath -ne $currentDir) {
+            $fileList += ""
+            $fileList += "[$relPath]"
+            $currentDir = $relPath
+        }
+        
+        $fileList += "  $($file.Name) ($([Math]::Round($file.Length/1KB, 2)) KB)"
+    }
+    
+    Show-PagedContent -Content $fileList -Title "ALL FILES ($($allFiles.Count) total)"
+}
+
+# Export all data to text
+function Export-AllData {
+    param([string]$IncidentPath)
+    
+    Show-Header "EXPORT ALL DATA"
+    
+    Write-Host "This will export all data to a single text file." -ForegroundColor $colors.Info
+    $confirm = Read-Host "Continue? (Y/N)"
+    
+    if ($confirm -ne 'Y' -and $confirm -ne 'y') { return }
+    
+    $exportFile = Join-Path $IncidentPath "Export_$(Get-Date -Format 'yyyyMMdd_HHmmss').txt"
+    $output = @()
+    
+    # Header
+    $output += "="*80
+    $output += "INCIDENT RESPONSE DATA EXPORT"
+    $output += "="*80
+    $output += "Generated: $(Get-Date)"
+    $output += "Incident: $(Split-Path $IncidentPath -Leaf)"
+    $output += "Path: $IncidentPath"
+    $output += "="*80
+    $output += ""
+    
+    Write-Host "Exporting data..." -ForegroundColor $colors.Info
+    
+    # Process each directory
+    $directories = @(
+        @{Name="SUMMARY"; Path="SUMMARY.txt"; Type="File"},
+        @{Name="ALERTS"; Path="ALERTS"; Type="Directory"},
+        @{Name="NETWORK"; Path="Network"; Type="Directory"},
+        @{Name="PROCESSES"; Path="Processes"; Type="Directory"},
+        @{Name="PERSISTENCE"; Path="Persistence"; Type="Directory"},
+        @{Name="SYSTEM"; Path="System"; Type="Directory"},
+        @{Name="LOGS"; Path="Logs"; Type="Directory"}
+    )
+    
+    foreach ($dir in $directories) {
+        Write-Host "  Exporting $($dir.Name)..." -ForegroundColor $colors.Data
+        
+        $fullPath = Join-Path $IncidentPath $dir.Path
+        
+        if (Test-Path $fullPath) {
+            $output += ""
+            $output += "="*80
+            $output += $dir.Name
+            $output += "="*80
+            
+            if ($dir.Type -eq "File") {
+                $output += Get-Content $fullPath
+            }
+            else {
+                $files = Get-ChildItem $fullPath -File | Sort-Object Name
+                foreach ($file in $files) {
+                    $output += ""
+                    $output += "-"*60
+                    $output += "FILE: $($file.Name)"
+                    $output += "-"*60
+                    
+                    $content = Show-FileContent -FilePath $file.FullName
+                    $output += $content
+                }
+            }
+        }
+    }
+    
+    # Save export
+    $output | Out-File $exportFile -Encoding UTF8
+    
+    Write-Host ""
+    Write-Host "Export complete!" -ForegroundColor $colors.Low
+    Write-Host "File saved to: $exportFile" -ForegroundColor $colors.Info
+    Write-Host "Size: $([Math]::Round((Get-Item $exportFile).Length/1MB, 2)) MB" -ForegroundColor $colors.Data
+    Write-Host ""
+    
+    $open = Read-Host "Open file now? (Y/N)"
+    if ($open -eq 'Y' -or $open -eq 'y') {
+        notepad.exe $exportFile
+    }
+    
+    Read-Host "Press Enter to continue"
+}
+
+# Main execution
+Show-Header
+
+Write-Host "This viewer displays data collected by the Incident Response Triage Script" -ForegroundColor $colors.Info
+Write-Host "No live data collection will be performed" -ForegroundColor $colors.Info
+Write-Host ""
+
+# Main loop
+while ($true) {
+    $incidentPath = $Path
+    
+    if (!$incidentPath -or !(Test-Path $incidentPath)) {
+        $incidentPath = Select-IncidentDirectory
+    }
+    
+    if (!$incidentPath) {
+        Write-Host "Exiting..." -ForegroundColor $colors.Info
+        break
+    }
+    
+    Show-IncidentMenu -IncidentPath $incidentPath
+    
+    # Reset path to show selection menu again
+    $Path = ""
+}
+
+Write-Host ""
+Write-Host "Thank you for using IR Data Viewer" -ForegroundColor $colors.Info) {
+            $index = [int]$choice - 1
+            if ($index -ge 0 -and $index -lt $files.Count) {
+                $content = Show-FileContent -FilePath $files[$index].FullName
+                Show-PagedContent -Content $content -Title "LOG: $($files[$index].Name)"
+            }
+        }
+    }
+}
+
+# Event log summary analysis
+function Show-EventLogSummary {
+    param([string]$LogsPath)
+    
+    Write-Host "Analyzing event logs..." -ForegroundColor $colors.Info
+    $summary = @()
+    $summary += "EVENT LOG SUMMARY ANALYSIS"
+    $summary += "="*60
+    $summary += ""
+    
+    $evtxFiles = Get-ChildItem $LogsPath -Filter "*.evtx"
+    
+    foreach ($file in $evtxFiles) {
+        $summary += "Log: $($file.Name)"
+        $summary += "Size: $([Math]::Round($file.Length/1MB, 2)) MB"
+        
+        try {
+            # Try to get basic stats
+            $events = Get-WinEvent -Path $file.FullName -MaxEvents 1000 -ErrorAction Stop
+            
+            $errorCount = ($events | Where-Object { $_.Level -eq 2 }).Count
+            $warningCount = ($events | Where-Object { $_.Level -eq 3 }).Count
+            $infoCount = ($events | Where-Object { $_.Level -eq 4 }).Count
+            
+            $summary += "Sample of 1000 events:"
+            $summary += "  - Errors: $errorCount"
+            $summary += "  - Warnings: $warningCount"
+            $summary += "  - Information: $infoCount"
+            
+            # Get time range
+            $oldest = $events | Select-Object -Last 1
+            $newest = $events | Select-Object -First 1
+            $summary += "  - Time range: $($oldest.TimeCreated) to $($newest.TimeCreated)"
+            
+            # Common event IDs
+            $commonIds = $events | Group-Object Id | Sort-Object Count -Descending | Select-Object -First 5
+            $summary += "  - Common Event IDs:"
+            foreach ($id in $commonIds) {
+                $summary += "    - ID $($id.Name): $($id.Count) occurrences"
+            }
+        }
+        catch {
+            $summary += "  - Unable to parse on this system"
+        }
+        
+        $summary += ""
+    }
+    
+    Show-PagedContent -Content $summary -Title "EVENT LOG SUMMARY"
+}
+
+# Browse all files
+function Browse-Files {
+    param([string]$IncidentPath)
+    
+    Show-Header "FILE BROWSER"
+    
+    Write-Host "Building file list..." -ForegroundColor $colors.Info
+    $allFiles = Get-ChildItem $IncidentPath -Recurse -File | Sort-Object DirectoryName, Name
+    
+    $fileList = @()
+    $currentDir = ""
+    
+    foreach ($file in $allFiles) {
+        $relPath = $file.DirectoryName.Replace($IncidentPath, "").TrimStart("\")
+        
+        if ($relPath -ne $currentDir) {
+            $fileList += ""
+            $fileList += "[$relPath]"
+            $currentDir = $relPath
+        }
+        
+        $fileList += "  $($file.Name) ($([Math]::Round($file.Length/1KB, 2)) KB)"
+    }
+    
+    Show-PagedContent -Content $fileList -Title "ALL FILES ($($allFiles.Count) total)"
+}
+
+# Export all data to text
+function Export-AllData {
+    param([string]$IncidentPath)
+    
+    Show-Header "EXPORT ALL DATA"
+    
+    Write-Host "This will export all data to a single text file." -ForegroundColor $colors.Info
+    $confirm = Read-Host "Continue? (Y/N)"
+    
+    if ($confirm -ne 'Y' -and $confirm -ne 'y') { return }
+    
+    $exportFile = Join-Path $IncidentPath "Export_$(Get-Date -Format 'yyyyMMdd_HHmmss').txt"
+    $output = @()
+    
+    # Header
+    $output += "="*80
+    $output += "INCIDENT RESPONSE DATA EXPORT"
+    $output += "="*80
+    $output += "Generated: $(Get-Date)"
+    $output += "Incident: $(Split-Path $IncidentPath -Leaf)"
+    $output += "Path: $IncidentPath"
+    $output += "="*80
+    $output += ""
+    
+    Write-Host "Exporting data..." -ForegroundColor $colors.Info
+    
+    # Process each directory
+    $directories = @(
+        @{Name="SUMMARY"; Path="SUMMARY.txt"; Type="File"},
+        @{Name="ALERTS"; Path="ALERTS"; Type="Directory"},
+        @{Name="NETWORK"; Path="Network"; Type="Directory"},
+        @{Name="PROCESSES"; Path="Processes"; Type="Directory"},
+        @{Name="PERSISTENCE"; Path="Persistence"; Type="Directory"},
+        @{Name="SYSTEM"; Path="System"; Type="Directory"},
+        @{Name="LOGS"; Path="Logs"; Type="Directory"}
+    )
+    
+    foreach ($dir in $directories) {
+        Write-Host "  Exporting $($dir.Name)..." -ForegroundColor $colors.Data
+        
+        $fullPath = Join-Path $IncidentPath $dir.Path
+        
+        if (Test-Path $fullPath) {
+            $output += ""
+            $output += "="*80
+            $output += $dir.Name
+            $output += "="*80
+            
+            if ($dir.Type -eq "File") {
+                $output += Get-Content $fullPath
+            }
+            else {
+                $files = Get-ChildItem $fullPath -File | Sort-Object Name
+                foreach ($file in $files) {
+                    $output += ""
+                    $output += "-"*60
+                    $output += "FILE: $($file.Name)"
+                    $output += "-"*60
+                    
+                    $content = Show-FileContent -FilePath $file.FullName
+                    $output += $content
+                }
+            }
+        }
+    }
+    
+    # Save export
+    $output | Out-File $exportFile -Encoding UTF8
+    
+    Write-Host ""
+    Write-Host "Export complete!" -ForegroundColor $colors.Low
+    Write-Host "File saved to: $exportFile" -ForegroundColor $colors.Info
+    Write-Host "Size: $([Math]::Round((Get-Item $exportFile).Length/1MB, 2)) MB" -ForegroundColor $colors.Data
+    Write-Host ""
+    
+    $open = Read-Host "Open file now? (Y/N)"
+    if ($open -eq 'Y' -or $open -eq 'y') {
+        notepad.exe $exportFile
+    }
+    
+    Read-Host "Press Enter to continue"
+}
+
+# Main execution
+Show-Header
+
+Write-Host "This viewer displays data collected by the Incident Response Triage Script" -ForegroundColor $colors.Info
+Write-Host "No live data collection will be performed" -ForegroundColor $colors.Info
+Write-Host ""
+
+# Main loop
+while ($true) {
+    $incidentPath = $Path
+    
+    if (!$incidentPath -or !(Test-Path $incidentPath)) {
+        $incidentPath = Select-IncidentDirectory
+    }
+    
+    if (!$incidentPath) {
+        Write-Host "Exiting..." -ForegroundColor $colors.Info
+        break
+    }
+    
+    Show-IncidentMenu -IncidentPath $incidentPath
+    
+    # Reset path to show selection menu again
+    $Path = ""
+}
+
+Write-Host ""
+Write-Host "Thank you for using IR Data Viewer" -ForegroundColor $colors.Info) {
+                    Get-WinEvent -Path $FilePath -MaxEvents ([int]$maxEvents) -ErrorAction Stop
+                } else {
+                    Get-WinEvent -Path $FilePath -MaxEvents 100 -ErrorAction Stop
+                }
+            }
+            default { Get-WinEvent -Path $FilePath -MaxEvents 100 -ErrorAction Stop }
+        }
+        
+        Write-Host "Processing $($events.Count) events..." -ForegroundColor $colors.Info
+        
+        $output = @()
+        $output += "Event Log: $(Split-Path $FilePath -Leaf)"
+        $output += "Total Events Loaded: $($events.Count)"
+        $output += ("=" * 60)
+        $output += ""
+        
+        # Add filter option
+        Write-Host "Filter events? (Y/N)" -NoNewline -ForegroundColor $colors.Info
+        $filter = Read-Host
+        
+        if ($filter -eq 'Y' -or $filter -eq 'y') {
+            Write-Host "Filter by:" -ForegroundColor $colors.Menu
+            Write-Host "1. Error/Critical only" -ForegroundColor $colors.Menu
+            Write-Host "2. Specific Event ID" -ForegroundColor $colors.Menu
+            Write-Host "3. Time range" -ForegroundColor $colors.Menu
+            Write-Host "4. No filter" -ForegroundColor $colors.Menu
+            
+            $filterChoice = Read-Host "Select filter (1-4)"
+            
+            $events = switch ($filterChoice) {
+                "1" { $events | Where-Object { $_.Level -le 2 } }
+                "2" {
+                    $eventId = Read-Host "Enter Event ID"
+                    if ($eventId -match '^\d+
+
+# Display file content based on type
+function Show-FileContent {
+    param([string]$FilePath)
+    
+    if (!(Test-Path $FilePath)) {
+        return @("File not found: $FilePath")
+    }
+    
+    $extension = [System.IO.Path]::GetExtension($FilePath).ToLower()
+    
+    switch ($extension) {
+        ".csv" { return Show-CsvFile -FilePath $FilePath }
+        ".json" { return Show-JsonFile -FilePath $FilePath }
+        ".evtx" { return Show-EventLog -FilePath $FilePath }
+        ".txt" { return Get-Content $FilePath }
+        ".log" { return Get-Content $FilePath }
+        default { return @("Cannot display file type: $extension") }
+    }
+}
+
+# Paged display
+function Show-PagedContent {
+    param(
+        [array]$Content,
+        [string]$Title
+    )
+    
+    if ($Content.Count -eq 0) {
+        Write-Host "No content to display" -ForegroundColor $colors.Info
+        Read-Host "Press Enter to continue"
+        return
+    }
+    
+    $totalPages = [Math]::Ceiling($Content.Count / $PageSize)
+    $currentPage = 0
+    
+    while ($true) {
+        Show-Header $Title
+        
+        $startIdx = $currentPage * $PageSize
+        $endIdx = [Math]::Min($startIdx + $PageSize, $Content.Count)
+        
+        # Display page content
+        for ($i = $startIdx; $i -lt $endIdx; $i++) {
+            $line = $Content[$i]
+            
+            # Color coding based on content
+            if ($line -match "CRITICAL|ERROR|FAIL") {
+                Write-Host $line -ForegroundColor $colors.Critical
+            }
+            elseif ($line -match "WARNING|ALERT|SUSPICIOUS") {
+                Write-Host $line -ForegroundColor $colors.High
+            }
+            elseif ($line -match "SUCCESS|PASS") {
+                Write-Host $line -ForegroundColor $colors.Low
+            }
+            else {
+                Write-Host $line -ForegroundColor $colors.Data
+            }
+        }
+        
+        # Navigation
+        Write-Host ""
+        Write-Host ("-" * 80) -ForegroundColor $colors.Menu
+        Write-Host "Page $($currentPage + 1) of $totalPages | Showing items $($startIdx + 1)-$endIdx of $($Content.Count)" -ForegroundColor $colors.Info
+        Write-Host "[N]ext [P]revious [F]irst [L]ast [Q]uit: " -NoNewline -ForegroundColor $colors.Menu
+        
+        $key = Read-Host
+        
+        switch ($key.ToUpper()) {
+            "N" { if ($currentPage -lt $totalPages - 1) { $currentPage++ } }
+            "P" { if ($currentPage -gt 0) { $currentPage-- } }
+            "F" { $currentPage = 0 }
+            "L" { $currentPage = $totalPages - 1 }
+            "Q" { return }
+        }
+    }
+}
+
+# Main menu for incident data
+function Show-IncidentMenu {
+    param([string]$IncidentPath)
+    
+    while ($true) {
+        Show-Header "INCIDENT DATA BROWSER"
+        
+        # Display incident info
+        $incidentName = Split-Path $IncidentPath -Leaf
+        Write-Host "Incident: $incidentName" -ForegroundColor $colors.Info
+        Write-Host "Path: $IncidentPath" -ForegroundColor $colors.Data
+        
+        # Get summary info if available
+        $summaryPath = Join-Path $IncidentPath "SUMMARY.txt"
+        if (Test-Path $summaryPath) {
+            $summaryLines = Get-Content $summaryPath | Select-String "THREAT LEVEL:|TOTAL ALERTS:"
+            foreach ($line in $summaryLines) {
+                if ($line -match "THREAT LEVEL:") {
+                    $level = $line.Line.Split(":")[1].Trim()
+                    $color = switch ($level) {
+                        "CRITICAL" { $colors.Critical }
+                        "HIGH" { $colors.High }
+                        "MEDIUM" { $colors.Medium }
+                        "LOW" { $colors.Low }
+                        default { $colors.Data }
+                    }
+                    Write-Host $line.Line -ForegroundColor $color
+                }
+                else {
+                    Write-Host $line.Line -ForegroundColor $colors.Info
+                }
+            }
+        }
+        
+        Write-Host ""
+        Write-Host "MAIN MENU" -ForegroundColor $colors.Header
+        Write-Host "1. View Summary" -ForegroundColor $colors.Menu
+        Write-Host "2. View Alerts" -ForegroundColor $colors.Menu
+        Write-Host "3. Network Data" -ForegroundColor $colors.Menu
+        Write-Host "4. Process Data" -ForegroundColor $colors.Menu
+        Write-Host "5. Persistence Data" -ForegroundColor $colors.Menu
+        Write-Host "6. System Information" -ForegroundColor $colors.Menu
+        Write-Host "7. Event Logs" -ForegroundColor $colors.Menu
+        Write-Host "8. Browse All Files" -ForegroundColor $colors.Menu
+        Write-Host "9. Export All to Text" -ForegroundColor $colors.Menu
+        Write-Host "Q. Back to Directory Selection" -ForegroundColor $colors.Menu
+        Write-Host ""
+        
+        $choice = Read-Host "Select option"
+        
+        switch ($choice) {
+            "1" { Show-Summary -IncidentPath $IncidentPath }
+            "2" { Show-Alerts -IncidentPath $IncidentPath }
+            "3" { Show-NetworkData -IncidentPath $IncidentPath }
+            "4" { Show-ProcessData -IncidentPath $IncidentPath }
+            "5" { Show-PersistenceData -IncidentPath $IncidentPath }
+            "6" { Show-SystemInfo -IncidentPath $IncidentPath }
+            "7" { Show-EventLogs -IncidentPath $IncidentPath }
+            "8" { Browse-Files -IncidentPath $IncidentPath }
+            "9" { Export-AllData -IncidentPath $IncidentPath }
+            "Q" { return }
+            "q" { return }
+        }
+    }
+}
+
+# Show summary
+function Show-Summary {
+    param([string]$IncidentPath)
+    
+    $summaryFile = Join-Path $IncidentPath "SUMMARY.txt"
+    if (Test-Path $summaryFile) {
+        $content = Get-Content $summaryFile
+        Show-PagedContent -Content $content -Title "INCIDENT SUMMARY"
+    }
+    else {
+        Write-Host "Summary file not found" -ForegroundColor $colors.Critical
+        Read-Host "Press Enter to continue"
+    }
+}
+
+# Show alerts
+function Show-Alerts {
+    param([string]$IncidentPath)
+    
+    $alertsPath = Join-Path $IncidentPath "ALERTS"
+    if (!(Test-Path $alertsPath)) {
+        Write-Host "No alerts directory found" -ForegroundColor $colors.Info
+        Read-Host "Press Enter to continue"
+        return
+    }
+    
+    while ($true) {
+        Show-Header "ALERTS"
+        
+        $files = Get-ChildItem $alertsPath -File | Sort-Object Name
+        if ($files.Count -eq 0) {
+            Write-Host "No alert files found" -ForegroundColor $colors.Info
+            Read-Host "Press Enter to continue"
+            return
+        }
+        
+        Write-Host "Alert Files:" -ForegroundColor $colors.Header
+        for ($i = 0; $i -lt $files.Count; $i++) {
+            Write-Host ("{0,3}. {1}" -f ($i + 1), $files[$i].Name) -ForegroundColor $colors.High
+        }
+        
+        Write-Host ""
+        Write-Host "Enter file number to view or Q to go back: " -NoNewline
+        $choice = Read-Host
+        
+        if ($choice -match '^[Qq]') { return }
+        
+        if ($choice -match '^\d+$') {
+            $index = [int]$choice - 1
+            if ($index -ge 0 -and $index -lt $files.Count) {
+                $content = Show-FileContent -FilePath $files[$index].FullName
+                Show-PagedContent -Content $content -Title "ALERT: $($files[$index].Name)"
+            }
+        }
+    }
+}
+
+# Show network data
+function Show-NetworkData {
+    param([string]$IncidentPath)
+    
+    $networkPath = Join-Path $IncidentPath "Network"
+    if (!(Test-Path $networkPath)) {
+        Write-Host "No network data found" -ForegroundColor $colors.Info
+        Read-Host "Press Enter to continue"
+        return
+    }
+    
+    while ($true) {
+        Show-Header "NETWORK DATA"
+        
+        $files = Get-ChildItem $networkPath -File | Sort-Object Name
+        
+        Write-Host "Network Files:" -ForegroundColor $colors.Header
+        for ($i = 0; $i -lt $files.Count; $i++) {
+            Write-Host ("{0,3}. {1}" -f ($i + 1), $files[$i].Name) -ForegroundColor $colors.Menu
+        }
+        
+        Write-Host ""
+        Write-Host "Enter file number to view or Q to go back: " -NoNewline
+        $choice = Read-Host
+        
+        if ($choice -match '^[Qq]') { return }
+        
+        if ($choice -match '^\d+$') {
+            $index = [int]$choice - 1
+            if ($index -ge 0 -and $index -lt $files.Count) {
+                $content = Show-FileContent -FilePath $files[$index].FullName
+                Show-PagedContent -Content $content -Title "NETWORK: $($files[$index].Name)"
+            }
+        }
+    }
+}
+
+# Show process data
+function Show-ProcessData {
+    param([string]$IncidentPath)
+    
+    $processPath = Join-Path $IncidentPath "Processes"
+    $files = @()
+    
+    # Check both Processes folder and ALERTS for process files
+    if (Test-Path $processPath) {
+        $files += Get-ChildItem $processPath -File
+    }
+    
+    $alertsPath = Join-Path $IncidentPath "ALERTS"
+    if (Test-Path $alertsPath) {
+        $files += Get-ChildItem $alertsPath -Filter "*process*" -File
+        $files += Get-ChildItem $alertsPath -Filter "*pid*" -File
+    }
+    
+    if ($files.Count -eq 0) {
+        Write-Host "No process data found" -ForegroundColor $colors.Info
+        Read-Host "Press Enter to continue"
+        return
+    }
+    
+    while ($true) {
+        Show-Header "PROCESS DATA"
+        
+        Write-Host "Process Files:" -ForegroundColor $colors.Header
+        for ($i = 0; $i -lt $files.Count; $i++) {
+            $color = if ($files[$i].DirectoryName -match "ALERTS") { $colors.High } else { $colors.Menu }
+            Write-Host ("{0,3}. {1}" -f ($i + 1), $files[$i].Name) -ForegroundColor $color
+        }
+        
+        Write-Host ""
+        Write-Host "Enter file number to view or Q to go back: " -NoNewline
+        $choice = Read-Host
+        
+        if ($choice -match '^[Qq]') { return }
+        
+        if ($choice -match '^\d+$') {
+            $index = [int]$choice - 1
+            if ($index -ge 0 -and $index -lt $files.Count) {
+                $content = Show-FileContent -FilePath $files[$index].FullName
+                Show-PagedContent -Content $content -Title "PROCESS: $($files[$index].Name)"
+            }
+        }
+    }
+}
+
+# Show persistence data
+function Show-PersistenceData {
+    param([string]$IncidentPath)
+    
+    $persistPath = Join-Path $IncidentPath "Persistence"
+    $files = @()
+    
+    if (Test-Path $persistPath) {
+        $files += Get-ChildItem $persistPath -File
+    }
+    
+    # Also check ALERTS for persistence files
+    $alertsPath = Join-Path $IncidentPath "ALERTS"
+    if (Test-Path $alertsPath) {
+        $files += Get-ChildItem $alertsPath -Filter "*autorun*" -File
+        $files += Get-ChildItem $alertsPath -Filter "*service*" -File
+        $files += Get-ChildItem $alertsPath -Filter "*task*" -File
+    }
+    
+    if ($files.Count -eq 0) {
+        Write-Host "No persistence data found" -ForegroundColor $colors.Info
+        Read-Host "Press Enter to continue"
+        return
+    }
+    
+    while ($true) {
+        Show-Header "PERSISTENCE DATA"
+        
+        Write-Host "Persistence Files:" -ForegroundColor $colors.Header
+        for ($i = 0; $i -lt $files.Count; $i++) {
+            $color = if ($files[$i].DirectoryName -match "ALERTS") { $colors.High } else { $colors.Menu }
+            Write-Host ("{0,3}. {1}" -f ($i + 1), $files[$i].Name) -ForegroundColor $color
+        }
+        
+        Write-Host ""
+        Write-Host "Enter file number to view or Q to go back: " -NoNewline
+        $choice = Read-Host
+        
+        if ($choice -match '^[Qq]') { return }
+        
+        if ($choice -match '^\d+$') {
+            $index = [int]$choice - 1
+            if ($index -ge 0 -and $index -lt $files.Count) {
+                $content = Show-FileContent -FilePath $files[$index].FullName
+                Show-PagedContent -Content $content -Title "PERSISTENCE: $($files[$index].Name)"
+            }
+        }
+    }
+}
+
+# Show system info
+function Show-SystemInfo {
+    param([string]$IncidentPath)
+    
+    $systemPath = Join-Path $IncidentPath "System"
+    if (!(Test-Path $systemPath)) {
+        Write-Host "No system data found" -ForegroundColor $colors.Info
+        Read-Host "Press Enter to continue"
+        return
+    }
+    
+    while ($true) {
+        Show-Header "SYSTEM INFORMATION"
+        
+        $files = Get-ChildItem $systemPath -File | Sort-Object Name
+        
+        Write-Host "System Files:" -ForegroundColor $colors.Header
+        for ($i = 0; $i -lt $files.Count; $i++) {
+            Write-Host ("{0,3}. {1}" -f ($i + 1), $files[$i].Name) -ForegroundColor $colors.Menu
+        }
+        
+        Write-Host ""
+        Write-Host "Enter file number to view or Q to go back: " -NoNewline
+        $choice = Read-Host
+        
+        if ($choice -match '^[Qq]') { return }
+        
+        if ($choice -match '^\d+$') {
+            $index = [int]$choice - 1
+            if ($index -ge 0 -and $index -lt $files.Count) {
+                $content = Show-FileContent -FilePath $files[$index].FullName
+                Show-PagedContent -Content $content -Title "SYSTEM: $($files[$index].Name)"
+            }
+        }
+    }
+}
+
+# Show event logs
+function Show-EventLogs {
+    param([string]$IncidentPath)
+    
+    $logsPath = Join-Path $IncidentPath "Logs"
+    if (!(Test-Path $logsPath)) {
+        Write-Host "No event logs found" -ForegroundColor $colors.Info
+        Read-Host "Press Enter to continue"
+        return
+    }
+    
+    while ($true) {
+        Show-Header "EVENT LOGS"
+        
+        $files = Get-ChildItem $logsPath -File | Sort-Object Name
+        
+        Write-Host "Event Log Files:" -ForegroundColor $colors.Header
+        Write-Host "(Note: .evtx files can only be parsed on Windows systems)" -ForegroundColor $colors.Data
+        Write-Host ""
+        
+        for ($i = 0; $i -lt $files.Count; $i++) {
+            $color = if ($files[$i].Extension -eq ".evtx") { $colors.High } else { $colors.Menu }
+            Write-Host ("{0,3}. {1} ({2:N2} MB)" -f ($i + 1), $files[$i].Name, ($files[$i].Length/1MB)) -ForegroundColor $color
+        }
+        
+        Write-Host ""
+        Write-Host "Enter file number to view or Q to go back: " -NoNewline
+        $choice = Read-Host
+        
+        if ($choice -match '^[Qq]') { return }
+        
+        if ($choice -match '^\d+$') {
+            $index = [int]$choice - 1
+            if ($index -ge 0 -and $index -lt $files.Count) {
+                $content = Show-FileContent -FilePath $files[$index].FullName
+                Show-PagedContent -Content $content -Title "LOG: $($files[$index].Name)"
+            }
+        }
+    }
+}
+
+# Browse all files
+function Browse-Files {
+    param([string]$IncidentPath)
+    
+    Show-Header "FILE BROWSER"
+    
+    Write-Host "Building file list..." -ForegroundColor $colors.Info
+    $allFiles = Get-ChildItem $IncidentPath -Recurse -File | Sort-Object DirectoryName, Name
+    
+    $fileList = @()
+    $currentDir = ""
+    
+    foreach ($file in $allFiles) {
+        $relPath = $file.DirectoryName.Replace($IncidentPath, "").TrimStart("\")
+        
+        if ($relPath -ne $currentDir) {
+            $fileList += ""
+            $fileList += "[$relPath]"
+            $currentDir = $relPath
+        }
+        
+        $fileList += "  $($file.Name) ($([Math]::Round($file.Length/1KB, 2)) KB)"
+    }
+    
+    Show-PagedContent -Content $fileList -Title "ALL FILES ($($allFiles.Count) total)"
+}
+
+# Export all data to text
+function Export-AllData {
+    param([string]$IncidentPath)
+    
+    Show-Header "EXPORT ALL DATA"
+    
+    Write-Host "This will export all data to a single text file." -ForegroundColor $colors.Info
+    $confirm = Read-Host "Continue? (Y/N)"
+    
+    if ($confirm -ne 'Y' -and $confirm -ne 'y') { return }
+    
+    $exportFile = Join-Path $IncidentPath "Export_$(Get-Date -Format 'yyyyMMdd_HHmmss').txt"
+    $output = @()
+    
+    # Header
+    $output += "="*80
+    $output += "INCIDENT RESPONSE DATA EXPORT"
+    $output += "="*80
+    $output += "Generated: $(Get-Date)"
+    $output += "Incident: $(Split-Path $IncidentPath -Leaf)"
+    $output += "Path: $IncidentPath"
+    $output += "="*80
+    $output += ""
+    
+    Write-Host "Exporting data..." -ForegroundColor $colors.Info
+    
+    # Process each directory
+    $directories = @(
+        @{Name="SUMMARY"; Path="SUMMARY.txt"; Type="File"},
+        @{Name="ALERTS"; Path="ALERTS"; Type="Directory"},
+        @{Name="NETWORK"; Path="Network"; Type="Directory"},
+        @{Name="PROCESSES"; Path="Processes"; Type="Directory"},
+        @{Name="PERSISTENCE"; Path="Persistence"; Type="Directory"},
+        @{Name="SYSTEM"; Path="System"; Type="Directory"},
+        @{Name="LOGS"; Path="Logs"; Type="Directory"}
+    )
+    
+    foreach ($dir in $directories) {
+        Write-Host "  Exporting $($dir.Name)..." -ForegroundColor $colors.Data
+        
+        $fullPath = Join-Path $IncidentPath $dir.Path
+        
+        if (Test-Path $fullPath) {
+            $output += ""
+            $output += "="*80
+            $output += $dir.Name
+            $output += "="*80
+            
+            if ($dir.Type -eq "File") {
+                $output += Get-Content $fullPath
+            }
+            else {
+                $files = Get-ChildItem $fullPath -File | Sort-Object Name
+                foreach ($file in $files) {
+                    $output += ""
+                    $output += "-"*60
+                    $output += "FILE: $($file.Name)"
+                    $output += "-"*60
+                    
+                    $content = Show-FileContent -FilePath $file.FullName
+                    $output += $content
+                }
+            }
+        }
+    }
+    
+    # Save export
+    $output | Out-File $exportFile -Encoding UTF8
+    
+    Write-Host ""
+    Write-Host "Export complete!" -ForegroundColor $colors.Low
+    Write-Host "File saved to: $exportFile" -ForegroundColor $colors.Info
+    Write-Host "Size: $([Math]::Round((Get-Item $exportFile).Length/1MB, 2)) MB" -ForegroundColor $colors.Data
+    Write-Host ""
+    
+    $open = Read-Host "Open file now? (Y/N)"
+    if ($open -eq 'Y' -or $open -eq 'y') {
+        notepad.exe $exportFile
+    }
+    
+    Read-Host "Press Enter to continue"
+}
+
+# Main execution
+Show-Header
+
+Write-Host "This viewer displays data collected by the Incident Response Triage Script" -ForegroundColor $colors.Info
+Write-Host "No live data collection will be performed" -ForegroundColor $colors.Info
+Write-Host ""
+
+# Main loop
+while ($true) {
+    $incidentPath = $Path
+    
+    if (!$incidentPath -or !(Test-Path $incidentPath)) {
+        $incidentPath = Select-IncidentDirectory
+    }
+    
+    if (!$incidentPath) {
+        Write-Host "Exiting..." -ForegroundColor $colors.Info
+        break
+    }
+    
+    Show-IncidentMenu -IncidentPath $incidentPath
+    
+    # Reset path to show selection menu again
+    $Path = ""
+}
+
+Write-Host ""
+Write-Host "Thank you for using IR Data Viewer" -ForegroundColor $colors.Info) {
+                        $events | Where-Object { $_.Id -eq [int]$eventId }
+                    } else { $events }
+                }
+                "3" {
+                    $hours = Read-Host "Events from last X hours"
+                    if ($hours -match '^\d+
+
+# Display file content based on type
+function Show-FileContent {
+    param([string]$FilePath)
+    
+    if (!(Test-Path $FilePath)) {
+        return @("File not found: $FilePath")
+    }
+    
+    $extension = [System.IO.Path]::GetExtension($FilePath).ToLower()
+    
+    switch ($extension) {
+        ".csv" { return Show-CsvFile -FilePath $FilePath }
+        ".json" { return Show-JsonFile -FilePath $FilePath }
+        ".evtx" { return Show-EventLog -FilePath $FilePath }
+        ".txt" { return Get-Content $FilePath }
+        ".log" { return Get-Content $FilePath }
+        default { return @("Cannot display file type: $extension") }
+    }
+}
+
+# Paged display
+function Show-PagedContent {
+    param(
+        [array]$Content,
+        [string]$Title
+    )
+    
+    if ($Content.Count -eq 0) {
+        Write-Host "No content to display" -ForegroundColor $colors.Info
+        Read-Host "Press Enter to continue"
+        return
+    }
+    
+    $totalPages = [Math]::Ceiling($Content.Count / $PageSize)
+    $currentPage = 0
+    
+    while ($true) {
+        Show-Header $Title
+        
+        $startIdx = $currentPage * $PageSize
+        $endIdx = [Math]::Min($startIdx + $PageSize, $Content.Count)
+        
+        # Display page content
+        for ($i = $startIdx; $i -lt $endIdx; $i++) {
+            $line = $Content[$i]
+            
+            # Color coding based on content
+            if ($line -match "CRITICAL|ERROR|FAIL") {
+                Write-Host $line -ForegroundColor $colors.Critical
+            }
+            elseif ($line -match "WARNING|ALERT|SUSPICIOUS") {
+                Write-Host $line -ForegroundColor $colors.High
+            }
+            elseif ($line -match "SUCCESS|PASS") {
+                Write-Host $line -ForegroundColor $colors.Low
+            }
+            else {
+                Write-Host $line -ForegroundColor $colors.Data
+            }
+        }
+        
+        # Navigation
+        Write-Host ""
+        Write-Host ("-" * 80) -ForegroundColor $colors.Menu
+        Write-Host "Page $($currentPage + 1) of $totalPages | Showing items $($startIdx + 1)-$endIdx of $($Content.Count)" -ForegroundColor $colors.Info
+        Write-Host "[N]ext [P]revious [F]irst [L]ast [Q]uit: " -NoNewline -ForegroundColor $colors.Menu
+        
+        $key = Read-Host
+        
+        switch ($key.ToUpper()) {
+            "N" { if ($currentPage -lt $totalPages - 1) { $currentPage++ } }
+            "P" { if ($currentPage -gt 0) { $currentPage-- } }
+            "F" { $currentPage = 0 }
+            "L" { $currentPage = $totalPages - 1 }
+            "Q" { return }
+        }
+    }
+}
+
+# Main menu for incident data
+function Show-IncidentMenu {
+    param([string]$IncidentPath)
+    
+    while ($true) {
+        Show-Header "INCIDENT DATA BROWSER"
+        
+        # Display incident info
+        $incidentName = Split-Path $IncidentPath -Leaf
+        Write-Host "Incident: $incidentName" -ForegroundColor $colors.Info
+        Write-Host "Path: $IncidentPath" -ForegroundColor $colors.Data
+        
+        # Get summary info if available
+        $summaryPath = Join-Path $IncidentPath "SUMMARY.txt"
+        if (Test-Path $summaryPath) {
+            $summaryLines = Get-Content $summaryPath | Select-String "THREAT LEVEL:|TOTAL ALERTS:"
+            foreach ($line in $summaryLines) {
+                if ($line -match "THREAT LEVEL:") {
+                    $level = $line.Line.Split(":")[1].Trim()
+                    $color = switch ($level) {
+                        "CRITICAL" { $colors.Critical }
+                        "HIGH" { $colors.High }
+                        "MEDIUM" { $colors.Medium }
+                        "LOW" { $colors.Low }
+                        default { $colors.Data }
+                    }
+                    Write-Host $line.Line -ForegroundColor $color
+                }
+                else {
+                    Write-Host $line.Line -ForegroundColor $colors.Info
+                }
+            }
+        }
+        
+        Write-Host ""
+        Write-Host "MAIN MENU" -ForegroundColor $colors.Header
+        Write-Host "1. View Summary" -ForegroundColor $colors.Menu
+        Write-Host "2. View Alerts" -ForegroundColor $colors.Menu
+        Write-Host "3. Network Data" -ForegroundColor $colors.Menu
+        Write-Host "4. Process Data" -ForegroundColor $colors.Menu
+        Write-Host "5. Persistence Data" -ForegroundColor $colors.Menu
+        Write-Host "6. System Information" -ForegroundColor $colors.Menu
+        Write-Host "7. Event Logs" -ForegroundColor $colors.Menu
+        Write-Host "8. Browse All Files" -ForegroundColor $colors.Menu
+        Write-Host "9. Export All to Text" -ForegroundColor $colors.Menu
+        Write-Host "Q. Back to Directory Selection" -ForegroundColor $colors.Menu
+        Write-Host ""
+        
+        $choice = Read-Host "Select option"
+        
+        switch ($choice) {
+            "1" { Show-Summary -IncidentPath $IncidentPath }
+            "2" { Show-Alerts -IncidentPath $IncidentPath }
+            "3" { Show-NetworkData -IncidentPath $IncidentPath }
+            "4" { Show-ProcessData -IncidentPath $IncidentPath }
+            "5" { Show-PersistenceData -IncidentPath $IncidentPath }
+            "6" { Show-SystemInfo -IncidentPath $IncidentPath }
+            "7" { Show-EventLogs -IncidentPath $IncidentPath }
+            "8" { Browse-Files -IncidentPath $IncidentPath }
+            "9" { Export-AllData -IncidentPath $IncidentPath }
+            "Q" { return }
+            "q" { return }
+        }
+    }
+}
+
+# Show summary
+function Show-Summary {
+    param([string]$IncidentPath)
+    
+    $summaryFile = Join-Path $IncidentPath "SUMMARY.txt"
+    if (Test-Path $summaryFile) {
+        $content = Get-Content $summaryFile
+        Show-PagedContent -Content $content -Title "INCIDENT SUMMARY"
+    }
+    else {
+        Write-Host "Summary file not found" -ForegroundColor $colors.Critical
+        Read-Host "Press Enter to continue"
+    }
+}
+
+# Show alerts
+function Show-Alerts {
+    param([string]$IncidentPath)
+    
+    $alertsPath = Join-Path $IncidentPath "ALERTS"
+    if (!(Test-Path $alertsPath)) {
+        Write-Host "No alerts directory found" -ForegroundColor $colors.Info
+        Read-Host "Press Enter to continue"
+        return
+    }
+    
+    while ($true) {
+        Show-Header "ALERTS"
+        
+        $files = Get-ChildItem $alertsPath -File | Sort-Object Name
+        if ($files.Count -eq 0) {
+            Write-Host "No alert files found" -ForegroundColor $colors.Info
+            Read-Host "Press Enter to continue"
+            return
+        }
+        
+        Write-Host "Alert Files:" -ForegroundColor $colors.Header
+        for ($i = 0; $i -lt $files.Count; $i++) {
+            Write-Host ("{0,3}. {1}" -f ($i + 1), $files[$i].Name) -ForegroundColor $colors.High
+        }
+        
+        Write-Host ""
+        Write-Host "Enter file number to view or Q to go back: " -NoNewline
+        $choice = Read-Host
+        
+        if ($choice -match '^[Qq]') { return }
+        
+        if ($choice -match '^\d+$') {
+            $index = [int]$choice - 1
+            if ($index -ge 0 -and $index -lt $files.Count) {
+                $content = Show-FileContent -FilePath $files[$index].FullName
+                Show-PagedContent -Content $content -Title "ALERT: $($files[$index].Name)"
+            }
+        }
+    }
+}
+
+# Show network data
+function Show-NetworkData {
+    param([string]$IncidentPath)
+    
+    $networkPath = Join-Path $IncidentPath "Network"
+    if (!(Test-Path $networkPath)) {
+        Write-Host "No network data found" -ForegroundColor $colors.Info
+        Read-Host "Press Enter to continue"
+        return
+    }
+    
+    while ($true) {
+        Show-Header "NETWORK DATA"
+        
+        $files = Get-ChildItem $networkPath -File | Sort-Object Name
+        
+        Write-Host "Network Files:" -ForegroundColor $colors.Header
+        for ($i = 0; $i -lt $files.Count; $i++) {
+            Write-Host ("{0,3}. {1}" -f ($i + 1), $files[$i].Name) -ForegroundColor $colors.Menu
+        }
+        
+        Write-Host ""
+        Write-Host "Enter file number to view or Q to go back: " -NoNewline
+        $choice = Read-Host
+        
+        if ($choice -match '^[Qq]') { return }
+        
+        if ($choice -match '^\d+$') {
+            $index = [int]$choice - 1
+            if ($index -ge 0 -and $index -lt $files.Count) {
+                $content = Show-FileContent -FilePath $files[$index].FullName
+                Show-PagedContent -Content $content -Title "NETWORK: $($files[$index].Name)"
+            }
+        }
+    }
+}
+
+# Show process data
+function Show-ProcessData {
+    param([string]$IncidentPath)
+    
+    $processPath = Join-Path $IncidentPath "Processes"
+    $files = @()
+    
+    # Check both Processes folder and ALERTS for process files
+    if (Test-Path $processPath) {
+        $files += Get-ChildItem $processPath -File
+    }
+    
+    $alertsPath = Join-Path $IncidentPath "ALERTS"
+    if (Test-Path $alertsPath) {
+        $files += Get-ChildItem $alertsPath -Filter "*process*" -File
+        $files += Get-ChildItem $alertsPath -Filter "*pid*" -File
+    }
+    
+    if ($files.Count -eq 0) {
+        Write-Host "No process data found" -ForegroundColor $colors.Info
+        Read-Host "Press Enter to continue"
+        return
+    }
+    
+    while ($true) {
+        Show-Header "PROCESS DATA"
+        
+        Write-Host "Process Files:" -ForegroundColor $colors.Header
+        for ($i = 0; $i -lt $files.Count; $i++) {
+            $color = if ($files[$i].DirectoryName -match "ALERTS") { $colors.High } else { $colors.Menu }
+            Write-Host ("{0,3}. {1}" -f ($i + 1), $files[$i].Name) -ForegroundColor $color
+        }
+        
+        Write-Host ""
+        Write-Host "Enter file number to view or Q to go back: " -NoNewline
+        $choice = Read-Host
+        
+        if ($choice -match '^[Qq]') { return }
+        
+        if ($choice -match '^\d+$') {
+            $index = [int]$choice - 1
+            if ($index -ge 0 -and $index -lt $files.Count) {
+                $content = Show-FileContent -FilePath $files[$index].FullName
+                Show-PagedContent -Content $content -Title "PROCESS: $($files[$index].Name)"
+            }
+        }
+    }
+}
+
+# Show persistence data
+function Show-PersistenceData {
+    param([string]$IncidentPath)
+    
+    $persistPath = Join-Path $IncidentPath "Persistence"
+    $files = @()
+    
+    if (Test-Path $persistPath) {
+        $files += Get-ChildItem $persistPath -File
+    }
+    
+    # Also check ALERTS for persistence files
+    $alertsPath = Join-Path $IncidentPath "ALERTS"
+    if (Test-Path $alertsPath) {
+        $files += Get-ChildItem $alertsPath -Filter "*autorun*" -File
+        $files += Get-ChildItem $alertsPath -Filter "*service*" -File
+        $files += Get-ChildItem $alertsPath -Filter "*task*" -File
+    }
+    
+    if ($files.Count -eq 0) {
+        Write-Host "No persistence data found" -ForegroundColor $colors.Info
+        Read-Host "Press Enter to continue"
+        return
+    }
+    
+    while ($true) {
+        Show-Header "PERSISTENCE DATA"
+        
+        Write-Host "Persistence Files:" -ForegroundColor $colors.Header
+        for ($i = 0; $i -lt $files.Count; $i++) {
+            $color = if ($files[$i].DirectoryName -match "ALERTS") { $colors.High } else { $colors.Menu }
+            Write-Host ("{0,3}. {1}" -f ($i + 1), $files[$i].Name) -ForegroundColor $color
+        }
+        
+        Write-Host ""
+        Write-Host "Enter file number to view or Q to go back: " -NoNewline
+        $choice = Read-Host
+        
+        if ($choice -match '^[Qq]') { return }
+        
+        if ($choice -match '^\d+$') {
+            $index = [int]$choice - 1
+            if ($index -ge 0 -and $index -lt $files.Count) {
+                $content = Show-FileContent -FilePath $files[$index].FullName
+                Show-PagedContent -Content $content -Title "PERSISTENCE: $($files[$index].Name)"
+            }
+        }
+    }
+}
+
+# Show system info
+function Show-SystemInfo {
+    param([string]$IncidentPath)
+    
+    $systemPath = Join-Path $IncidentPath "System"
+    if (!(Test-Path $systemPath)) {
+        Write-Host "No system data found" -ForegroundColor $colors.Info
+        Read-Host "Press Enter to continue"
+        return
+    }
+    
+    while ($true) {
+        Show-Header "SYSTEM INFORMATION"
+        
+        $files = Get-ChildItem $systemPath -File | Sort-Object Name
+        
+        Write-Host "System Files:" -ForegroundColor $colors.Header
+        for ($i = 0; $i -lt $files.Count; $i++) {
+            Write-Host ("{0,3}. {1}" -f ($i + 1), $files[$i].Name) -ForegroundColor $colors.Menu
+        }
+        
+        Write-Host ""
+        Write-Host "Enter file number to view or Q to go back: " -NoNewline
+        $choice = Read-Host
+        
+        if ($choice -match '^[Qq]') { return }
+        
+        if ($choice -match '^\d+$') {
+            $index = [int]$choice - 1
+            if ($index -ge 0 -and $index -lt $files.Count) {
+                $content = Show-FileContent -FilePath $files[$index].FullName
+                Show-PagedContent -Content $content -Title "SYSTEM: $($files[$index].Name)"
+            }
+        }
+    }
+}
+
+# Show event logs
+function Show-EventLogs {
+    param([string]$IncidentPath)
+    
+    $logsPath = Join-Path $IncidentPath "Logs"
+    if (!(Test-Path $logsPath)) {
+        Write-Host "No event logs found" -ForegroundColor $colors.Info
+        Read-Host "Press Enter to continue"
+        return
+    }
+    
+    while ($true) {
+        Show-Header "EVENT LOGS"
+        
+        $files = Get-ChildItem $logsPath -File | Sort-Object Name
+        
+        Write-Host "Event Log Files:" -ForegroundColor $colors.Header
+        Write-Host "(Note: .evtx files can only be parsed on Windows systems)" -ForegroundColor $colors.Data
+        Write-Host ""
+        
+        for ($i = 0; $i -lt $files.Count; $i++) {
+            $color = if ($files[$i].Extension -eq ".evtx") { $colors.High } else { $colors.Menu }
+            Write-Host ("{0,3}. {1} ({2:N2} MB)" -f ($i + 1), $files[$i].Name, ($files[$i].Length/1MB)) -ForegroundColor $color
+        }
+        
+        Write-Host ""
+        Write-Host "Enter file number to view or Q to go back: " -NoNewline
+        $choice = Read-Host
+        
+        if ($choice -match '^[Qq]') { return }
+        
+        if ($choice -match '^\d+$') {
+            $index = [int]$choice - 1
+            if ($index -ge 0 -and $index -lt $files.Count) {
+                $content = Show-FileContent -FilePath $files[$index].FullName
+                Show-PagedContent -Content $content -Title "LOG: $($files[$index].Name)"
+            }
+        }
+    }
+}
+
+# Browse all files
+function Browse-Files {
+    param([string]$IncidentPath)
+    
+    Show-Header "FILE BROWSER"
+    
+    Write-Host "Building file list..." -ForegroundColor $colors.Info
+    $allFiles = Get-ChildItem $IncidentPath -Recurse -File | Sort-Object DirectoryName, Name
+    
+    $fileList = @()
+    $currentDir = ""
+    
+    foreach ($file in $allFiles) {
+        $relPath = $file.DirectoryName.Replace($IncidentPath, "").TrimStart("\")
+        
+        if ($relPath -ne $currentDir) {
+            $fileList += ""
+            $fileList += "[$relPath]"
+            $currentDir = $relPath
+        }
+        
+        $fileList += "  $($file.Name) ($([Math]::Round($file.Length/1KB, 2)) KB)"
+    }
+    
+    Show-PagedContent -Content $fileList -Title "ALL FILES ($($allFiles.Count) total)"
+}
+
+# Export all data to text
+function Export-AllData {
+    param([string]$IncidentPath)
+    
+    Show-Header "EXPORT ALL DATA"
+    
+    Write-Host "This will export all data to a single text file." -ForegroundColor $colors.Info
+    $confirm = Read-Host "Continue? (Y/N)"
+    
+    if ($confirm -ne 'Y' -and $confirm -ne 'y') { return }
+    
+    $exportFile = Join-Path $IncidentPath "Export_$(Get-Date -Format 'yyyyMMdd_HHmmss').txt"
+    $output = @()
+    
+    # Header
+    $output += "="*80
+    $output += "INCIDENT RESPONSE DATA EXPORT"
+    $output += "="*80
+    $output += "Generated: $(Get-Date)"
+    $output += "Incident: $(Split-Path $IncidentPath -Leaf)"
+    $output += "Path: $IncidentPath"
+    $output += "="*80
+    $output += ""
+    
+    Write-Host "Exporting data..." -ForegroundColor $colors.Info
+    
+    # Process each directory
+    $directories = @(
+        @{Name="SUMMARY"; Path="SUMMARY.txt"; Type="File"},
+        @{Name="ALERTS"; Path="ALERTS"; Type="Directory"},
+        @{Name="NETWORK"; Path="Network"; Type="Directory"},
+        @{Name="PROCESSES"; Path="Processes"; Type="Directory"},
+        @{Name="PERSISTENCE"; Path="Persistence"; Type="Directory"},
+        @{Name="SYSTEM"; Path="System"; Type="Directory"},
+        @{Name="LOGS"; Path="Logs"; Type="Directory"}
+    )
+    
+    foreach ($dir in $directories) {
+        Write-Host "  Exporting $($dir.Name)..." -ForegroundColor $colors.Data
+        
+        $fullPath = Join-Path $IncidentPath $dir.Path
+        
+        if (Test-Path $fullPath) {
+            $output += ""
+            $output += "="*80
+            $output += $dir.Name
+            $output += "="*80
+            
+            if ($dir.Type -eq "File") {
+                $output += Get-Content $fullPath
+            }
+            else {
+                $files = Get-ChildItem $fullPath -File | Sort-Object Name
+                foreach ($file in $files) {
+                    $output += ""
+                    $output += "-"*60
+                    $output += "FILE: $($file.Name)"
+                    $output += "-"*60
+                    
+                    $content = Show-FileContent -FilePath $file.FullName
+                    $output += $content
+                }
+            }
+        }
+    }
+    
+    # Save export
+    $output | Out-File $exportFile -Encoding UTF8
+    
+    Write-Host ""
+    Write-Host "Export complete!" -ForegroundColor $colors.Low
+    Write-Host "File saved to: $exportFile" -ForegroundColor $colors.Info
+    Write-Host "Size: $([Math]::Round((Get-Item $exportFile).Length/1MB, 2)) MB" -ForegroundColor $colors.Data
+    Write-Host ""
+    
+    $open = Read-Host "Open file now? (Y/N)"
+    if ($open -eq 'Y' -or $open -eq 'y') {
+        notepad.exe $exportFile
+    }
+    
+    Read-Host "Press Enter to continue"
+}
+
+# Main execution
+Show-Header
+
+Write-Host "This viewer displays data collected by the Incident Response Triage Script" -ForegroundColor $colors.Info
+Write-Host "No live data collection will be performed" -ForegroundColor $colors.Info
+Write-Host ""
+
+# Main loop
+while ($true) {
+    $incidentPath = $Path
+    
+    if (!$incidentPath -or !(Test-Path $incidentPath)) {
+        $incidentPath = Select-IncidentDirectory
+    }
+    
+    if (!$incidentPath) {
+        Write-Host "Exiting..." -ForegroundColor $colors.Info
+        break
+    }
+    
+    Show-IncidentMenu -IncidentPath $incidentPath
+    
+    # Reset path to show selection menu again
+    $Path = ""
+}
+
+Write-Host ""
+Write-Host "Thank you for using IR Data Viewer" -ForegroundColor $colors.Info) {
+                        $cutoff = (Get-Date).AddHours(-[int]$hours)
+                        $events | Where-Object { $_.TimeCreated -gt $cutoff }
+                    } else { $events }
+                }
+                default { $events }
+            }
+            
+            $output += "Filtered Events: $($events.Count)"
+            $output += ""
+        }
+        
+        # Format events
+        $eventNum = 1
+        foreach ($event in $events) {
+            $output += "===== Event #$eventNum ====="
+            $output += "Time: $($event.TimeCreated)"
+            $output += "Level: $($event.LevelDisplayName) | ID: $($event.Id)"
+            $output += "Source: $($event.ProviderName)"
+            $output += "Computer: $($event.MachineName)"
+            
+            if ($event.UserId) {
+                $output += "User: $($event.UserId)"
+            }
+            
+            if ($event.Message) {
+                # Option to show full or truncated messages
+                $output += "Message:"
+                $output += $event.Message -split "`n" | ForEach-Object { "  $_" }
+            }
+            
+            $output += ""
+            $eventNum++
+        }
+        
+        return $output
+    }
+    catch {
+        $output = @()
+        $output += "Unable to parse event log on this system."
+        $output += "Event logs can only be viewed on Windows systems with appropriate permissions."
+        $output += ""
+        $output += "Error: $_"
+        $output += ""
+        $output += "Raw file location: $FilePath"
+        $output += "File size: $([Math]::Round((Get-Item $FilePath).Length/1MB, 2)) MB"
+        
+        return $output
+    }
+}
+
+# Display file content based on type
+function Show-FileContent {
+    param([string]$FilePath)
+    
+    if (!(Test-Path $FilePath)) {
+        return @("File not found: $FilePath")
+    }
+    
+    $extension = [System.IO.Path]::GetExtension($FilePath).ToLower()
+    
+    switch ($extension) {
+        ".csv" { return Show-CsvFile -FilePath $FilePath }
+        ".json" { return Show-JsonFile -FilePath $FilePath }
+        ".evtx" { return Show-EventLog -FilePath $FilePath }
+        ".txt" { return Get-Content $FilePath }
+        ".log" { return Get-Content $FilePath }
+        default { return @("Cannot display file type: $extension") }
+    }
+}
+
+# Paged display
+function Show-PagedContent {
+    param(
+        [array]$Content,
+        [string]$Title
+    )
+    
+    if ($Content.Count -eq 0) {
+        Write-Host "No content to display" -ForegroundColor $colors.Info
+        Read-Host "Press Enter to continue"
+        return
+    }
+    
+    $totalPages = [Math]::Ceiling($Content.Count / $PageSize)
+    $currentPage = 0
+    
+    while ($true) {
+        Show-Header $Title
+        
+        $startIdx = $currentPage * $PageSize
+        $endIdx = [Math]::Min($startIdx + $PageSize, $Content.Count)
+        
+        # Display page content
+        for ($i = $startIdx; $i -lt $endIdx; $i++) {
+            $line = $Content[$i]
+            
+            # Color coding based on content
+            if ($line -match "CRITICAL|ERROR|FAIL") {
+                Write-Host $line -ForegroundColor $colors.Critical
+            }
+            elseif ($line -match "WARNING|ALERT|SUSPICIOUS") {
+                Write-Host $line -ForegroundColor $colors.High
+            }
+            elseif ($line -match "SUCCESS|PASS") {
+                Write-Host $line -ForegroundColor $colors.Low
+            }
+            else {
+                Write-Host $line -ForegroundColor $colors.Data
+            }
+        }
+        
+        # Navigation
+        Write-Host ""
+        Write-Host ("-" * 80) -ForegroundColor $colors.Menu
+        Write-Host "Page $($currentPage + 1) of $totalPages | Showing items $($startIdx + 1)-$endIdx of $($Content.Count)" -ForegroundColor $colors.Info
+        Write-Host "[N]ext [P]revious [F]irst [L]ast [Q]uit: " -NoNewline -ForegroundColor $colors.Menu
+        
+        $key = Read-Host
+        
+        switch ($key.ToUpper()) {
+            "N" { if ($currentPage -lt $totalPages - 1) { $currentPage++ } }
+            "P" { if ($currentPage -gt 0) { $currentPage-- } }
+            "F" { $currentPage = 0 }
+            "L" { $currentPage = $totalPages - 1 }
+            "Q" { return }
+        }
+    }
+}
+
+# Main menu for incident data
+function Show-IncidentMenu {
+    param([string]$IncidentPath)
+    
+    while ($true) {
+        Show-Header "INCIDENT DATA BROWSER"
+        
+        # Display incident info
+        $incidentName = Split-Path $IncidentPath -Leaf
+        Write-Host "Incident: $incidentName" -ForegroundColor $colors.Info
+        Write-Host "Path: $IncidentPath" -ForegroundColor $colors.Data
+        
+        # Get summary info if available
+        $summaryPath = Join-Path $IncidentPath "SUMMARY.txt"
+        if (Test-Path $summaryPath) {
+            $summaryLines = Get-Content $summaryPath | Select-String "THREAT LEVEL:|TOTAL ALERTS:"
+            foreach ($line in $summaryLines) {
+                if ($line -match "THREAT LEVEL:") {
+                    $level = $line.Line.Split(":")[1].Trim()
+                    $color = switch ($level) {
+                        "CRITICAL" { $colors.Critical }
+                        "HIGH" { $colors.High }
+                        "MEDIUM" { $colors.Medium }
+                        "LOW" { $colors.Low }
+                        default { $colors.Data }
+                    }
+                    Write-Host $line.Line -ForegroundColor $color
+                }
+                else {
+                    Write-Host $line.Line -ForegroundColor $colors.Info
+                }
+            }
+        }
+        
+        Write-Host ""
+        Write-Host "MAIN MENU" -ForegroundColor $colors.Header
+        Write-Host "1. View Summary" -ForegroundColor $colors.Menu
+        Write-Host "2. View Alerts" -ForegroundColor $colors.Menu
+        Write-Host "3. Network Data" -ForegroundColor $colors.Menu
+        Write-Host "4. Process Data" -ForegroundColor $colors.Menu
+        Write-Host "5. Persistence Data" -ForegroundColor $colors.Menu
+        Write-Host "6. System Information" -ForegroundColor $colors.Menu
+        Write-Host "7. Event Logs" -ForegroundColor $colors.Menu
+        Write-Host "8. Browse All Files" -ForegroundColor $colors.Menu
+        Write-Host "9. Export All to Text" -ForegroundColor $colors.Menu
+        Write-Host "Q. Back to Directory Selection" -ForegroundColor $colors.Menu
+        Write-Host ""
+        
+        $choice = Read-Host "Select option"
+        
+        switch ($choice) {
+            "1" { Show-Summary -IncidentPath $IncidentPath }
+            "2" { Show-Alerts -IncidentPath $IncidentPath }
+            "3" { Show-NetworkData -IncidentPath $IncidentPath }
+            "4" { Show-ProcessData -IncidentPath $IncidentPath }
+            "5" { Show-PersistenceData -IncidentPath $IncidentPath }
+            "6" { Show-SystemInfo -IncidentPath $IncidentPath }
+            "7" { Show-EventLogs -IncidentPath $IncidentPath }
+            "8" { Browse-Files -IncidentPath $IncidentPath }
+            "9" { Export-AllData -IncidentPath $IncidentPath }
+            "Q" { return }
+            "q" { return }
+        }
+    }
+}
+
+# Show summary
+function Show-Summary {
+    param([string]$IncidentPath)
+    
+    $summaryFile = Join-Path $IncidentPath "SUMMARY.txt"
+    if (Test-Path $summaryFile) {
+        $content = Get-Content $summaryFile
+        Show-PagedContent -Content $content -Title "INCIDENT SUMMARY"
+    }
+    else {
+        Write-Host "Summary file not found" -ForegroundColor $colors.Critical
+        Read-Host "Press Enter to continue"
+    }
+}
+
+# Show alerts
+function Show-Alerts {
+    param([string]$IncidentPath)
+    
+    $alertsPath = Join-Path $IncidentPath "ALERTS"
+    if (!(Test-Path $alertsPath)) {
+        Write-Host "No alerts directory found" -ForegroundColor $colors.Info
+        Read-Host "Press Enter to continue"
+        return
+    }
+    
+    while ($true) {
+        Show-Header "ALERTS"
+        
+        $files = Get-ChildItem $alertsPath -File | Sort-Object Name
+        if ($files.Count -eq 0) {
+            Write-Host "No alert files found" -ForegroundColor $colors.Info
+            Read-Host "Press Enter to continue"
+            return
+        }
+        
+        Write-Host "Alert Files:" -ForegroundColor $colors.Header
+        for ($i = 0; $i -lt $files.Count; $i++) {
+            Write-Host ("{0,3}. {1}" -f ($i + 1), $files[$i].Name) -ForegroundColor $colors.High
+        }
+        
+        Write-Host ""
+        Write-Host "Enter file number to view or Q to go back: " -NoNewline
+        $choice = Read-Host
+        
+        if ($choice -match '^[Qq]') { return }
+        
+        if ($choice -match '^\d+$') {
+            $index = [int]$choice - 1
+            if ($index -ge 0 -and $index -lt $files.Count) {
+                $content = Show-FileContent -FilePath $files[$index].FullName
+                Show-PagedContent -Content $content -Title "ALERT: $($files[$index].Name)"
+            }
+        }
+    }
+}
+
+# Show network data
+function Show-NetworkData {
+    param([string]$IncidentPath)
+    
+    $networkPath = Join-Path $IncidentPath "Network"
+    if (!(Test-Path $networkPath)) {
+        Write-Host "No network data found" -ForegroundColor $colors.Info
+        Read-Host "Press Enter to continue"
+        return
+    }
+    
+    while ($true) {
+        Show-Header "NETWORK DATA"
+        
+        $files = Get-ChildItem $networkPath -File | Sort-Object Name
+        
+        Write-Host "Network Files:" -ForegroundColor $colors.Header
+        for ($i = 0; $i -lt $files.Count; $i++) {
+            Write-Host ("{0,3}. {1}" -f ($i + 1), $files[$i].Name) -ForegroundColor $colors.Menu
+        }
+        
+        Write-Host ""
+        Write-Host "Enter file number to view or Q to go back: " -NoNewline
+        $choice = Read-Host
+        
+        if ($choice -match '^[Qq]') { return }
+        
+        if ($choice -match '^\d+$') {
+            $index = [int]$choice - 1
+            if ($index -ge 0 -and $index -lt $files.Count) {
+                $content = Show-FileContent -FilePath $files[$index].FullName
+                Show-PagedContent -Content $content -Title "NETWORK: $($files[$index].Name)"
+            }
+        }
+    }
+}
+
+# Show process data
+function Show-ProcessData {
+    param([string]$IncidentPath)
+    
+    $processPath = Join-Path $IncidentPath "Processes"
+    $files = @()
+    
+    # Check both Processes folder and ALERTS for process files
+    if (Test-Path $processPath) {
+        $files += Get-ChildItem $processPath -File
+    }
+    
+    $alertsPath = Join-Path $IncidentPath "ALERTS"
+    if (Test-Path $alertsPath) {
+        $files += Get-ChildItem $alertsPath -Filter "*process*" -File
+        $files += Get-ChildItem $alertsPath -Filter "*pid*" -File
+    }
+    
+    if ($files.Count -eq 0) {
+        Write-Host "No process data found" -ForegroundColor $colors.Info
+        Read-Host "Press Enter to continue"
+        return
+    }
+    
+    while ($true) {
+        Show-Header "PROCESS DATA"
+        
+        Write-Host "Process Files:" -ForegroundColor $colors.Header
+        for ($i = 0; $i -lt $files.Count; $i++) {
+            $color = if ($files[$i].DirectoryName -match "ALERTS") { $colors.High } else { $colors.Menu }
+            Write-Host ("{0,3}. {1}" -f ($i + 1), $files[$i].Name) -ForegroundColor $color
+        }
+        
+        Write-Host ""
+        Write-Host "Enter file number to view or Q to go back: " -NoNewline
+        $choice = Read-Host
+        
+        if ($choice -match '^[Qq]') { return }
+        
+        if ($choice -match '^\d+$') {
+            $index = [int]$choice - 1
+            if ($index -ge 0 -and $index -lt $files.Count) {
+                $content = Show-FileContent -FilePath $files[$index].FullName
+                Show-PagedContent -Content $content -Title "PROCESS: $($files[$index].Name)"
+            }
+        }
+    }
+}
+
+# Show persistence data
+function Show-PersistenceData {
+    param([string]$IncidentPath)
+    
+    $persistPath = Join-Path $IncidentPath "Persistence"
+    $files = @()
+    
+    if (Test-Path $persistPath) {
+        $files += Get-ChildItem $persistPath -File
+    }
+    
+    # Also check ALERTS for persistence files
+    $alertsPath = Join-Path $IncidentPath "ALERTS"
+    if (Test-Path $alertsPath) {
+        $files += Get-ChildItem $alertsPath -Filter "*autorun*" -File
+        $files += Get-ChildItem $alertsPath -Filter "*service*" -File
+        $files += Get-ChildItem $alertsPath -Filter "*task*" -File
+    }
+    
+    if ($files.Count -eq 0) {
+        Write-Host "No persistence data found" -ForegroundColor $colors.Info
+        Read-Host "Press Enter to continue"
+        return
+    }
+    
+    while ($true) {
+        Show-Header "PERSISTENCE DATA"
+        
+        Write-Host "Persistence Files:" -ForegroundColor $colors.Header
+        for ($i = 0; $i -lt $files.Count; $i++) {
+            $color = if ($files[$i].DirectoryName -match "ALERTS") { $colors.High } else { $colors.Menu }
+            Write-Host ("{0,3}. {1}" -f ($i + 1), $files[$i].Name) -ForegroundColor $color
+        }
+        
+        Write-Host ""
+        Write-Host "Enter file number to view or Q to go back: " -NoNewline
+        $choice = Read-Host
+        
+        if ($choice -match '^[Qq]') { return }
+        
+        if ($choice -match '^\d+$') {
+            $index = [int]$choice - 1
+            if ($index -ge 0 -and $index -lt $files.Count) {
+                $content = Show-FileContent -FilePath $files[$index].FullName
+                Show-PagedContent -Content $content -Title "PERSISTENCE: $($files[$index].Name)"
+            }
+        }
+    }
+}
+
+# Show system info
+function Show-SystemInfo {
+    param([string]$IncidentPath)
+    
+    $systemPath = Join-Path $IncidentPath "System"
+    if (!(Test-Path $systemPath)) {
+        Write-Host "No system data found" -ForegroundColor $colors.Info
+        Read-Host "Press Enter to continue"
+        return
+    }
+    
+    while ($true) {
+        Show-Header "SYSTEM INFORMATION"
+        
+        $files = Get-ChildItem $systemPath -File | Sort-Object Name
+        
+        Write-Host "System Files:" -ForegroundColor $colors.Header
+        for ($i = 0; $i -lt $files.Count; $i++) {
+            Write-Host ("{0,3}. {1}" -f ($i + 1), $files[$i].Name) -ForegroundColor $colors.Menu
+        }
+        
+        Write-Host ""
+        Write-Host "Enter file number to view or Q to go back: " -NoNewline
+        $choice = Read-Host
+        
+        if ($choice -match '^[Qq]') { return }
+        
+        if ($choice -match '^\d+$') {
+            $index = [int]$choice - 1
+            if ($index -ge 0 -and $index -lt $files.Count) {
+                $content = Show-FileContent -FilePath $files[$index].FullName
+                Show-PagedContent -Content $content -Title "SYSTEM: $($files[$index].Name)"
+            }
+        }
+    }
+}
+
+# Show event logs
+function Show-EventLogs {
+    param([string]$IncidentPath)
+    
+    $logsPath = Join-Path $IncidentPath "Logs"
+    if (!(Test-Path $logsPath)) {
+        Write-Host "No event logs found" -ForegroundColor $colors.Info
+        Read-Host "Press Enter to continue"
+        return
+    }
+    
+    while ($true) {
+        Show-Header "EVENT LOGS"
+        
+        $files = Get-ChildItem $logsPath -File | Sort-Object Name
+        
+        Write-Host "Event Log Files:" -ForegroundColor $colors.Header
+        Write-Host "(Note: .evtx files can only be parsed on Windows systems)" -ForegroundColor $colors.Data
+        Write-Host ""
+        
+        for ($i = 0; $i -lt $files.Count; $i++) {
+            $color = if ($files[$i].Extension -eq ".evtx") { $colors.High } else { $colors.Menu }
+            Write-Host ("{0,3}. {1} ({2:N2} MB)" -f ($i + 1), $files[$i].Name, ($files[$i].Length/1MB)) -ForegroundColor $color
+        }
+        
+        Write-Host ""
+        Write-Host "Enter file number to view or Q to go back: " -NoNewline
+        $choice = Read-Host
+        
+        if ($choice -match '^[Qq]') { return }
+        
+        if ($choice -match '^\d+$') {
+            $index = [int]$choice - 1
+            if ($index -ge 0 -and $index -lt $files.Count) {
+                $content = Show-FileContent -FilePath $files[$index].FullName
+                Show-PagedContent -Content $content -Title "LOG: $($files[$index].Name)"
+            }
+        }
+    }
+}
+
+# Browse all files
+function Browse-Files {
+    param([string]$IncidentPath)
+    
+    Show-Header "FILE BROWSER"
+    
+    Write-Host "Building file list..." -ForegroundColor $colors.Info
+    $allFiles = Get-ChildItem $IncidentPath -Recurse -File | Sort-Object DirectoryName, Name
+    
+    $fileList = @()
+    $currentDir = ""
+    
+    foreach ($file in $allFiles) {
+        $relPath = $file.DirectoryName.Replace($IncidentPath, "").TrimStart("\")
+        
+        if ($relPath -ne $currentDir) {
+            $fileList += ""
+            $fileList += "[$relPath]"
+            $currentDir = $relPath
+        }
+        
+        $fileList += "  $($file.Name) ($([Math]::Round($file.Length/1KB, 2)) KB)"
+    }
+    
+    Show-PagedContent -Content $fileList -Title "ALL FILES ($($allFiles.Count) total)"
+}
+
+# Export all data to text
+function Export-AllData {
+    param([string]$IncidentPath)
+    
+    Show-Header "EXPORT ALL DATA"
+    
+    Write-Host "This will export all data to a single text file." -ForegroundColor $colors.Info
+    $confirm = Read-Host "Continue? (Y/N)"
+    
+    if ($confirm -ne 'Y' -and $confirm -ne 'y') { return }
+    
+    $exportFile = Join-Path $IncidentPath "Export_$(Get-Date -Format 'yyyyMMdd_HHmmss').txt"
+    $output = @()
+    
+    # Header
+    $output += "="*80
+    $output += "INCIDENT RESPONSE DATA EXPORT"
+    $output += "="*80
+    $output += "Generated: $(Get-Date)"
+    $output += "Incident: $(Split-Path $IncidentPath -Leaf)"
+    $output += "Path: $IncidentPath"
+    $output += "="*80
+    $output += ""
+    
+    Write-Host "Exporting data..." -ForegroundColor $colors.Info
+    
+    # Process each directory
+    $directories = @(
+        @{Name="SUMMARY"; Path="SUMMARY.txt"; Type="File"},
+        @{Name="ALERTS"; Path="ALERTS"; Type="Directory"},
+        @{Name="NETWORK"; Path="Network"; Type="Directory"},
+        @{Name="PROCESSES"; Path="Processes"; Type="Directory"},
+        @{Name="PERSISTENCE"; Path="Persistence"; Type="Directory"},
+        @{Name="SYSTEM"; Path="System"; Type="Directory"},
+        @{Name="LOGS"; Path="Logs"; Type="Directory"}
+    )
+    
+    foreach ($dir in $directories) {
+        Write-Host "  Exporting $($dir.Name)..." -ForegroundColor $colors.Data
+        
+        $fullPath = Join-Path $IncidentPath $dir.Path
+        
+        if (Test-Path $fullPath) {
+            $output += ""
+            $output += "="*80
+            $output += $dir.Name
+            $output += "="*80
+            
+            if ($dir.Type -eq "File") {
+                $output += Get-Content $fullPath
+            }
+            else {
+                $files = Get-ChildItem $fullPath -File | Sort-Object Name
+                foreach ($file in $files) {
+                    $output += ""
+                    $output += "-"*60
+                    $output += "FILE: $($file.Name)"
+                    $output += "-"*60
+                    
+                    $content = Show-FileContent -FilePath $file.FullName
+                    $output += $content
+                }
+            }
+        }
+    }
+    
+    # Save export
+    $output | Out-File $exportFile -Encoding UTF8
+    
+    Write-Host ""
+    Write-Host "Export complete!" -ForegroundColor $colors.Low
+    Write-Host "File saved to: $exportFile" -ForegroundColor $colors.Info
+    Write-Host "Size: $([Math]::Round((Get-Item $exportFile).Length/1MB, 2)) MB" -ForegroundColor $colors.Data
+    Write-Host ""
+    
+    $open = Read-Host "Open file now? (Y/N)"
+    if ($open -eq 'Y' -or $open -eq 'y') {
+        notepad.exe $exportFile
+    }
+    
+    Read-Host "Press Enter to continue"
+}
+
+# Main execution
+Show-Header
+
+Write-Host "This viewer displays data collected by the Incident Response Triage Script" -ForegroundColor $colors.Info
+Write-Host "No live data collection will be performed" -ForegroundColor $colors.Info
+Write-Host ""
+
+# Main loop
+while ($true) {
+    $incidentPath = $Path
+    
+    if (!$incidentPath -or !(Test-Path $incidentPath)) {
+        $incidentPath = Select-IncidentDirectory
+    }
+    
+    if (!$incidentPath) {
+        Write-Host "Exiting..." -ForegroundColor $colors.Info
+        break
+    }
+    
+    Show-IncidentMenu -IncidentPath $incidentPath
+    
+    # Reset path to show selection menu again
+    $Path = ""
+}
+
+Write-Host ""
+Write-Host "Thank you for using IR Data Viewer" -ForegroundColor $colors.Info) {
+                    $pageNum = [int]$goto - 1
+                    if ($pageNum -ge 0 -and $pageNum -lt $totalPages) {
+                        $currentPage = $pageNum
+                    }
+                }
+            }
+            "S" {
+                $searchTerm = Read-Host "Enter search term"
+                if ($searchTerm) {
+                    Write-Host "Searching..." -ForegroundColor $colors.Info
+                    $matches = @()
+                    for ($i = 0; $i -lt $Content.Count; $i++) {
+                        if ($Content[$i] -match [regex]::Escape($searchTerm)) {
+                            $matches += "Line $($i+1): $($Content[$i])"
+                        }
+                    }
+                    if ($matches.Count -gt 0) {
+                        Write-Host "Found $($matches.Count) matches" -ForegroundColor $colors.Info
+                        Read-Host "Press Enter to view"
+                        Show-PagedContent -Content $matches -Title "Search Results: '$searchTerm'"
+                    } else {
+                        Write-Host "No matches found" -ForegroundColor $colors.High
+                        Start-Sleep -Seconds 2
+                    }
+                }
+            }
+            "E" {
+                $exportPath = Join-Path ([System.IO.Path]::GetTempPath()) "IR_Export_$(Get-Date -Format 'yyyyMMdd_HHmmss').txt"
+                $Content | Out-File $exportPath -Encoding UTF8
+                Write-Host "Exported to: $exportPath" -ForegroundColor $colors.Low
+                Start-Sleep -Seconds 2
+            }
+            "Q" { return }
+        }
+    }
+}
+
+# Main menu for incident data
+function Show-IncidentMenu {
+    param([string]$IncidentPath)
+    
+    while ($true) {
+        Show-Header "INCIDENT DATA BROWSER"
+        
+        # Display incident info
+        $incidentName = Split-Path $IncidentPath -Leaf
+        Write-Host "Incident: $incidentName" -ForegroundColor $colors.Info
+        Write-Host "Path: $IncidentPath" -ForegroundColor $colors.Data
+        
+        # Get summary info if available
+        $summaryPath = Join-Path $IncidentPath "SUMMARY.txt"
+        if (Test-Path $summaryPath) {
+            $summaryLines = Get-Content $summaryPath | Select-String "THREAT LEVEL:|TOTAL ALERTS:"
+            foreach ($line in $summaryLines) {
+                if ($line -match "THREAT LEVEL:") {
+                    $level = $line.Line.Split(":")[1].Trim()
+                    $color = switch ($level) {
+                        "CRITICAL" { $colors.Critical }
+                        "HIGH" { $colors.High }
+                        "MEDIUM" { $colors.Medium }
+                        "LOW" { $colors.Low }
+                        default { $colors.Data }
+                    }
+                    Write-Host $line.Line -ForegroundColor $color
+                }
+                else {
+                    Write-Host $line.Line -ForegroundColor $colors.Info
+                }
+            }
+        }
+        
+        Write-Host ""
+        Write-Host "MAIN MENU" -ForegroundColor $colors.Header
+        Write-Host "1. View Summary" -ForegroundColor $colors.Menu
+        Write-Host "2. View Alerts" -ForegroundColor $colors.Menu
+        Write-Host "3. Network Data" -ForegroundColor $colors.Menu
+        Write-Host "4. Process Data" -ForegroundColor $colors.Menu
+        Write-Host "5. Persistence Data" -ForegroundColor $colors.Menu
+        Write-Host "6. System Information" -ForegroundColor $colors.Menu
+        Write-Host "7. Event Logs" -ForegroundColor $colors.Menu
+        Write-Host "8. Browse All Files" -ForegroundColor $colors.Menu
+        Write-Host "9. Export All to Text" -ForegroundColor $colors.Menu
+        Write-Host "Q. Back to Directory Selection" -ForegroundColor $colors.Menu
+        Write-Host ""
+        
+        $choice = Read-Host "Select option"
+        
+        switch ($choice) {
+            "1" { Show-Summary -IncidentPath $IncidentPath }
+            "2" { Show-Alerts -IncidentPath $IncidentPath }
+            "3" { Show-NetworkData -IncidentPath $IncidentPath }
+            "4" { Show-ProcessData -IncidentPath $IncidentPath }
+            "5" { Show-PersistenceData -IncidentPath $IncidentPath }
+            "6" { Show-SystemInfo -IncidentPath $IncidentPath }
+            "7" { Show-EventLogs -IncidentPath $IncidentPath }
+            "8" { Browse-Files -IncidentPath $IncidentPath }
+            "9" { Export-AllData -IncidentPath $IncidentPath }
+            "Q" { return }
+            "q" { return }
+        }
+    }
+}
+
+# Show summary
+function Show-Summary {
+    param([string]$IncidentPath)
+    
+    $summaryFile = Join-Path $IncidentPath "SUMMARY.txt"
+    if (Test-Path $summaryFile) {
+        $content = Get-Content $summaryFile
+        Show-PagedContent -Content $content -Title "INCIDENT SUMMARY"
+    }
+    else {
+        Write-Host "Summary file not found" -ForegroundColor $colors.Critical
+        Read-Host "Press Enter to continue"
+    }
+}
+
+# Show alerts
+function Show-Alerts {
+    param([string]$IncidentPath)
+    
+    $alertsPath = Join-Path $IncidentPath "ALERTS"
+    if (!(Test-Path $alertsPath)) {
+        Write-Host "No alerts directory found" -ForegroundColor $colors.Info
+        Read-Host "Press Enter to continue"
+        return
+    }
+    
+    while ($true) {
+        Show-Header "ALERTS"
+        
+        $files = Get-ChildItem $alertsPath -File | Sort-Object Name
+        if ($files.Count -eq 0) {
+            Write-Host "No alert files found" -ForegroundColor $colors.Info
+            Read-Host "Press Enter to continue"
+            return
+        }
+        
+        Write-Host "Alert Files:" -ForegroundColor $colors.Header
+        for ($i = 0; $i -lt $files.Count; $i++) {
+            Write-Host ("{0,3}. {1}" -f ($i + 1), $files[$i].Name) -ForegroundColor $colors.High
+        }
+        
+        Write-Host ""
+        Write-Host "Enter file number to view or Q to go back: " -NoNewline
+        $choice = Read-Host
+        
+        if ($choice -match '^[Qq]') { return }
+        
+        if ($choice -match '^\d+$') {
+            $index = [int]$choice - 1
+            if ($index -ge 0 -and $index -lt $files.Count) {
+                $content = Show-FileContent -FilePath $files[$index].FullName
+                Show-PagedContent -Content $content -Title "ALERT: $($files[$index].Name)"
+            }
+        }
+    }
+}
+
+# Show network data
+function Show-NetworkData {
+    param([string]$IncidentPath)
+    
+    $networkPath = Join-Path $IncidentPath "Network"
+    if (!(Test-Path $networkPath)) {
+        Write-Host "No network data found" -ForegroundColor $colors.Info
+        Read-Host "Press Enter to continue"
+        return
+    }
+    
+    while ($true) {
+        Show-Header "NETWORK DATA"
+        
+        $files = Get-ChildItem $networkPath -File | Sort-Object Name
+        
+        Write-Host "Network Files:" -ForegroundColor $colors.Header
+        for ($i = 0; $i -lt $files.Count; $i++) {
+            Write-Host ("{0,3}. {1}" -f ($i + 1), $files[$i].Name) -ForegroundColor $colors.Menu
+        }
+        
+        Write-Host ""
+        Write-Host "Enter file number to view or Q to go back: " -NoNewline
+        $choice = Read-Host
+        
+        if ($choice -match '^[Qq]') { return }
+        
+        if ($choice -match '^\d+$') {
+            $index = [int]$choice - 1
+            if ($index -ge 0 -and $index -lt $files.Count) {
+                $content = Show-FileContent -FilePath $files[$index].FullName
+                Show-PagedContent -Content $content -Title "NETWORK: $($files[$index].Name)"
+            }
+        }
+    }
+}
+
+# Show process data
+function Show-ProcessData {
+    param([string]$IncidentPath)
+    
+    $processPath = Join-Path $IncidentPath "Processes"
+    $files = @()
+    
+    # Check both Processes folder and ALERTS for process files
+    if (Test-Path $processPath) {
+        $files += Get-ChildItem $processPath -File
+    }
+    
+    $alertsPath = Join-Path $IncidentPath "ALERTS"
+    if (Test-Path $alertsPath) {
+        $files += Get-ChildItem $alertsPath -Filter "*process*" -File
+        $files += Get-ChildItem $alertsPath -Filter "*pid*" -File
+    }
+    
+    if ($files.Count -eq 0) {
+        Write-Host "No process data found" -ForegroundColor $colors.Info
+        Read-Host "Press Enter to continue"
+        return
+    }
+    
+    while ($true) {
+        Show-Header "PROCESS DATA"
+        
+        Write-Host "Process Files:" -ForegroundColor $colors.Header
+        for ($i = 0; $i -lt $files.Count; $i++) {
+            $color = if ($files[$i].DirectoryName -match "ALERTS") { $colors.High } else { $colors.Menu }
+            Write-Host ("{0,3}. {1}" -f ($i + 1), $files[$i].Name) -ForegroundColor $color
+        }
+        
+        Write-Host ""
+        Write-Host "Enter file number to view or Q to go back: " -NoNewline
+        $choice = Read-Host
+        
+        if ($choice -match '^[Qq]') { return }
+        
+        if ($choice -match '^\d+$') {
+            $index = [int]$choice - 1
+            if ($index -ge 0 -and $index -lt $files.Count) {
+                $content = Show-FileContent -FilePath $files[$index].FullName
+                Show-PagedContent -Content $content -Title "PROCESS: $($files[$index].Name)"
+            }
+        }
+    }
+}
+
+# Show persistence data
+function Show-PersistenceData {
+    param([string]$IncidentPath)
+    
+    $persistPath = Join-Path $IncidentPath "Persistence"
+    $files = @()
+    
+    if (Test-Path $persistPath) {
+        $files += Get-ChildItem $persistPath -File
+    }
+    
+    # Also check ALERTS for persistence files
+    $alertsPath = Join-Path $IncidentPath "ALERTS"
+    if (Test-Path $alertsPath) {
+        $files += Get-ChildItem $alertsPath -Filter "*autorun*" -File
+        $files += Get-ChildItem $alertsPath -Filter "*service*" -File
+        $files += Get-ChildItem $alertsPath -Filter "*task*" -File
+    }
+    
+    if ($files.Count -eq 0) {
+        Write-Host "No persistence data found" -ForegroundColor $colors.Info
+        Read-Host "Press Enter to continue"
+        return
+    }
+    
+    while ($true) {
+        Show-Header "PERSISTENCE DATA"
+        
+        Write-Host "Persistence Files:" -ForegroundColor $colors.Header
+        for ($i = 0; $i -lt $files.Count; $i++) {
+            $color = if ($files[$i].DirectoryName -match "ALERTS") { $colors.High } else { $colors.Menu }
+            Write-Host ("{0,3}. {1}" -f ($i + 1), $files[$i].Name) -ForegroundColor $color
+        }
+        
+        Write-Host ""
+        Write-Host "Enter file number to view or Q to go back: " -NoNewline
+        $choice = Read-Host
+        
+        if ($choice -match '^[Qq]') { return }
+        
+        if ($choice -match '^\d+$') {
+            $index = [int]$choice - 1
+            if ($index -ge 0 -and $index -lt $files.Count) {
+                $content = Show-FileContent -FilePath $files[$index].FullName
+                Show-PagedContent -Content $content -Title "PERSISTENCE: $($files[$index].Name)"
+            }
+        }
+    }
+}
+
+# Show system info
+function Show-SystemInfo {
+    param([string]$IncidentPath)
+    
+    $systemPath = Join-Path $IncidentPath "System"
+    if (!(Test-Path $systemPath)) {
+        Write-Host "No system data found" -ForegroundColor $colors.Info
+        Read-Host "Press Enter to continue"
+        return
+    }
+    
+    while ($true) {
+        Show-Header "SYSTEM INFORMATION"
+        
+        $files = Get-ChildItem $systemPath -File | Sort-Object Name
+        
+        Write-Host "System Files:" -ForegroundColor $colors.Header
+        for ($i = 0; $i -lt $files.Count; $i++) {
+            Write-Host ("{0,3}. {1}" -f ($i + 1), $files[$i].Name) -ForegroundColor $colors.Menu
+        }
+        
+        Write-Host ""
+        Write-Host "Enter file number to view or Q to go back: " -NoNewline
+        $choice = Read-Host
+        
+        if ($choice -match '^[Qq]') { return }
+        
+        if ($choice -match '^\d+$') {
+            $index = [int]$choice - 1
+            if ($index -ge 0 -and $index -lt $files.Count) {
+                $content = Show-FileContent -FilePath $files[$index].FullName
+                Show-PagedContent -Content $content -Title "SYSTEM: $($files[$index].Name)"
+            }
+        }
+    }
+}
+
+# Show event logs
+function Show-EventLogs {
+    param([string]$IncidentPath)
+    
+    $logsPath = Join-Path $IncidentPath "Logs"
+    if (!(Test-Path $logsPath)) {
+        Write-Host "No event logs found" -ForegroundColor $colors.Info
+        Read-Host "Press Enter to continue"
+        return
+    }
+    
+    while ($true) {
+        Show-Header "EVENT LOGS"
+        
+        $files = Get-ChildItem $logsPath -File | Sort-Object Name
+        
+        Write-Host "Event Log Files:" -ForegroundColor $colors.Header
+        Write-Host "(Note: .evtx files can only be parsed on Windows systems)" -ForegroundColor $colors.Data
+        Write-Host ""
+        
+        for ($i = 0; $i -lt $files.Count; $i++) {
+            $color = if ($files[$i].Extension -eq ".evtx") { $colors.High } else { $colors.Menu }
+            Write-Host ("{0,3}. {1} ({2:N2} MB)" -f ($i + 1), $files[$i].Name, ($files[$i].Length/1MB)) -ForegroundColor $color
+        }
+        
+        Write-Host ""
+        Write-Host "Enter file number to view or Q to go back: " -NoNewline
+        $choice = Read-Host
+        
+        if ($choice -match '^[Qq]') { return }
+        
+        if ($choice -match '^\d+$') {
+            $index = [int]$choice - 1
+            if ($index -ge 0 -and $index -lt $files.Count) {
+                $content = Show-FileContent -FilePath $files[$index].FullName
+                Show-PagedContent -Content $content -Title "LOG: $($files[$index].Name)"
+            }
+        }
+    }
+}
+
+# Browse all files
+function Browse-Files {
+    param([string]$IncidentPath)
+    
+    Show-Header "FILE BROWSER"
+    
+    Write-Host "Building file list..." -ForegroundColor $colors.Info
+    $allFiles = Get-ChildItem $IncidentPath -Recurse -File | Sort-Object DirectoryName, Name
+    
+    $fileList = @()
+    $currentDir = ""
+    
+    foreach ($file in $allFiles) {
+        $relPath = $file.DirectoryName.Replace($IncidentPath, "").TrimStart("\")
+        
+        if ($relPath -ne $currentDir) {
+            $fileList += ""
+            $fileList += "[$relPath]"
+            $currentDir = $relPath
+        }
+        
+        $fileList += "  $($file.Name) ($([Math]::Round($file.Length/1KB, 2)) KB)"
+    }
+    
+    Show-PagedContent -Content $fileList -Title "ALL FILES ($($allFiles.Count) total)"
+}
+
+# Export all data to text
+function Export-AllData {
+    param([string]$IncidentPath)
+    
+    Show-Header "EXPORT ALL DATA"
+    
+    Write-Host "This will export all data to a single text file." -ForegroundColor $colors.Info
+    $confirm = Read-Host "Continue? (Y/N)"
+    
+    if ($confirm -ne 'Y' -and $confirm -ne 'y') { return }
+    
+    $exportFile = Join-Path $IncidentPath "Export_$(Get-Date -Format 'yyyyMMdd_HHmmss').txt"
+    $output = @()
+    
+    # Header
+    $output += "="*80
+    $output += "INCIDENT RESPONSE DATA EXPORT"
+    $output += "="*80
+    $output += "Generated: $(Get-Date)"
+    $output += "Incident: $(Split-Path $IncidentPath -Leaf)"
+    $output += "Path: $IncidentPath"
+    $output += "="*80
+    $output += ""
+    
+    Write-Host "Exporting data..." -ForegroundColor $colors.Info
+    
+    # Process each directory
+    $directories = @(
+        @{Name="SUMMARY"; Path="SUMMARY.txt"; Type="File"},
+        @{Name="ALERTS"; Path="ALERTS"; Type="Directory"},
+        @{Name="NETWORK"; Path="Network"; Type="Directory"},
+        @{Name="PROCESSES"; Path="Processes"; Type="Directory"},
+        @{Name="PERSISTENCE"; Path="Persistence"; Type="Directory"},
+        @{Name="SYSTEM"; Path="System"; Type="Directory"},
+        @{Name="LOGS"; Path="Logs"; Type="Directory"}
+    )
+    
+    foreach ($dir in $directories) {
+        Write-Host "  Exporting $($dir.Name)..." -ForegroundColor $colors.Data
+        
+        $fullPath = Join-Path $IncidentPath $dir.Path
+        
+        if (Test-Path $fullPath) {
+            $output += ""
+            $output += "="*80
+            $output += $dir.Name
+            $output += "="*80
+            
+            if ($dir.Type -eq "File") {
+                $output += Get-Content $fullPath
+            }
+            else {
+                $files = Get-ChildItem $fullPath -File | Sort-Object Name
+                foreach ($file in $files) {
+                    $output += ""
+                    $output += "-"*60
+                    $output += "FILE: $($file.Name)"
+                    $output += "-"*60
+                    
+                    $content = Show-FileContent -FilePath $file.FullName
+                    $output += $content
+                }
+            }
+        }
+    }
+    
+    # Save export
+    $output | Out-File $exportFile -Encoding UTF8
+    
+    Write-Host ""
+    Write-Host "Export complete!" -ForegroundColor $colors.Low
+    Write-Host "File saved to: $exportFile" -ForegroundColor $colors.Info
+    Write-Host "Size: $([Math]::Round((Get-Item $exportFile).Length/1MB, 2)) MB" -ForegroundColor $colors.Data
+    Write-Host ""
+    
+    $open = Read-Host "Open file now? (Y/N)"
+    if ($open -eq 'Y' -or $open -eq 'y') {
+        notepad.exe $exportFile
+    }
+    
+    Read-Host "Press Enter to continue"
+}
+
+# Main execution
+Show-Header
+
+Write-Host "This viewer displays data collected by the Incident Response Triage Script" -ForegroundColor $colors.Info
+Write-Host "No live data collection will be performed" -ForegroundColor $colors.Info
+Write-Host ""
+
+# Main loop
+while ($true) {
+    $incidentPath = $Path
+    
+    if (!$incidentPath -or !(Test-Path $incidentPath)) {
+        $incidentPath = Select-IncidentDirectory
+    }
+    
+    if (!$incidentPath) {
+        Write-Host "Exiting..." -ForegroundColor $colors.Info
+        break
+    }
+    
+    Show-IncidentMenu -IncidentPath $incidentPath
+    
+    # Reset path to show selection menu again
+    $Path = ""
+}
+
+Write-Host ""
+Write-Host "Thank you for using IR Data Viewer" -ForegroundColor $colors.Info) {
+                    Get-WinEvent -Path $FilePath -MaxEvents ([int]$maxEvents) -ErrorAction Stop
+                } else {
+                    Get-WinEvent -Path $FilePath -MaxEvents 100 -ErrorAction Stop
+                }
+            }
+            default { Get-WinEvent -Path $FilePath -MaxEvents 100 -ErrorAction Stop }
+        }
+        
+        Write-Host "Processing $($events.Count) events..." -ForegroundColor $colors.Info
+        
+        $output = @()
+        $output += "Event Log: $(Split-Path $FilePath -Leaf)"
+        $output += "Total Events Loaded: $($events.Count)"
+        $output += ("=" * 60)
+        $output += ""
+        
+        # Add filter option
+        Write-Host "Filter events? (Y/N)" -NoNewline -ForegroundColor $colors.Info
+        $filter = Read-Host
+        
+        if ($filter -eq 'Y' -or $filter -eq 'y') {
+            Write-Host "Filter by:" -ForegroundColor $colors.Menu
+            Write-Host "1. Error/Critical only" -ForegroundColor $colors.Menu
+            Write-Host "2. Specific Event ID" -ForegroundColor $colors.Menu
+            Write-Host "3. Time range" -ForegroundColor $colors.Menu
+            Write-Host "4. No filter" -ForegroundColor $colors.Menu
+            
+            $filterChoice = Read-Host "Select filter (1-4)"
+            
+            $events = switch ($filterChoice) {
+                "1" { $events | Where-Object { $_.Level -le 2 } }
+                "2" {
+                    $eventId = Read-Host "Enter Event ID"
+                    if ($eventId -match '^\d+
+
+# Display file content based on type
+function Show-FileContent {
+    param([string]$FilePath)
+    
+    if (!(Test-Path $FilePath)) {
+        return @("File not found: $FilePath")
+    }
+    
+    $extension = [System.IO.Path]::GetExtension($FilePath).ToLower()
+    
+    switch ($extension) {
+        ".csv" { return Show-CsvFile -FilePath $FilePath }
+        ".json" { return Show-JsonFile -FilePath $FilePath }
+        ".evtx" { return Show-EventLog -FilePath $FilePath }
+        ".txt" { return Get-Content $FilePath }
+        ".log" { return Get-Content $FilePath }
+        default { return @("Cannot display file type: $extension") }
+    }
+}
+
+# Paged display
+function Show-PagedContent {
+    param(
+        [array]$Content,
+        [string]$Title
+    )
+    
+    if ($Content.Count -eq 0) {
+        Write-Host "No content to display" -ForegroundColor $colors.Info
+        Read-Host "Press Enter to continue"
+        return
+    }
+    
+    $totalPages = [Math]::Ceiling($Content.Count / $PageSize)
+    $currentPage = 0
+    
+    while ($true) {
+        Show-Header $Title
+        
+        $startIdx = $currentPage * $PageSize
+        $endIdx = [Math]::Min($startIdx + $PageSize, $Content.Count)
+        
+        # Display page content
+        for ($i = $startIdx; $i -lt $endIdx; $i++) {
+            $line = $Content[$i]
+            
+            # Color coding based on content
+            if ($line -match "CRITICAL|ERROR|FAIL") {
+                Write-Host $line -ForegroundColor $colors.Critical
+            }
+            elseif ($line -match "WARNING|ALERT|SUSPICIOUS") {
+                Write-Host $line -ForegroundColor $colors.High
+            }
+            elseif ($line -match "SUCCESS|PASS") {
+                Write-Host $line -ForegroundColor $colors.Low
+            }
+            else {
+                Write-Host $line -ForegroundColor $colors.Data
+            }
+        }
+        
+        # Navigation
+        Write-Host ""
+        Write-Host ("-" * 80) -ForegroundColor $colors.Menu
+        Write-Host "Page $($currentPage + 1) of $totalPages | Showing items $($startIdx + 1)-$endIdx of $($Content.Count)" -ForegroundColor $colors.Info
+        Write-Host "[N]ext [P]revious [F]irst [L]ast [Q]uit: " -NoNewline -ForegroundColor $colors.Menu
+        
+        $key = Read-Host
+        
+        switch ($key.ToUpper()) {
+            "N" { if ($currentPage -lt $totalPages - 1) { $currentPage++ } }
+            "P" { if ($currentPage -gt 0) { $currentPage-- } }
+            "F" { $currentPage = 0 }
+            "L" { $currentPage = $totalPages - 1 }
+            "Q" { return }
+        }
+    }
+}
+
+# Main menu for incident data
+function Show-IncidentMenu {
+    param([string]$IncidentPath)
+    
+    while ($true) {
+        Show-Header "INCIDENT DATA BROWSER"
+        
+        # Display incident info
+        $incidentName = Split-Path $IncidentPath -Leaf
+        Write-Host "Incident: $incidentName" -ForegroundColor $colors.Info
+        Write-Host "Path: $IncidentPath" -ForegroundColor $colors.Data
+        
+        # Get summary info if available
+        $summaryPath = Join-Path $IncidentPath "SUMMARY.txt"
+        if (Test-Path $summaryPath) {
+            $summaryLines = Get-Content $summaryPath | Select-String "THREAT LEVEL:|TOTAL ALERTS:"
+            foreach ($line in $summaryLines) {
+                if ($line -match "THREAT LEVEL:") {
+                    $level = $line.Line.Split(":")[1].Trim()
+                    $color = switch ($level) {
+                        "CRITICAL" { $colors.Critical }
+                        "HIGH" { $colors.High }
+                        "MEDIUM" { $colors.Medium }
+                        "LOW" { $colors.Low }
+                        default { $colors.Data }
+                    }
+                    Write-Host $line.Line -ForegroundColor $color
+                }
+                else {
+                    Write-Host $line.Line -ForegroundColor $colors.Info
+                }
+            }
+        }
+        
+        Write-Host ""
+        Write-Host "MAIN MENU" -ForegroundColor $colors.Header
+        Write-Host "1. View Summary" -ForegroundColor $colors.Menu
+        Write-Host "2. View Alerts" -ForegroundColor $colors.Menu
+        Write-Host "3. Network Data" -ForegroundColor $colors.Menu
+        Write-Host "4. Process Data" -ForegroundColor $colors.Menu
+        Write-Host "5. Persistence Data" -ForegroundColor $colors.Menu
+        Write-Host "6. System Information" -ForegroundColor $colors.Menu
+        Write-Host "7. Event Logs" -ForegroundColor $colors.Menu
+        Write-Host "8. Browse All Files" -ForegroundColor $colors.Menu
+        Write-Host "9. Export All to Text" -ForegroundColor $colors.Menu
+        Write-Host "Q. Back to Directory Selection" -ForegroundColor $colors.Menu
+        Write-Host ""
+        
+        $choice = Read-Host "Select option"
+        
+        switch ($choice) {
+            "1" { Show-Summary -IncidentPath $IncidentPath }
+            "2" { Show-Alerts -IncidentPath $IncidentPath }
+            "3" { Show-NetworkData -IncidentPath $IncidentPath }
+            "4" { Show-ProcessData -IncidentPath $IncidentPath }
+            "5" { Show-PersistenceData -IncidentPath $IncidentPath }
+            "6" { Show-SystemInfo -IncidentPath $IncidentPath }
+            "7" { Show-EventLogs -IncidentPath $IncidentPath }
+            "8" { Browse-Files -IncidentPath $IncidentPath }
+            "9" { Export-AllData -IncidentPath $IncidentPath }
+            "Q" { return }
+            "q" { return }
+        }
+    }
+}
+
+# Show summary
+function Show-Summary {
+    param([string]$IncidentPath)
+    
+    $summaryFile = Join-Path $IncidentPath "SUMMARY.txt"
+    if (Test-Path $summaryFile) {
+        $content = Get-Content $summaryFile
+        Show-PagedContent -Content $content -Title "INCIDENT SUMMARY"
+    }
+    else {
+        Write-Host "Summary file not found" -ForegroundColor $colors.Critical
+        Read-Host "Press Enter to continue"
+    }
+}
+
+# Show alerts
+function Show-Alerts {
+    param([string]$IncidentPath)
+    
+    $alertsPath = Join-Path $IncidentPath "ALERTS"
+    if (!(Test-Path $alertsPath)) {
+        Write-Host "No alerts directory found" -ForegroundColor $colors.Info
+        Read-Host "Press Enter to continue"
+        return
+    }
+    
+    while ($true) {
+        Show-Header "ALERTS"
+        
+        $files = Get-ChildItem $alertsPath -File | Sort-Object Name
+        if ($files.Count -eq 0) {
+            Write-Host "No alert files found" -ForegroundColor $colors.Info
+            Read-Host "Press Enter to continue"
+            return
+        }
+        
+        Write-Host "Alert Files:" -ForegroundColor $colors.Header
+        for ($i = 0; $i -lt $files.Count; $i++) {
+            Write-Host ("{0,3}. {1}" -f ($i + 1), $files[$i].Name) -ForegroundColor $colors.High
+        }
+        
+        Write-Host ""
+        Write-Host "Enter file number to view or Q to go back: " -NoNewline
+        $choice = Read-Host
+        
+        if ($choice -match '^[Qq]') { return }
+        
+        if ($choice -match '^\d+$') {
+            $index = [int]$choice - 1
+            if ($index -ge 0 -and $index -lt $files.Count) {
+                $content = Show-FileContent -FilePath $files[$index].FullName
+                Show-PagedContent -Content $content -Title "ALERT: $($files[$index].Name)"
+            }
+        }
+    }
+}
+
+# Show network data
+function Show-NetworkData {
+    param([string]$IncidentPath)
+    
+    $networkPath = Join-Path $IncidentPath "Network"
+    if (!(Test-Path $networkPath)) {
+        Write-Host "No network data found" -ForegroundColor $colors.Info
+        Read-Host "Press Enter to continue"
+        return
+    }
+    
+    while ($true) {
+        Show-Header "NETWORK DATA"
+        
+        $files = Get-ChildItem $networkPath -File | Sort-Object Name
+        
+        Write-Host "Network Files:" -ForegroundColor $colors.Header
+        for ($i = 0; $i -lt $files.Count; $i++) {
+            Write-Host ("{0,3}. {1}" -f ($i + 1), $files[$i].Name) -ForegroundColor $colors.Menu
+        }
+        
+        Write-Host ""
+        Write-Host "Enter file number to view or Q to go back: " -NoNewline
+        $choice = Read-Host
+        
+        if ($choice -match '^[Qq]') { return }
+        
+        if ($choice -match '^\d+$') {
+            $index = [int]$choice - 1
+            if ($index -ge 0 -and $index -lt $files.Count) {
+                $content = Show-FileContent -FilePath $files[$index].FullName
+                Show-PagedContent -Content $content -Title "NETWORK: $($files[$index].Name)"
+            }
+        }
+    }
+}
+
+# Show process data
+function Show-ProcessData {
+    param([string]$IncidentPath)
+    
+    $processPath = Join-Path $IncidentPath "Processes"
+    $files = @()
+    
+    # Check both Processes folder and ALERTS for process files
+    if (Test-Path $processPath) {
+        $files += Get-ChildItem $processPath -File
+    }
+    
+    $alertsPath = Join-Path $IncidentPath "ALERTS"
+    if (Test-Path $alertsPath) {
+        $files += Get-ChildItem $alertsPath -Filter "*process*" -File
+        $files += Get-ChildItem $alertsPath -Filter "*pid*" -File
+    }
+    
+    if ($files.Count -eq 0) {
+        Write-Host "No process data found" -ForegroundColor $colors.Info
+        Read-Host "Press Enter to continue"
+        return
+    }
+    
+    while ($true) {
+        Show-Header "PROCESS DATA"
+        
+        Write-Host "Process Files:" -ForegroundColor $colors.Header
+        for ($i = 0; $i -lt $files.Count; $i++) {
+            $color = if ($files[$i].DirectoryName -match "ALERTS") { $colors.High } else { $colors.Menu }
+            Write-Host ("{0,3}. {1}" -f ($i + 1), $files[$i].Name) -ForegroundColor $color
+        }
+        
+        Write-Host ""
+        Write-Host "Enter file number to view or Q to go back: " -NoNewline
+        $choice = Read-Host
+        
+        if ($choice -match '^[Qq]') { return }
+        
+        if ($choice -match '^\d+$') {
+            $index = [int]$choice - 1
+            if ($index -ge 0 -and $index -lt $files.Count) {
+                $content = Show-FileContent -FilePath $files[$index].FullName
+                Show-PagedContent -Content $content -Title "PROCESS: $($files[$index].Name)"
+            }
+        }
+    }
+}
+
+# Show persistence data
+function Show-PersistenceData {
+    param([string]$IncidentPath)
+    
+    $persistPath = Join-Path $IncidentPath "Persistence"
+    $files = @()
+    
+    if (Test-Path $persistPath) {
+        $files += Get-ChildItem $persistPath -File
+    }
+    
+    # Also check ALERTS for persistence files
+    $alertsPath = Join-Path $IncidentPath "ALERTS"
+    if (Test-Path $alertsPath) {
+        $files += Get-ChildItem $alertsPath -Filter "*autorun*" -File
+        $files += Get-ChildItem $alertsPath -Filter "*service*" -File
+        $files += Get-ChildItem $alertsPath -Filter "*task*" -File
+    }
+    
+    if ($files.Count -eq 0) {
+        Write-Host "No persistence data found" -ForegroundColor $colors.Info
+        Read-Host "Press Enter to continue"
+        return
+    }
+    
+    while ($true) {
+        Show-Header "PERSISTENCE DATA"
+        
+        Write-Host "Persistence Files:" -ForegroundColor $colors.Header
+        for ($i = 0; $i -lt $files.Count; $i++) {
+            $color = if ($files[$i].DirectoryName -match "ALERTS") { $colors.High } else { $colors.Menu }
+            Write-Host ("{0,3}. {1}" -f ($i + 1), $files[$i].Name) -ForegroundColor $color
+        }
+        
+        Write-Host ""
+        Write-Host "Enter file number to view or Q to go back: " -NoNewline
+        $choice = Read-Host
+        
+        if ($choice -match '^[Qq]') { return }
+        
+        if ($choice -match '^\d+$') {
+            $index = [int]$choice - 1
+            if ($index -ge 0 -and $index -lt $files.Count) {
+                $content = Show-FileContent -FilePath $files[$index].FullName
+                Show-PagedContent -Content $content -Title "PERSISTENCE: $($files[$index].Name)"
+            }
+        }
+    }
+}
+
+# Show system info
+function Show-SystemInfo {
+    param([string]$IncidentPath)
+    
+    $systemPath = Join-Path $IncidentPath "System"
+    if (!(Test-Path $systemPath)) {
+        Write-Host "No system data found" -ForegroundColor $colors.Info
+        Read-Host "Press Enter to continue"
+        return
+    }
+    
+    while ($true) {
+        Show-Header "SYSTEM INFORMATION"
+        
+        $files = Get-ChildItem $systemPath -File | Sort-Object Name
+        
+        Write-Host "System Files:" -ForegroundColor $colors.Header
+        for ($i = 0; $i -lt $files.Count; $i++) {
+            Write-Host ("{0,3}. {1}" -f ($i + 1), $files[$i].Name) -ForegroundColor $colors.Menu
+        }
+        
+        Write-Host ""
+        Write-Host "Enter file number to view or Q to go back: " -NoNewline
+        $choice = Read-Host
+        
+        if ($choice -match '^[Qq]') { return }
+        
+        if ($choice -match '^\d+$') {
+            $index = [int]$choice - 1
+            if ($index -ge 0 -and $index -lt $files.Count) {
+                $content = Show-FileContent -FilePath $files[$index].FullName
+                Show-PagedContent -Content $content -Title "SYSTEM: $($files[$index].Name)"
+            }
+        }
+    }
+}
+
+# Show event logs
+function Show-EventLogs {
+    param([string]$IncidentPath)
+    
+    $logsPath = Join-Path $IncidentPath "Logs"
+    if (!(Test-Path $logsPath)) {
+        Write-Host "No event logs found" -ForegroundColor $colors.Info
+        Read-Host "Press Enter to continue"
+        return
+    }
+    
+    while ($true) {
+        Show-Header "EVENT LOGS"
+        
+        $files = Get-ChildItem $logsPath -File | Sort-Object Name
+        
+        Write-Host "Event Log Files:" -ForegroundColor $colors.Header
+        Write-Host "(Note: .evtx files can only be parsed on Windows systems)" -ForegroundColor $colors.Data
+        Write-Host ""
+        
+        for ($i = 0; $i -lt $files.Count; $i++) {
+            $color = if ($files[$i].Extension -eq ".evtx") { $colors.High } else { $colors.Menu }
+            Write-Host ("{0,3}. {1} ({2:N2} MB)" -f ($i + 1), $files[$i].Name, ($files[$i].Length/1MB)) -ForegroundColor $color
+        }
+        
+        Write-Host ""
+        Write-Host "Enter file number to view or Q to go back: " -NoNewline
+        $choice = Read-Host
+        
+        if ($choice -match '^[Qq]') { return }
+        
+        if ($choice -match '^\d+$') {
+            $index = [int]$choice - 1
+            if ($index -ge 0 -and $index -lt $files.Count) {
+                $content = Show-FileContent -FilePath $files[$index].FullName
+                Show-PagedContent -Content $content -Title "LOG: $($files[$index].Name)"
+            }
+        }
+    }
+}
+
+# Browse all files
+function Browse-Files {
+    param([string]$IncidentPath)
+    
+    Show-Header "FILE BROWSER"
+    
+    Write-Host "Building file list..." -ForegroundColor $colors.Info
+    $allFiles = Get-ChildItem $IncidentPath -Recurse -File | Sort-Object DirectoryName, Name
+    
+    $fileList = @()
+    $currentDir = ""
+    
+    foreach ($file in $allFiles) {
+        $relPath = $file.DirectoryName.Replace($IncidentPath, "").TrimStart("\")
+        
+        if ($relPath -ne $currentDir) {
+            $fileList += ""
+            $fileList += "[$relPath]"
+            $currentDir = $relPath
+        }
+        
+        $fileList += "  $($file.Name) ($([Math]::Round($file.Length/1KB, 2)) KB)"
+    }
+    
+    Show-PagedContent -Content $fileList -Title "ALL FILES ($($allFiles.Count) total)"
+}
+
+# Export all data to text
+function Export-AllData {
+    param([string]$IncidentPath)
+    
+    Show-Header "EXPORT ALL DATA"
+    
+    Write-Host "This will export all data to a single text file." -ForegroundColor $colors.Info
+    $confirm = Read-Host "Continue? (Y/N)"
+    
+    if ($confirm -ne 'Y' -and $confirm -ne 'y') { return }
+    
+    $exportFile = Join-Path $IncidentPath "Export_$(Get-Date -Format 'yyyyMMdd_HHmmss').txt"
+    $output = @()
+    
+    # Header
+    $output += "="*80
+    $output += "INCIDENT RESPONSE DATA EXPORT"
+    $output += "="*80
+    $output += "Generated: $(Get-Date)"
+    $output += "Incident: $(Split-Path $IncidentPath -Leaf)"
+    $output += "Path: $IncidentPath"
+    $output += "="*80
+    $output += ""
+    
+    Write-Host "Exporting data..." -ForegroundColor $colors.Info
+    
+    # Process each directory
+    $directories = @(
+        @{Name="SUMMARY"; Path="SUMMARY.txt"; Type="File"},
+        @{Name="ALERTS"; Path="ALERTS"; Type="Directory"},
+        @{Name="NETWORK"; Path="Network"; Type="Directory"},
+        @{Name="PROCESSES"; Path="Processes"; Type="Directory"},
+        @{Name="PERSISTENCE"; Path="Persistence"; Type="Directory"},
+        @{Name="SYSTEM"; Path="System"; Type="Directory"},
+        @{Name="LOGS"; Path="Logs"; Type="Directory"}
+    )
+    
+    foreach ($dir in $directories) {
+        Write-Host "  Exporting $($dir.Name)..." -ForegroundColor $colors.Data
+        
+        $fullPath = Join-Path $IncidentPath $dir.Path
+        
+        if (Test-Path $fullPath) {
+            $output += ""
+            $output += "="*80
+            $output += $dir.Name
+            $output += "="*80
+            
+            if ($dir.Type -eq "File") {
+                $output += Get-Content $fullPath
+            }
+            else {
+                $files = Get-ChildItem $fullPath -File | Sort-Object Name
+                foreach ($file in $files) {
+                    $output += ""
+                    $output += "-"*60
+                    $output += "FILE: $($file.Name)"
+                    $output += "-"*60
+                    
+                    $content = Show-FileContent -FilePath $file.FullName
+                    $output += $content
+                }
+            }
+        }
+    }
+    
+    # Save export
+    $output | Out-File $exportFile -Encoding UTF8
+    
+    Write-Host ""
+    Write-Host "Export complete!" -ForegroundColor $colors.Low
+    Write-Host "File saved to: $exportFile" -ForegroundColor $colors.Info
+    Write-Host "Size: $([Math]::Round((Get-Item $exportFile).Length/1MB, 2)) MB" -ForegroundColor $colors.Data
+    Write-Host ""
+    
+    $open = Read-Host "Open file now? (Y/N)"
+    if ($open -eq 'Y' -or $open -eq 'y') {
+        notepad.exe $exportFile
+    }
+    
+    Read-Host "Press Enter to continue"
+}
+
+# Main execution
+Show-Header
+
+Write-Host "This viewer displays data collected by the Incident Response Triage Script" -ForegroundColor $colors.Info
+Write-Host "No live data collection will be performed" -ForegroundColor $colors.Info
+Write-Host ""
+
+# Main loop
+while ($true) {
+    $incidentPath = $Path
+    
+    if (!$incidentPath -or !(Test-Path $incidentPath)) {
+        $incidentPath = Select-IncidentDirectory
+    }
+    
+    if (!$incidentPath) {
+        Write-Host "Exiting..." -ForegroundColor $colors.Info
+        break
+    }
+    
+    Show-IncidentMenu -IncidentPath $incidentPath
+    
+    # Reset path to show selection menu again
+    $Path = ""
+}
+
+Write-Host ""
+Write-Host "Thank you for using IR Data Viewer" -ForegroundColor $colors.Info) {
+                        $events | Where-Object { $_.Id -eq [int]$eventId }
+                    } else { $events }
+                }
+                "3" {
+                    $hours = Read-Host "Events from last X hours"
+                    if ($hours -match '^\d+
+
+# Display file content based on type
+function Show-FileContent {
+    param([string]$FilePath)
+    
+    if (!(Test-Path $FilePath)) {
+        return @("File not found: $FilePath")
+    }
+    
+    $extension = [System.IO.Path]::GetExtension($FilePath).ToLower()
+    
+    switch ($extension) {
+        ".csv" { return Show-CsvFile -FilePath $FilePath }
+        ".json" { return Show-JsonFile -FilePath $FilePath }
+        ".evtx" { return Show-EventLog -FilePath $FilePath }
+        ".txt" { return Get-Content $FilePath }
+        ".log" { return Get-Content $FilePath }
+        default { return @("Cannot display file type: $extension") }
+    }
+}
+
+# Paged display
+function Show-PagedContent {
+    param(
+        [array]$Content,
+        [string]$Title
+    )
+    
+    if ($Content.Count -eq 0) {
+        Write-Host "No content to display" -ForegroundColor $colors.Info
+        Read-Host "Press Enter to continue"
+        return
+    }
+    
+    $totalPages = [Math]::Ceiling($Content.Count / $PageSize)
+    $currentPage = 0
+    
+    while ($true) {
+        Show-Header $Title
+        
+        $startIdx = $currentPage * $PageSize
+        $endIdx = [Math]::Min($startIdx + $PageSize, $Content.Count)
+        
+        # Display page content
+        for ($i = $startIdx; $i -lt $endIdx; $i++) {
+            $line = $Content[$i]
+            
+            # Color coding based on content
+            if ($line -match "CRITICAL|ERROR|FAIL") {
+                Write-Host $line -ForegroundColor $colors.Critical
+            }
+            elseif ($line -match "WARNING|ALERT|SUSPICIOUS") {
+                Write-Host $line -ForegroundColor $colors.High
+            }
+            elseif ($line -match "SUCCESS|PASS") {
+                Write-Host $line -ForegroundColor $colors.Low
+            }
+            else {
+                Write-Host $line -ForegroundColor $colors.Data
+            }
+        }
+        
+        # Navigation
+        Write-Host ""
+        Write-Host ("-" * 80) -ForegroundColor $colors.Menu
+        Write-Host "Page $($currentPage + 1) of $totalPages | Showing items $($startIdx + 1)-$endIdx of $($Content.Count)" -ForegroundColor $colors.Info
+        Write-Host "[N]ext [P]revious [F]irst [L]ast [Q]uit: " -NoNewline -ForegroundColor $colors.Menu
+        
+        $key = Read-Host
+        
+        switch ($key.ToUpper()) {
+            "N" { if ($currentPage -lt $totalPages - 1) { $currentPage++ } }
+            "P" { if ($currentPage -gt 0) { $currentPage-- } }
+            "F" { $currentPage = 0 }
+            "L" { $currentPage = $totalPages - 1 }
+            "Q" { return }
+        }
+    }
+}
+
+# Main menu for incident data
+function Show-IncidentMenu {
+    param([string]$IncidentPath)
+    
+    while ($true) {
+        Show-Header "INCIDENT DATA BROWSER"
+        
+        # Display incident info
+        $incidentName = Split-Path $IncidentPath -Leaf
+        Write-Host "Incident: $incidentName" -ForegroundColor $colors.Info
+        Write-Host "Path: $IncidentPath" -ForegroundColor $colors.Data
+        
+        # Get summary info if available
+        $summaryPath = Join-Path $IncidentPath "SUMMARY.txt"
+        if (Test-Path $summaryPath) {
+            $summaryLines = Get-Content $summaryPath | Select-String "THREAT LEVEL:|TOTAL ALERTS:"
+            foreach ($line in $summaryLines) {
+                if ($line -match "THREAT LEVEL:") {
+                    $level = $line.Line.Split(":")[1].Trim()
+                    $color = switch ($level) {
+                        "CRITICAL" { $colors.Critical }
+                        "HIGH" { $colors.High }
+                        "MEDIUM" { $colors.Medium }
+                        "LOW" { $colors.Low }
+                        default { $colors.Data }
+                    }
+                    Write-Host $line.Line -ForegroundColor $color
+                }
+                else {
+                    Write-Host $line.Line -ForegroundColor $colors.Info
+                }
+            }
+        }
+        
+        Write-Host ""
+        Write-Host "MAIN MENU" -ForegroundColor $colors.Header
+        Write-Host "1. View Summary" -ForegroundColor $colors.Menu
+        Write-Host "2. View Alerts" -ForegroundColor $colors.Menu
+        Write-Host "3. Network Data" -ForegroundColor $colors.Menu
+        Write-Host "4. Process Data" -ForegroundColor $colors.Menu
+        Write-Host "5. Persistence Data" -ForegroundColor $colors.Menu
+        Write-Host "6. System Information" -ForegroundColor $colors.Menu
+        Write-Host "7. Event Logs" -ForegroundColor $colors.Menu
+        Write-Host "8. Browse All Files" -ForegroundColor $colors.Menu
+        Write-Host "9. Export All to Text" -ForegroundColor $colors.Menu
+        Write-Host "Q. Back to Directory Selection" -ForegroundColor $colors.Menu
+        Write-Host ""
+        
+        $choice = Read-Host "Select option"
+        
+        switch ($choice) {
+            "1" { Show-Summary -IncidentPath $IncidentPath }
+            "2" { Show-Alerts -IncidentPath $IncidentPath }
+            "3" { Show-NetworkData -IncidentPath $IncidentPath }
+            "4" { Show-ProcessData -IncidentPath $IncidentPath }
+            "5" { Show-PersistenceData -IncidentPath $IncidentPath }
+            "6" { Show-SystemInfo -IncidentPath $IncidentPath }
+            "7" { Show-EventLogs -IncidentPath $IncidentPath }
+            "8" { Browse-Files -IncidentPath $IncidentPath }
+            "9" { Export-AllData -IncidentPath $IncidentPath }
+            "Q" { return }
+            "q" { return }
+        }
+    }
+}
+
+# Show summary
+function Show-Summary {
+    param([string]$IncidentPath)
+    
+    $summaryFile = Join-Path $IncidentPath "SUMMARY.txt"
+    if (Test-Path $summaryFile) {
+        $content = Get-Content $summaryFile
+        Show-PagedContent -Content $content -Title "INCIDENT SUMMARY"
+    }
+    else {
+        Write-Host "Summary file not found" -ForegroundColor $colors.Critical
+        Read-Host "Press Enter to continue"
+    }
+}
+
+# Show alerts
+function Show-Alerts {
+    param([string]$IncidentPath)
+    
+    $alertsPath = Join-Path $IncidentPath "ALERTS"
+    if (!(Test-Path $alertsPath)) {
+        Write-Host "No alerts directory found" -ForegroundColor $colors.Info
+        Read-Host "Press Enter to continue"
+        return
+    }
+    
+    while ($true) {
+        Show-Header "ALERTS"
+        
+        $files = Get-ChildItem $alertsPath -File | Sort-Object Name
+        if ($files.Count -eq 0) {
+            Write-Host "No alert files found" -ForegroundColor $colors.Info
+            Read-Host "Press Enter to continue"
+            return
+        }
+        
+        Write-Host "Alert Files:" -ForegroundColor $colors.Header
+        for ($i = 0; $i -lt $files.Count; $i++) {
+            Write-Host ("{0,3}. {1}" -f ($i + 1), $files[$i].Name) -ForegroundColor $colors.High
+        }
+        
+        Write-Host ""
+        Write-Host "Enter file number to view or Q to go back: " -NoNewline
+        $choice = Read-Host
+        
+        if ($choice -match '^[Qq]') { return }
+        
+        if ($choice -match '^\d+$') {
+            $index = [int]$choice - 1
+            if ($index -ge 0 -and $index -lt $files.Count) {
+                $content = Show-FileContent -FilePath $files[$index].FullName
+                Show-PagedContent -Content $content -Title "ALERT: $($files[$index].Name)"
+            }
+        }
+    }
+}
+
+# Show network data
+function Show-NetworkData {
+    param([string]$IncidentPath)
+    
+    $networkPath = Join-Path $IncidentPath "Network"
+    if (!(Test-Path $networkPath)) {
+        Write-Host "No network data found" -ForegroundColor $colors.Info
+        Read-Host "Press Enter to continue"
+        return
+    }
+    
+    while ($true) {
+        Show-Header "NETWORK DATA"
+        
+        $files = Get-ChildItem $networkPath -File | Sort-Object Name
+        
+        Write-Host "Network Files:" -ForegroundColor $colors.Header
+        for ($i = 0; $i -lt $files.Count; $i++) {
+            Write-Host ("{0,3}. {1}" -f ($i + 1), $files[$i].Name) -ForegroundColor $colors.Menu
+        }
+        
+        Write-Host ""
+        Write-Host "Enter file number to view or Q to go back: " -NoNewline
+        $choice = Read-Host
+        
+        if ($choice -match '^[Qq]') { return }
+        
+        if ($choice -match '^\d+$') {
+            $index = [int]$choice - 1
+            if ($index -ge 0 -and $index -lt $files.Count) {
+                $content = Show-FileContent -FilePath $files[$index].FullName
+                Show-PagedContent -Content $content -Title "NETWORK: $($files[$index].Name)"
+            }
+        }
+    }
+}
+
+# Show process data
+function Show-ProcessData {
+    param([string]$IncidentPath)
+    
+    $processPath = Join-Path $IncidentPath "Processes"
+    $files = @()
+    
+    # Check both Processes folder and ALERTS for process files
+    if (Test-Path $processPath) {
+        $files += Get-ChildItem $processPath -File
+    }
+    
+    $alertsPath = Join-Path $IncidentPath "ALERTS"
+    if (Test-Path $alertsPath) {
+        $files += Get-ChildItem $alertsPath -Filter "*process*" -File
+        $files += Get-ChildItem $alertsPath -Filter "*pid*" -File
+    }
+    
+    if ($files.Count -eq 0) {
+        Write-Host "No process data found" -ForegroundColor $colors.Info
+        Read-Host "Press Enter to continue"
+        return
+    }
+    
+    while ($true) {
+        Show-Header "PROCESS DATA"
+        
+        Write-Host "Process Files:" -ForegroundColor $colors.Header
+        for ($i = 0; $i -lt $files.Count; $i++) {
+            $color = if ($files[$i].DirectoryName -match "ALERTS") { $colors.High } else { $colors.Menu }
+            Write-Host ("{0,3}. {1}" -f ($i + 1), $files[$i].Name) -ForegroundColor $color
+        }
+        
+        Write-Host ""
+        Write-Host "Enter file number to view or Q to go back: " -NoNewline
+        $choice = Read-Host
+        
+        if ($choice -match '^[Qq]') { return }
+        
+        if ($choice -match '^\d+$') {
+            $index = [int]$choice - 1
+            if ($index -ge 0 -and $index -lt $files.Count) {
+                $content = Show-FileContent -FilePath $files[$index].FullName
+                Show-PagedContent -Content $content -Title "PROCESS: $($files[$index].Name)"
+            }
+        }
+    }
+}
+
+# Show persistence data
+function Show-PersistenceData {
+    param([string]$IncidentPath)
+    
+    $persistPath = Join-Path $IncidentPath "Persistence"
+    $files = @()
+    
+    if (Test-Path $persistPath) {
+        $files += Get-ChildItem $persistPath -File
+    }
+    
+    # Also check ALERTS for persistence files
+    $alertsPath = Join-Path $IncidentPath "ALERTS"
+    if (Test-Path $alertsPath) {
+        $files += Get-ChildItem $alertsPath -Filter "*autorun*" -File
+        $files += Get-ChildItem $alertsPath -Filter "*service*" -File
+        $files += Get-ChildItem $alertsPath -Filter "*task*" -File
+    }
+    
+    if ($files.Count -eq 0) {
+        Write-Host "No persistence data found" -ForegroundColor $colors.Info
+        Read-Host "Press Enter to continue"
+        return
+    }
+    
+    while ($true) {
+        Show-Header "PERSISTENCE DATA"
+        
+        Write-Host "Persistence Files:" -ForegroundColor $colors.Header
+        for ($i = 0; $i -lt $files.Count; $i++) {
+            $color = if ($files[$i].DirectoryName -match "ALERTS") { $colors.High } else { $colors.Menu }
+            Write-Host ("{0,3}. {1}" -f ($i + 1), $files[$i].Name) -ForegroundColor $color
+        }
+        
+        Write-Host ""
+        Write-Host "Enter file number to view or Q to go back: " -NoNewline
+        $choice = Read-Host
+        
+        if ($choice -match '^[Qq]') { return }
+        
+        if ($choice -match '^\d+$') {
+            $index = [int]$choice - 1
+            if ($index -ge 0 -and $index -lt $files.Count) {
+                $content = Show-FileContent -FilePath $files[$index].FullName
+                Show-PagedContent -Content $content -Title "PERSISTENCE: $($files[$index].Name)"
+            }
+        }
+    }
+}
+
+# Show system info
+function Show-SystemInfo {
+    param([string]$IncidentPath)
+    
+    $systemPath = Join-Path $IncidentPath "System"
+    if (!(Test-Path $systemPath)) {
+        Write-Host "No system data found" -ForegroundColor $colors.Info
+        Read-Host "Press Enter to continue"
+        return
+    }
+    
+    while ($true) {
+        Show-Header "SYSTEM INFORMATION"
+        
+        $files = Get-ChildItem $systemPath -File | Sort-Object Name
+        
+        Write-Host "System Files:" -ForegroundColor $colors.Header
+        for ($i = 0; $i -lt $files.Count; $i++) {
+            Write-Host ("{0,3}. {1}" -f ($i + 1), $files[$i].Name) -ForegroundColor $colors.Menu
+        }
+        
+        Write-Host ""
+        Write-Host "Enter file number to view or Q to go back: " -NoNewline
+        $choice = Read-Host
+        
+        if ($choice -match '^[Qq]') { return }
+        
+        if ($choice -match '^\d+$') {
+            $index = [int]$choice - 1
+            if ($index -ge 0 -and $index -lt $files.Count) {
+                $content = Show-FileContent -FilePath $files[$index].FullName
+                Show-PagedContent -Content $content -Title "SYSTEM: $($files[$index].Name)"
+            }
+        }
+    }
+}
+
+# Show event logs
+function Show-EventLogs {
+    param([string]$IncidentPath)
+    
+    $logsPath = Join-Path $IncidentPath "Logs"
+    if (!(Test-Path $logsPath)) {
+        Write-Host "No event logs found" -ForegroundColor $colors.Info
+        Read-Host "Press Enter to continue"
+        return
+    }
+    
+    while ($true) {
+        Show-Header "EVENT LOGS"
+        
+        $files = Get-ChildItem $logsPath -File | Sort-Object Name
+        
+        Write-Host "Event Log Files:" -ForegroundColor $colors.Header
+        Write-Host "(Note: .evtx files can only be parsed on Windows systems)" -ForegroundColor $colors.Data
+        Write-Host ""
+        
+        for ($i = 0; $i -lt $files.Count; $i++) {
+            $color = if ($files[$i].Extension -eq ".evtx") { $colors.High } else { $colors.Menu }
+            Write-Host ("{0,3}. {1} ({2:N2} MB)" -f ($i + 1), $files[$i].Name, ($files[$i].Length/1MB)) -ForegroundColor $color
+        }
+        
+        Write-Host ""
+        Write-Host "Enter file number to view or Q to go back: " -NoNewline
+        $choice = Read-Host
+        
+        if ($choice -match '^[Qq]') { return }
+        
+        if ($choice -match '^\d+$') {
+            $index = [int]$choice - 1
+            if ($index -ge 0 -and $index -lt $files.Count) {
+                $content = Show-FileContent -FilePath $files[$index].FullName
+                Show-PagedContent -Content $content -Title "LOG: $($files[$index].Name)"
+            }
+        }
+    }
+}
+
+# Browse all files
+function Browse-Files {
+    param([string]$IncidentPath)
+    
+    Show-Header "FILE BROWSER"
+    
+    Write-Host "Building file list..." -ForegroundColor $colors.Info
+    $allFiles = Get-ChildItem $IncidentPath -Recurse -File | Sort-Object DirectoryName, Name
+    
+    $fileList = @()
+    $currentDir = ""
+    
+    foreach ($file in $allFiles) {
+        $relPath = $file.DirectoryName.Replace($IncidentPath, "").TrimStart("\")
+        
+        if ($relPath -ne $currentDir) {
+            $fileList += ""
+            $fileList += "[$relPath]"
+            $currentDir = $relPath
+        }
+        
+        $fileList += "  $($file.Name) ($([Math]::Round($file.Length/1KB, 2)) KB)"
+    }
+    
+    Show-PagedContent -Content $fileList -Title "ALL FILES ($($allFiles.Count) total)"
+}
+
+# Export all data to text
+function Export-AllData {
+    param([string]$IncidentPath)
+    
+    Show-Header "EXPORT ALL DATA"
+    
+    Write-Host "This will export all data to a single text file." -ForegroundColor $colors.Info
+    $confirm = Read-Host "Continue? (Y/N)"
+    
+    if ($confirm -ne 'Y' -and $confirm -ne 'y') { return }
+    
+    $exportFile = Join-Path $IncidentPath "Export_$(Get-Date -Format 'yyyyMMdd_HHmmss').txt"
+    $output = @()
+    
+    # Header
+    $output += "="*80
+    $output += "INCIDENT RESPONSE DATA EXPORT"
+    $output += "="*80
+    $output += "Generated: $(Get-Date)"
+    $output += "Incident: $(Split-Path $IncidentPath -Leaf)"
+    $output += "Path: $IncidentPath"
+    $output += "="*80
+    $output += ""
+    
+    Write-Host "Exporting data..." -ForegroundColor $colors.Info
+    
+    # Process each directory
+    $directories = @(
+        @{Name="SUMMARY"; Path="SUMMARY.txt"; Type="File"},
+        @{Name="ALERTS"; Path="ALERTS"; Type="Directory"},
+        @{Name="NETWORK"; Path="Network"; Type="Directory"},
+        @{Name="PROCESSES"; Path="Processes"; Type="Directory"},
+        @{Name="PERSISTENCE"; Path="Persistence"; Type="Directory"},
+        @{Name="SYSTEM"; Path="System"; Type="Directory"},
+        @{Name="LOGS"; Path="Logs"; Type="Directory"}
+    )
+    
+    foreach ($dir in $directories) {
+        Write-Host "  Exporting $($dir.Name)..." -ForegroundColor $colors.Data
+        
+        $fullPath = Join-Path $IncidentPath $dir.Path
+        
+        if (Test-Path $fullPath) {
+            $output += ""
+            $output += "="*80
+            $output += $dir.Name
+            $output += "="*80
+            
+            if ($dir.Type -eq "File") {
+                $output += Get-Content $fullPath
+            }
+            else {
+                $files = Get-ChildItem $fullPath -File | Sort-Object Name
+                foreach ($file in $files) {
+                    $output += ""
+                    $output += "-"*60
+                    $output += "FILE: $($file.Name)"
+                    $output += "-"*60
+                    
+                    $content = Show-FileContent -FilePath $file.FullName
+                    $output += $content
+                }
+            }
+        }
+    }
+    
+    # Save export
+    $output | Out-File $exportFile -Encoding UTF8
+    
+    Write-Host ""
+    Write-Host "Export complete!" -ForegroundColor $colors.Low
+    Write-Host "File saved to: $exportFile" -ForegroundColor $colors.Info
+    Write-Host "Size: $([Math]::Round((Get-Item $exportFile).Length/1MB, 2)) MB" -ForegroundColor $colors.Data
+    Write-Host ""
+    
+    $open = Read-Host "Open file now? (Y/N)"
+    if ($open -eq 'Y' -or $open -eq 'y') {
+        notepad.exe $exportFile
+    }
+    
+    Read-Host "Press Enter to continue"
+}
+
+# Main execution
+Show-Header
+
+Write-Host "This viewer displays data collected by the Incident Response Triage Script" -ForegroundColor $colors.Info
+Write-Host "No live data collection will be performed" -ForegroundColor $colors.Info
+Write-Host ""
+
+# Main loop
+while ($true) {
+    $incidentPath = $Path
+    
+    if (!$incidentPath -or !(Test-Path $incidentPath)) {
+        $incidentPath = Select-IncidentDirectory
+    }
+    
+    if (!$incidentPath) {
+        Write-Host "Exiting..." -ForegroundColor $colors.Info
+        break
+    }
+    
+    Show-IncidentMenu -IncidentPath $incidentPath
+    
+    # Reset path to show selection menu again
+    $Path = ""
+}
+
+Write-Host ""
+Write-Host "Thank you for using IR Data Viewer" -ForegroundColor $colors.Info) {
+                        $cutoff = (Get-Date).AddHours(-[int]$hours)
+                        $events | Where-Object { $_.TimeCreated -gt $cutoff }
+                    } else { $events }
+                }
+                default { $events }
+            }
+            
+            $output += "Filtered Events: $($events.Count)"
+            $output += ""
+        }
+        
+        # Format events
+        $eventNum = 1
+        foreach ($event in $events) {
+            $output += "===== Event #$eventNum ====="
+            $output += "Time: $($event.TimeCreated)"
+            $output += "Level: $($event.LevelDisplayName) | ID: $($event.Id)"
+            $output += "Source: $($event.ProviderName)"
+            $output += "Computer: $($event.MachineName)"
+            
+            if ($event.UserId) {
+                $output += "User: $($event.UserId)"
+            }
+            
+            if ($event.Message) {
+                # Option to show full or truncated messages
+                $output += "Message:"
+                $output += $event.Message -split "`n" | ForEach-Object { "  $_" }
+            }
+            
+            $output += ""
+            $eventNum++
+        }
+        
+        return $output
+    }
+    catch {
+        $output = @()
+        $output += "Unable to parse event log on this system."
+        $output += "Event logs can only be viewed on Windows systems with appropriate permissions."
+        $output += ""
+        $output += "Error: $_"
+        $output += ""
+        $output += "Raw file location: $FilePath"
+        $output += "File size: $([Math]::Round((Get-Item $FilePath).Length/1MB, 2)) MB"
+        
+        return $output
+    }
+}
+
+# Display file content based on type
+function Show-FileContent {
+    param([string]$FilePath)
+    
+    if (!(Test-Path $FilePath)) {
+        return @("File not found: $FilePath")
+    }
+    
+    $extension = [System.IO.Path]::GetExtension($FilePath).ToLower()
+    
+    switch ($extension) {
+        ".csv" { return Show-CsvFile -FilePath $FilePath }
+        ".json" { return Show-JsonFile -FilePath $FilePath }
+        ".evtx" { return Show-EventLog -FilePath $FilePath }
+        ".txt" { return Get-Content $FilePath }
+        ".log" { return Get-Content $FilePath }
+        default { return @("Cannot display file type: $extension") }
+    }
+}
+
+# Paged display
+function Show-PagedContent {
+    param(
+        [array]$Content,
+        [string]$Title
+    )
+    
+    if ($Content.Count -eq 0) {
+        Write-Host "No content to display" -ForegroundColor $colors.Info
+        Read-Host "Press Enter to continue"
+        return
+    }
+    
+    $totalPages = [Math]::Ceiling($Content.Count / $PageSize)
+    $currentPage = 0
+    
+    while ($true) {
+        Show-Header $Title
+        
+        $startIdx = $currentPage * $PageSize
+        $endIdx = [Math]::Min($startIdx + $PageSize, $Content.Count)
+        
+        # Display page content
+        for ($i = $startIdx; $i -lt $endIdx; $i++) {
+            $line = $Content[$i]
+            
+            # Color coding based on content
+            if ($line -match "CRITICAL|ERROR|FAIL") {
+                Write-Host $line -ForegroundColor $colors.Critical
+            }
+            elseif ($line -match "WARNING|ALERT|SUSPICIOUS") {
+                Write-Host $line -ForegroundColor $colors.High
+            }
+            elseif ($line -match "SUCCESS|PASS") {
+                Write-Host $line -ForegroundColor $colors.Low
+            }
+            else {
+                Write-Host $line -ForegroundColor $colors.Data
+            }
+        }
+        
+        # Navigation
+        Write-Host ""
+        Write-Host ("-" * 80) -ForegroundColor $colors.Menu
+        Write-Host "Page $($currentPage + 1) of $totalPages | Showing items $($startIdx + 1)-$endIdx of $($Content.Count)" -ForegroundColor $colors.Info
+        Write-Host "[N]ext [P]revious [F]irst [L]ast [Q]uit: " -NoNewline -ForegroundColor $colors.Menu
+        
+        $key = Read-Host
+        
+        switch ($key.ToUpper()) {
+            "N" { if ($currentPage -lt $totalPages - 1) { $currentPage++ } }
+            "P" { if ($currentPage -gt 0) { $currentPage-- } }
+            "F" { $currentPage = 0 }
+            "L" { $currentPage = $totalPages - 1 }
+            "Q" { return }
+        }
+    }
+}
+
+# Main menu for incident data
+function Show-IncidentMenu {
+    param([string]$IncidentPath)
+    
+    while ($true) {
+        Show-Header "INCIDENT DATA BROWSER"
+        
+        # Display incident info
+        $incidentName = Split-Path $IncidentPath -Leaf
+        Write-Host "Incident: $incidentName" -ForegroundColor $colors.Info
+        Write-Host "Path: $IncidentPath" -ForegroundColor $colors.Data
+        
+        # Get summary info if available
+        $summaryPath = Join-Path $IncidentPath "SUMMARY.txt"
+        if (Test-Path $summaryPath) {
+            $summaryLines = Get-Content $summaryPath | Select-String "THREAT LEVEL:|TOTAL ALERTS:"
+            foreach ($line in $summaryLines) {
+                if ($line -match "THREAT LEVEL:") {
+                    $level = $line.Line.Split(":")[1].Trim()
+                    $color = switch ($level) {
+                        "CRITICAL" { $colors.Critical }
+                        "HIGH" { $colors.High }
+                        "MEDIUM" { $colors.Medium }
+                        "LOW" { $colors.Low }
+                        default { $colors.Data }
+                    }
+                    Write-Host $line.Line -ForegroundColor $color
+                }
+                else {
+                    Write-Host $line.Line -ForegroundColor $colors.Info
+                }
+            }
+        }
+        
+        Write-Host ""
+        Write-Host "MAIN MENU" -ForegroundColor $colors.Header
+        Write-Host "1. View Summary" -ForegroundColor $colors.Menu
+        Write-Host "2. View Alerts" -ForegroundColor $colors.Menu
+        Write-Host "3. Network Data" -ForegroundColor $colors.Menu
+        Write-Host "4. Process Data" -ForegroundColor $colors.Menu
+        Write-Host "5. Persistence Data" -ForegroundColor $colors.Menu
+        Write-Host "6. System Information" -ForegroundColor $colors.Menu
+        Write-Host "7. Event Logs" -ForegroundColor $colors.Menu
+        Write-Host "8. Browse All Files" -ForegroundColor $colors.Menu
+        Write-Host "9. Export All to Text" -ForegroundColor $colors.Menu
+        Write-Host "Q. Back to Directory Selection" -ForegroundColor $colors.Menu
+        Write-Host ""
+        
+        $choice = Read-Host "Select option"
+        
+        switch ($choice) {
+            "1" { Show-Summary -IncidentPath $IncidentPath }
+            "2" { Show-Alerts -IncidentPath $IncidentPath }
+            "3" { Show-NetworkData -IncidentPath $IncidentPath }
+            "4" { Show-ProcessData -IncidentPath $IncidentPath }
+            "5" { Show-PersistenceData -IncidentPath $IncidentPath }
+            "6" { Show-SystemInfo -IncidentPath $IncidentPath }
+            "7" { Show-EventLogs -IncidentPath $IncidentPath }
+            "8" { Browse-Files -IncidentPath $IncidentPath }
+            "9" { Export-AllData -IncidentPath $IncidentPath }
+            "Q" { return }
+            "q" { return }
+        }
+    }
+}
+
+# Show summary
+function Show-Summary {
+    param([string]$IncidentPath)
+    
+    $summaryFile = Join-Path $IncidentPath "SUMMARY.txt"
+    if (Test-Path $summaryFile) {
+        $content = Get-Content $summaryFile
+        Show-PagedContent -Content $content -Title "INCIDENT SUMMARY"
+    }
+    else {
+        Write-Host "Summary file not found" -ForegroundColor $colors.Critical
+        Read-Host "Press Enter to continue"
+    }
+}
+
+# Show alerts
+function Show-Alerts {
+    param([string]$IncidentPath)
+    
+    $alertsPath = Join-Path $IncidentPath "ALERTS"
+    if (!(Test-Path $alertsPath)) {
+        Write-Host "No alerts directory found" -ForegroundColor $colors.Info
+        Read-Host "Press Enter to continue"
+        return
+    }
+    
+    while ($true) {
+        Show-Header "ALERTS"
+        
+        $files = Get-ChildItem $alertsPath -File | Sort-Object Name
+        if ($files.Count -eq 0) {
+            Write-Host "No alert files found" -ForegroundColor $colors.Info
+            Read-Host "Press Enter to continue"
+            return
+        }
+        
+        Write-Host "Alert Files:" -ForegroundColor $colors.Header
+        for ($i = 0; $i -lt $files.Count; $i++) {
+            Write-Host ("{0,3}. {1}" -f ($i + 1), $files[$i].Name) -ForegroundColor $colors.High
+        }
+        
+        Write-Host ""
+        Write-Host "Enter file number to view or Q to go back: " -NoNewline
+        $choice = Read-Host
+        
+        if ($choice -match '^[Qq]') { return }
+        
+        if ($choice -match '^\d+$') {
+            $index = [int]$choice - 1
+            if ($index -ge 0 -and $index -lt $files.Count) {
+                $content = Show-FileContent -FilePath $files[$index].FullName
+                Show-PagedContent -Content $content -Title "ALERT: $($files[$index].Name)"
+            }
+        }
+    }
+}
+
+# Show network data
+function Show-NetworkData {
+    param([string]$IncidentPath)
+    
+    $networkPath = Join-Path $IncidentPath "Network"
+    if (!(Test-Path $networkPath)) {
+        Write-Host "No network data found" -ForegroundColor $colors.Info
+        Read-Host "Press Enter to continue"
+        return
+    }
+    
+    while ($true) {
+        Show-Header "NETWORK DATA"
+        
+        $files = Get-ChildItem $networkPath -File | Sort-Object Name
+        
+        Write-Host "Network Files:" -ForegroundColor $colors.Header
+        for ($i = 0; $i -lt $files.Count; $i++) {
+            Write-Host ("{0,3}. {1}" -f ($i + 1), $files[$i].Name) -ForegroundColor $colors.Menu
+        }
+        
+        Write-Host ""
+        Write-Host "Enter file number to view or Q to go back: " -NoNewline
+        $choice = Read-Host
+        
+        if ($choice -match '^[Qq]') { return }
+        
+        if ($choice -match '^\d+$') {
+            $index = [int]$choice - 1
+            if ($index -ge 0 -and $index -lt $files.Count) {
+                $content = Show-FileContent -FilePath $files[$index].FullName
+                Show-PagedContent -Content $content -Title "NETWORK: $($files[$index].Name)"
+            }
+        }
+    }
+}
+
+# Show process data
+function Show-ProcessData {
+    param([string]$IncidentPath)
+    
+    $processPath = Join-Path $IncidentPath "Processes"
+    $files = @()
+    
+    # Check both Processes folder and ALERTS for process files
+    if (Test-Path $processPath) {
+        $files += Get-ChildItem $processPath -File
+    }
+    
+    $alertsPath = Join-Path $IncidentPath "ALERTS"
+    if (Test-Path $alertsPath) {
+        $files += Get-ChildItem $alertsPath -Filter "*process*" -File
+        $files += Get-ChildItem $alertsPath -Filter "*pid*" -File
+    }
+    
+    if ($files.Count -eq 0) {
+        Write-Host "No process data found" -ForegroundColor $colors.Info
+        Read-Host "Press Enter to continue"
+        return
+    }
+    
+    while ($true) {
+        Show-Header "PROCESS DATA"
+        
+        Write-Host "Process Files:" -ForegroundColor $colors.Header
+        for ($i = 0; $i -lt $files.Count; $i++) {
+            $color = if ($files[$i].DirectoryName -match "ALERTS") { $colors.High } else { $colors.Menu }
+            Write-Host ("{0,3}. {1}" -f ($i + 1), $files[$i].Name) -ForegroundColor $color
+        }
+        
+        Write-Host ""
+        Write-Host "Enter file number to view or Q to go back: " -NoNewline
+        $choice = Read-Host
+        
+        if ($choice -match '^[Qq]') { return }
+        
+        if ($choice -match '^\d+$') {
+            $index = [int]$choice - 1
+            if ($index -ge 0 -and $index -lt $files.Count) {
+                $content = Show-FileContent -FilePath $files[$index].FullName
+                Show-PagedContent -Content $content -Title "PROCESS: $($files[$index].Name)"
+            }
+        }
+    }
+}
+
+# Show persistence data
+function Show-PersistenceData {
+    param([string]$IncidentPath)
+    
+    $persistPath = Join-Path $IncidentPath "Persistence"
+    $files = @()
+    
+    if (Test-Path $persistPath) {
+        $files += Get-ChildItem $persistPath -File
+    }
+    
+    # Also check ALERTS for persistence files
+    $alertsPath = Join-Path $IncidentPath "ALERTS"
+    if (Test-Path $alertsPath) {
+        $files += Get-ChildItem $alertsPath -Filter "*autorun*" -File
+        $files += Get-ChildItem $alertsPath -Filter "*service*" -File
+        $files += Get-ChildItem $alertsPath -Filter "*task*" -File
+    }
+    
+    if ($files.Count -eq 0) {
+        Write-Host "No persistence data found" -ForegroundColor $colors.Info
+        Read-Host "Press Enter to continue"
+        return
+    }
+    
+    while ($true) {
+        Show-Header "PERSISTENCE DATA"
+        
+        Write-Host "Persistence Files:" -ForegroundColor $colors.Header
+        for ($i = 0; $i -lt $files.Count; $i++) {
+            $color = if ($files[$i].DirectoryName -match "ALERTS") { $colors.High } else { $colors.Menu }
+            Write-Host ("{0,3}. {1}" -f ($i + 1), $files[$i].Name) -ForegroundColor $color
+        }
+        
+        Write-Host ""
+        Write-Host "Enter file number to view or Q to go back: " -NoNewline
+        $choice = Read-Host
+        
+        if ($choice -match '^[Qq]') { return }
+        
+        if ($choice -match '^\d+$') {
+            $index = [int]$choice - 1
+            if ($index -ge 0 -and $index -lt $files.Count) {
+                $content = Show-FileContent -FilePath $files[$index].FullName
+                Show-PagedContent -Content $content -Title "PERSISTENCE: $($files[$index].Name)"
+            }
+        }
+    }
+}
+
+# Show system info
+function Show-SystemInfo {
+    param([string]$IncidentPath)
+    
+    $systemPath = Join-Path $IncidentPath "System"
+    if (!(Test-Path $systemPath)) {
+        Write-Host "No system data found" -ForegroundColor $colors.Info
+        Read-Host "Press Enter to continue"
+        return
+    }
+    
+    while ($true) {
+        Show-Header "SYSTEM INFORMATION"
+        
+        $files = Get-ChildItem $systemPath -File | Sort-Object Name
+        
+        Write-Host "System Files:" -ForegroundColor $colors.Header
+        for ($i = 0; $i -lt $files.Count; $i++) {
+            Write-Host ("{0,3}. {1}" -f ($i + 1), $files[$i].Name) -ForegroundColor $colors.Menu
+        }
+        
+        Write-Host ""
+        Write-Host "Enter file number to view or Q to go back: " -NoNewline
+        $choice = Read-Host
+        
+        if ($choice -match '^[Qq]') { return }
+        
+        if ($choice -match '^\d+$') {
+            $index = [int]$choice - 1
+            if ($index -ge 0 -and $index -lt $files.Count) {
+                $content = Show-FileContent -FilePath $files[$index].FullName
+                Show-PagedContent -Content $content -Title "SYSTEM: $($files[$index].Name)"
+            }
+        }
+    }
+}
+
+# Show event logs
+function Show-EventLogs {
+    param([string]$IncidentPath)
+    
+    $logsPath = Join-Path $IncidentPath "Logs"
+    if (!(Test-Path $logsPath)) {
+        Write-Host "No event logs found" -ForegroundColor $colors.Info
+        Read-Host "Press Enter to continue"
+        return
+    }
+    
+    while ($true) {
+        Show-Header "EVENT LOGS"
+        
+        $files = Get-ChildItem $logsPath -File | Sort-Object Name
+        
+        Write-Host "Event Log Files:" -ForegroundColor $colors.Header
+        Write-Host "(Note: .evtx files can only be parsed on Windows systems)" -ForegroundColor $colors.Data
+        Write-Host ""
+        
+        for ($i = 0; $i -lt $files.Count; $i++) {
+            $color = if ($files[$i].Extension -eq ".evtx") { $colors.High } else { $colors.Menu }
+            Write-Host ("{0,3}. {1} ({2:N2} MB)" -f ($i + 1), $files[$i].Name, ($files[$i].Length/1MB)) -ForegroundColor $color
+        }
+        
+        Write-Host ""
+        Write-Host "Enter file number to view or Q to go back: " -NoNewline
+        $choice = Read-Host
+        
+        if ($choice -match '^[Qq]') { return }
+        
+        if ($choice -match '^\d+$') {
+            $index = [int]$choice - 1
+            if ($index -ge 0 -and $index -lt $files.Count) {
+                $content = Show-FileContent -FilePath $files[$index].FullName
+                Show-PagedContent -Content $content -Title "LOG: $($files[$index].Name)"
+            }
+        }
+    }
+}
+
+# Browse all files
+function Browse-Files {
+    param([string]$IncidentPath)
+    
+    Show-Header "FILE BROWSER"
+    
+    Write-Host "Building file list..." -ForegroundColor $colors.Info
+    $allFiles = Get-ChildItem $IncidentPath -Recurse -File | Sort-Object DirectoryName, Name
+    
+    $fileList = @()
+    $currentDir = ""
+    
+    foreach ($file in $allFiles) {
+        $relPath = $file.DirectoryName.Replace($IncidentPath, "").TrimStart("\")
+        
+        if ($relPath -ne $currentDir) {
+            $fileList += ""
+            $fileList += "[$relPath]"
+            $currentDir = $relPath
+        }
+        
+        $fileList += "  $($file.Name) ($([Math]::Round($file.Length/1KB, 2)) KB)"
+    }
+    
+    Show-PagedContent -Content $fileList -Title "ALL FILES ($($allFiles.Count) total)"
+}
+
+# Export all data to text
+function Export-AllData {
+    param([string]$IncidentPath)
+    
+    Show-Header "EXPORT ALL DATA"
+    
+    Write-Host "This will export all data to a single text file." -ForegroundColor $colors.Info
+    $confirm = Read-Host "Continue? (Y/N)"
+    
+    if ($confirm -ne 'Y' -and $confirm -ne 'y') { return }
+    
+    $exportFile = Join-Path $IncidentPath "Export_$(Get-Date -Format 'yyyyMMdd_HHmmss').txt"
+    $output = @()
+    
+    # Header
+    $output += "="*80
+    $output += "INCIDENT RESPONSE DATA EXPORT"
+    $output += "="*80
+    $output += "Generated: $(Get-Date)"
+    $output += "Incident: $(Split-Path $IncidentPath -Leaf)"
+    $output += "Path: $IncidentPath"
+    $output += "="*80
+    $output += ""
+    
+    Write-Host "Exporting data..." -ForegroundColor $colors.Info
+    
+    # Process each directory
+    $directories = @(
+        @{Name="SUMMARY"; Path="SUMMARY.txt"; Type="File"},
+        @{Name="ALERTS"; Path="ALERTS"; Type="Directory"},
+        @{Name="NETWORK"; Path="Network"; Type="Directory"},
+        @{Name="PROCESSES"; Path="Processes"; Type="Directory"},
+        @{Name="PERSISTENCE"; Path="Persistence"; Type="Directory"},
+        @{Name="SYSTEM"; Path="System"; Type="Directory"},
+        @{Name="LOGS"; Path="Logs"; Type="Directory"}
+    )
+    
+    foreach ($dir in $directories) {
+        Write-Host "  Exporting $($dir.Name)..." -ForegroundColor $colors.Data
+        
+        $fullPath = Join-Path $IncidentPath $dir.Path
+        
+        if (Test-Path $fullPath) {
+            $output += ""
+            $output += "="*80
+            $output += $dir.Name
+            $output += "="*80
+            
+            if ($dir.Type -eq "File") {
+                $output += Get-Content $fullPath
+            }
+            else {
+                $files = Get-ChildItem $fullPath -File | Sort-Object Name
+                foreach ($file in $files) {
+                    $output += ""
+                    $output += "-"*60
+                    $output += "FILE: $($file.Name)"
+                    $output += "-"*60
+                    
+                    $content = Show-FileContent -FilePath $file.FullName
+                    $output += $content
+                }
+            }
+        }
+    }
+    
+    # Save export
+    $output | Out-File $exportFile -Encoding UTF8
+    
+    Write-Host ""
+    Write-Host "Export complete!" -ForegroundColor $colors.Low
+    Write-Host "File saved to: $exportFile" -ForegroundColor $colors.Info
+    Write-Host "Size: $([Math]::Round((Get-Item $exportFile).Length/1MB, 2)) MB" -ForegroundColor $colors.Data
+    Write-Host ""
+    
+    $open = Read-Host "Open file now? (Y/N)"
+    if ($open -eq 'Y' -or $open -eq 'y') {
+        notepad.exe $exportFile
+    }
+    
+    Read-Host "Press Enter to continue"
+}
+
+# Main execution
+Show-Header
+
+Write-Host "This viewer displays data collected by the Incident Response Triage Script" -ForegroundColor $colors.Info
+Write-Host "No live data collection will be performed" -ForegroundColor $colors.Info
+Write-Host ""
+
+# Main loop
+while ($true) {
+    $incidentPath = $Path
+    
+    if (!$incidentPath -or !(Test-Path $incidentPath)) {
+        $incidentPath = Select-IncidentDirectory
+    }
+    
+    if (!$incidentPath) {
+        Write-Host "Exiting..." -ForegroundColor $colors.Info
+        break
+    }
+    
+    Show-IncidentMenu -IncidentPath $incidentPath
+    
+    # Reset path to show selection menu again
+    $Path = ""
+}
+
+Write-Host ""
+Write-Host "Thank you for using IR Data Viewer" -ForegroundColor $colors.Info
