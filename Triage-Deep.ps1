@@ -1,4 +1,4 @@
-# COMPREHENSIVE INCIDENT RESPONSE TRIAGE SCRIPT v2
+# COMPREHENSIVE INCIDENT RESPONSE TRIAGE SCRIPT v2 - FIXED
 # Run as Administrator: powershell -ExecutionPolicy Bypass -File .\Triage.ps1
 
 param(
@@ -13,6 +13,7 @@ param(
 $ErrorActionPreference = "SilentlyContinue"
 $ProgressPreference = "Continue"
 $timestamp = Get-Date -Format "yyyyMMdd_HHmmss"
+$startTime = Get-Date  # Store actual DateTime for duration calculation
 $incidentPath = "C:\incident_$timestamp"
 
 # Create incident folder structure
@@ -197,7 +198,19 @@ try {
     # Get all processes with complete details
     $allProcesses = Get-WmiObject Win32_Process | ForEach-Object {
         $proc = $_
-        $owner = $proc.GetOwner()
+        
+        # Try to get owner, but handle failures gracefully
+        $owner = try {
+            $ownerInfo = $proc.GetOwner()
+            if ($ownerInfo.ReturnValue -eq 0) {
+                "$($ownerInfo.Domain)\$($ownerInfo.User)"
+            } else {
+                "SYSTEM"
+            }
+        } catch {
+            "SYSTEM"
+        }
+        
         $procObj = Get-Process -Id $proc.ProcessId -ErrorAction SilentlyContinue
         
         # Check if running from suspicious location
@@ -224,8 +237,8 @@ try {
             ParentName = (Get-WmiObject Win32_Process -Filter "ProcessId=$($proc.ParentProcessId)" -ErrorAction SilentlyContinue).Name
             Path = $proc.ExecutablePath
             CommandLine = $proc.CommandLine
-            CreationDate = if($proc.CreationDate) {$_.ConvertToDateTime($proc.CreationDate)} else {'Unknown'}
-            Owner = "$($owner.Domain)\$($owner.User)"
+            CreationDate = if($proc.CreationDate) {$proc.ConvertToDateTime($proc.CreationDate)} else {'Unknown'}
+            Owner = $owner
             ThreadCount = $proc.ThreadCount
             HandleCount = $proc.HandleCount
             WorkingSetSizeMB = [math]::Round($proc.WorkingSetSize / 1MB, 2)
@@ -1017,6 +1030,9 @@ try {
     # Save IOCs
     $iocs | ConvertTo-Json -Depth 3 | Out-File "$incidentPath\ALERTS\extracted_iocs.json"
     
+    # Calculate collection duration
+    $collectionDuration = (Get-Date) - $startTime
+    
     # Generate final summary
     $summary = @"
 ========================================
@@ -1031,7 +1047,7 @@ System: $(Get-WmiObject Win32_OperatingSystem | Select-Object -ExpandProperty Ca
 COLLECTION PARAMETERS:
 - Mode: $(if($Quick){"Quick"}elseif($Deep){"Deep"}else{"Standard"})
 - Days Back: $DaysBack
-- Collection Time: $((Get-Date) - [DateTime]$timestamp)
+- Collection Time: $($collectionDuration.ToString())
 
 CRITICAL ALERTS FOUND: $alertCount
 $(if($alertFiles){
