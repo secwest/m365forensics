@@ -1,4 +1,4 @@
-# ULTIMATE INCIDENT RESPONSE TRIAGE SCRIPT v4.2 - ROBUST
+# ULTIMATE INCIDENT RESPONSE TRIAGE SCRIPT v4.3 - WITH ENHANCED PROGRESS
 # Run as Administrator: powershell -ExecutionPolicy Bypass -File .\Triage.ps1
 
 param(
@@ -19,7 +19,7 @@ param(
 
 # Initialize
 $ErrorActionPreference = "SilentlyContinue"
-$ProgressPreference = "SilentlyContinue"
+$ProgressPreference = "Continue"  # Changed from SilentlyContinue to show progress bars
 $timestamp = Get-Date -Format "yyyyMMdd_HHmmss"
 $incidentPath = "C:\incident_$timestamp"
 $global:alertCount = 0
@@ -37,6 +37,10 @@ $global:iocs = @{
     Users = @()
     Mutexes = @()
 }
+
+# Progress tracking variables
+$script:mainProgressId = 0
+$script:subProgressId = 1
 
 # Enhanced color output with logging - NO UNICODE
 function Write-ColorOutput {
@@ -199,6 +203,26 @@ function Resolve-DNSWithTimeout {
 # Global DNS cache
 $script:dnsCache = @{}
 
+# Main progress phases
+$script:phases = @(
+    "Initialization",
+    "Rapid Triage",
+    "Network Forensics",
+    "Process Forensics",
+    "Persistence Analysis",
+    "Memory Forensics",
+    "File System Forensics",
+    "Browser Forensics",
+    "Event Log Forensics",
+    "Security Assessment",
+    "Remote Access Investigation",
+    "IOC Extraction",
+    "Final Analysis"
+)
+
+# Initialize main progress
+Write-Progress -Id $script:mainProgressId -Activity "Incident Response Collection" -Status "Starting..." -PercentComplete 0
+
 # Check network connectivity at start
 Write-Host "Checking network connectivity..." -ForegroundColor Gray
 $global:networkConnected = Test-NetworkConnection
@@ -210,6 +234,7 @@ if ($global:networkConnected) {
 }
 
 # Create comprehensive folder structure with error handling
+Write-Progress -Id $script:mainProgressId -Activity "Incident Response Collection" -Status "Phase 1/13: Initialization" -PercentComplete 5
 try {
     $folders = @(
         "$incidentPath",
@@ -264,7 +289,7 @@ try {
 # Display banner - NO UNICODE
 $banner = @"
 ================================================================================
-    ULTIMATE INCIDENT RESPONSE COLLECTION v4.2 - ROBUST
+    ULTIMATE INCIDENT RESPONSE COLLECTION v4.3 - WITH PROGRESS TRACKING
 ================================================================================
     Time: $(Get-Date)
     Mode: $(if($UltraDeep){"ULTRA-DEEP"}elseif($Deep){"DEEP"}elseif($Quick){"QUICK"}else{"STANDARD"})
@@ -290,6 +315,7 @@ if (!$isAdmin) {
 }
 
 # SECTION 1: ULTRA-FAST TRIAGE (Always run first)
+Write-Progress -Id $script:mainProgressId -Activity "Incident Response Collection" -Status "Phase 2/13: Rapid Triage" -PercentComplete 10
 Write-ColorOutput "`n[PHASE 1: RAPID TRIAGE]" "Progress"
 
 try {
@@ -384,6 +410,7 @@ try {
 
 # SECTION 2: NETWORK ANALYSIS (ENHANCED WITH FIXES)
 if (!$SkipNetwork) {
+    Write-Progress -Id $script:mainProgressId -Activity "Incident Response Collection" -Status "Phase 3/13: Network Forensics" -PercentComplete 20
     Write-ColorOutput "`n[PHASE 2: NETWORK FORENSICS]" "Progress"
     
     try {
@@ -425,18 +452,16 @@ if (!$SkipNetwork) {
         $processed = 0
         $startTime = Get-Date
         
-        # Process connections in batches
+        # Process connections with progress bar
         foreach ($conn in $allConnections) {
             $processed++
             
-            # Show progress every 50 connections
-            if ($processed % 50 -eq 0 -or $processed -eq $totalConns) {
-                $elapsed = (Get-Date) - $startTime
-                if ($elapsed.TotalSeconds -gt 0) {
-                    $rate = [math]::Round($processed / $elapsed.TotalSeconds, 2)
-                    Write-ColorOutput "  Processed $processed/$totalConns connections ($rate/sec)..." "Progress"
-                }
-            }
+            # Update progress bar
+            $percentComplete = [math]::Round(($processed / $totalConns) * 100)
+            Write-Progress -Id $script:subProgressId -ParentId $script:mainProgressId `
+                -Activity "Processing Network Connections" `
+                -Status "Connection $processed of $totalConns" `
+                -PercentComplete $percentComplete
             
             # Skip detailed analysis in Quick mode
             if ($Quick -and $conn.State -ne "Established") {
@@ -478,6 +503,9 @@ if (!$SkipNetwork) {
                 GeoLocation = "Unknown"
             }
         }
+        
+        # Complete sub-progress
+        Write-Progress -Id $script:subProgressId -Completed
         
         # Export connections with error handling
         if ($connectionDetails) {
@@ -637,6 +665,7 @@ if (!$SkipNetwork) {
 }
 
 # SECTION 3: PROCESS FORENSICS
+Write-Progress -Id $script:mainProgressId -Activity "Incident Response Collection" -Status "Phase 4/13: Process Forensics" -PercentComplete 30
 Write-ColorOutput "`n[PHASE 3: PROCESS FORENSICS]" "Progress"
 
 try {
@@ -674,9 +703,13 @@ try {
         
         foreach ($wmiProc in $wmiProcesses) {
             $procCount++
-            if ($procCount % 20 -eq 0) {
-                Write-ColorOutput "  Analyzed $procCount/$totalProcs processes..." "Progress"
-            }
+            
+            # Update progress bar
+            $percentComplete = [math]::Round(($procCount / $totalProcs) * 100)
+            Write-Progress -Id $script:subProgressId -ParentId $script:mainProgressId `
+                -Activity "Analyzing Processes" `
+                -Status "Process $procCount of $totalProcs: $($wmiProc.Name)" `
+                -PercentComplete $percentComplete
             
             try {
                 $proc = Get-Process -Id $wmiProc.ProcessId -ErrorAction SilentlyContinue
@@ -795,6 +828,9 @@ try {
                 continue
             }
         }
+        
+        # Complete sub-progress
+        Write-Progress -Id $script:subProgressId -Completed
     }
     
     # Export all processes
@@ -882,6 +918,7 @@ try {
 }
 
 # SECTION 4: PERSISTENCE MECHANISMS (Reduced in Quick mode)
+Write-Progress -Id $script:mainProgressId -Activity "Incident Response Collection" -Status "Phase 5/13: Persistence Analysis" -PercentComplete 40
 Write-ColorOutput "`n[PHASE 4: PERSISTENCE ANALYSIS]" "Progress"
 
 # Function to check registry keys
@@ -975,13 +1012,45 @@ try {
         }
     }
     
+    $totalKeys = $regKeys.Count
+    $currentKey = 0
+    
     foreach ($keyInfo in $regKeys.GetEnumerator()) {
+        $currentKey++
+        $percentComplete = [math]::Round(($currentKey / $totalKeys) * 100)
+        Write-Progress -Id $script:subProgressId -ParentId $script:mainProgressId `
+            -Activity "Checking Registry Persistence" `
+            -Status "Key $currentKey of $totalKeys: $($keyInfo.Key)" `
+            -PercentComplete $percentComplete
+        
         $keyName = $keyInfo.Key
         $keyPath = $keyInfo.Value
         
         # Special handling for wildcards
         if ($keyPath -match '\*') {
-            $basePath = $keyPath -replace '\\\*.*
+            $basePath = $keyPath -replace '\\\*.*', ''
+            if (Test-Path $basePath -ErrorAction SilentlyContinue) {
+                $subKeys = Get-ChildItem $basePath -Recurse -ErrorAction SilentlyContinue
+                foreach ($subKey in $subKeys) {
+                    CheckRegistryKey -KeyName "$keyName\$($subKey.PSChildName)" -KeyPath $subKey.PSPath
+                }
+            }
+        } else {
+            CheckRegistryKey -KeyName $keyName -KeyPath $keyPath
+        }
+    }
+    
+    Write-Progress -Id $script:subProgressId -Completed
+    
+    if ($script:regPersistence) {
+        try {
+            $script:regPersistence | Export-Csv "$incidentPath\Persistence\Registry\registry_persistence.csv" -NoTypeInformation
+            $script:regPersistence | Where-Object {$_.Suspicious} | 
+                Export-Csv "$incidentPath\ALERTS\suspicious_registry_persistence.csv" -NoTypeInformation
+        } catch { }
+    }
+    
+    Write-ColorOutput "Found $($script:regPersistence.Count) registry persistence entries" "Info"
     
     # Scheduled Tasks Analysis (simplified in Quick mode)
     Write-ColorOutput "Analyzing scheduled tasks..." "Progress"
@@ -1004,11 +1073,20 @@ try {
                 $global:alertCount += $suspiciousTasks.Count
             }
         } else {
-            # Full analysis
+            # Full analysis with progress
             $allTasks = @(Get-ScheduledTask -ErrorAction SilentlyContinue)
             $taskAnalysis = @()
+            $totalTasks = $allTasks.Count
+            $currentTask = 0
             
             foreach ($task in $allTasks) {
+                $currentTask++
+                $percentComplete = [math]::Round(($currentTask / $totalTasks) * 100)
+                Write-Progress -Id $script:subProgressId -ParentId $script:mainProgressId `
+                    -Activity "Analyzing Scheduled Tasks" `
+                    -Status "Task $currentTask of $totalTasks: $($task.TaskName)" `
+                    -PercentComplete $percentComplete
+                
                 try {
                     $info = Get-ScheduledTaskInfo -TaskName $task.TaskName -TaskPath $task.TaskPath -ErrorAction SilentlyContinue
                     $suspicious = $false
@@ -1044,6 +1122,8 @@ try {
                 }
             }
             
+            Write-Progress -Id $script:subProgressId -Completed
+            
             if ($taskAnalysis) {
                 try {
                     $taskAnalysis | Export-Csv "$incidentPath\Persistence\Tasks\all_scheduled_tasks.csv" -NoTypeInformation
@@ -1078,11 +1158,20 @@ try {
                 $global:alertCount += $suspiciousServices.Count
             }
         } else {
-            # Full service analysis
+            # Full service analysis with progress
             $services = @(Get-WmiObject Win32_Service -ErrorAction SilentlyContinue)
             $serviceAnalysis = @()
+            $totalServices = $services.Count
+            $currentService = 0
             
             foreach ($service in $services) {
+                $currentService++
+                $percentComplete = [math]::Round(($currentService / $totalServices) * 100)
+                Write-Progress -Id $script:subProgressId -ParentId $script:mainProgressId `
+                    -Activity "Analyzing Services" `
+                    -Status "Service $currentService of $totalServices: $($service.Name)" `
+                    -PercentComplete $percentComplete
+                
                 try {
                     $suspicious = $false
                     $suspicionReasons = @()
@@ -1125,6 +1214,8 @@ try {
                 }
             }
             
+            Write-Progress -Id $script:subProgressId -Completed
+            
             if ($serviceAnalysis) {
                 try {
                     $serviceAnalysis | Export-Csv "$incidentPath\System\all_services_analysis.csv" -NoTypeInformation
@@ -1143,6 +1234,7 @@ try {
 
 # SECTION 5: MEMORY FORENSICS (Skip in Quick mode)
 if (!$SkipMemory -and !$Quick) {
+    Write-Progress -Id $script:mainProgressId -Activity "Incident Response Collection" -Status "Phase 6/13: Memory Forensics" -PercentComplete 50
     Write-ColorOutput "`n[PHASE 5: MEMORY FORENSICS]" "Progress"
     
     try {
@@ -1152,7 +1244,17 @@ if (!$SkipMemory -and !$Quick) {
         $memoryAnalysis = @()
         try {
             $processes = Get-Process -ErrorAction SilentlyContinue
+            $totalProcesses = $processes.Count
+            $currentProcess = 0
+            
             foreach ($proc in $processes) {
+                $currentProcess++
+                $percentComplete = [math]::Round(($currentProcess / $totalProcesses) * 100)
+                Write-Progress -Id $script:subProgressId -ParentId $script:mainProgressId `
+                    -Activity "Analyzing Process Memory" `
+                    -Status "Process $currentProcess of $totalProcesses: $($proc.ProcessName)" `
+                    -PercentComplete $percentComplete
+                
                 try {
                     $memoryAnalysis += [PSCustomObject]@{
                         ProcessName = $proc.ProcessName
@@ -1168,6 +1270,8 @@ if (!$SkipMemory -and !$Quick) {
                     continue
                 }
             }
+            
+            Write-Progress -Id $script:subProgressId -Completed
             
             # Sort by working set
             $memoryAnalysis = $memoryAnalysis | Sort-Object WorkingSetMB -Descending
@@ -1206,6 +1310,7 @@ if (!$SkipMemory -and !$Quick) {
 
 # SECTION 6: FILE SYSTEM FORENSICS (Limited in Quick mode)
 if (!$SkipFileSystem) {
+    Write-Progress -Id $script:mainProgressId -Activity "Incident Response Collection" -Status "Phase 7/13: File System Forensics" -PercentComplete 60
     Write-ColorOutput "`n[PHASE 6: FILE SYSTEM FORENSICS]" "Progress"
     
     try {
@@ -1239,9 +1344,18 @@ if (!$SkipFileSystem) {
         $recentFiles = @()
         $suspiciousFiles = @()
         $fileCount = 0
+        $totalPaths = $criticalPaths.Count
+        $currentPath = 0
         
         foreach ($path in $criticalPaths) {
+            $currentPath++
             if (Test-Path $path -ErrorAction SilentlyContinue) {
+                $percentComplete = [math]::Round(($currentPath / $totalPaths) * 100)
+                Write-Progress -Id $script:subProgressId -ParentId $script:mainProgressId `
+                    -Activity "Scanning File System" `
+                    -Status "Path $currentPath of $totalPaths: $path" `
+                    -PercentComplete $percentComplete
+                
                 Write-ColorOutput "  Scanning: $path" "Progress"
                 
                 try {
@@ -1318,6 +1432,8 @@ if (!$SkipFileSystem) {
             }
         }
         
+        Write-Progress -Id $script:subProgressId -Completed
+        
         # Export results
         if ($recentFiles) {
             try {
@@ -1374,6 +1490,7 @@ if (!$SkipFileSystem) {
 
 # SECTION 7: BROWSER FORENSICS (Skip in Quick mode)
 if (!$SkipBrowser -and !$Quick) {
+    Write-Progress -Id $script:mainProgressId -Activity "Incident Response Collection" -Status "Phase 8/13: Browser Forensics" -PercentComplete 65
     Write-ColorOutput "`n[PHASE 7: BROWSER FORENSICS]" "Progress"
     
     try {
@@ -1387,9 +1504,19 @@ if (!$SkipBrowser -and !$Quick) {
             }
         }
         
+        $totalBrowsers = $browsers.Count
+        $currentBrowser = 0
+        
         foreach ($browser in $browsers.GetEnumerator()) {
+            $currentBrowser++
             $browserName = $browser.Key
             $paths = $browser.Value
+            
+            $percentComplete = [math]::Round(($currentBrowser / $totalBrowsers) * 100)
+            Write-Progress -Id $script:subProgressId -ParentId $script:mainProgressId `
+                -Activity "Analyzing Browser Data" `
+                -Status "Browser $currentBrowser of $totalBrowsers: $browserName" `
+                -PercentComplete $percentComplete
             
             Write-ColorOutput "Checking $browserName..." "Progress"
             
@@ -1451,6 +1578,8 @@ if (!$SkipBrowser -and !$Quick) {
             }
         }
         
+        Write-Progress -Id $script:subProgressId -Completed
+        
     } catch {
         Write-ColorOutput "Error in browser forensics: $_" "Error"
     }
@@ -1461,6 +1590,7 @@ if (!$SkipBrowser -and !$Quick) {
 }
 
 # SECTION 8: EVENT LOG FORENSICS (Limited in Quick mode)
+Write-Progress -Id $script:mainProgressId -Activity "Incident Response Collection" -Status "Phase 9/13: Event Log Forensics" -PercentComplete 70
 Write-ColorOutput "`n[PHASE 8: EVENT LOG FORENSICS]" "Progress"
 
 try {
@@ -1497,7 +1627,17 @@ try {
     # Limit time range in Quick mode
     $logTimeRange = if($Quick) {1} else {$DaysBack}
     
+    $totalLogs = $criticalEvents.Keys.Count
+    $currentLog = 0
+    
     foreach ($logType in $criticalEvents.Keys) {
+        $currentLog++
+        $percentComplete = [math]::Round(($currentLog / $totalLogs) * 100)
+        Write-Progress -Id $script:subProgressId -ParentId $script:mainProgressId `
+            -Activity "Analyzing Event Logs" `
+            -Status "Log $currentLog of $totalLogs: $logType" `
+            -PercentComplete $percentComplete
+        
         Write-ColorOutput "Analyzing $logType log..." "Progress"
         
         $eventIds = $criticalEvents[$logType].Keys | ForEach-Object {[int]$_}
@@ -1567,6 +1707,8 @@ try {
         }
     }
     
+    Write-Progress -Id $script:subProgressId -Completed
+    
     # Export results
     if ($logAnalysis) {
         try {
@@ -1602,6 +1744,7 @@ try {
 }
 
 # SECTION 9: SECURITY ASSESSMENT
+Write-Progress -Id $script:mainProgressId -Activity "Incident Response Collection" -Status "Phase 10/13: Security Assessment" -PercentComplete 80
 Write-ColorOutput "`n[PHASE 9: SECURITY ASSESSMENT]" "Progress"
 
 try {
@@ -1652,6 +1795,7 @@ try {
 }
 
 # SECTION 10: REMOTE ACCESS INVESTIGATION (Basic in Quick mode)
+Write-Progress -Id $script:mainProgressId -Activity "Incident Response Collection" -Status "Phase 11/13: Remote Access Investigation" -PercentComplete 85
 Write-ColorOutput "`n[PHASE 10: REMOTE ACCESS INVESTIGATION]" "Progress"
 
 try {
@@ -1722,6 +1866,7 @@ try {
 }
 
 # SECTION 11: IOC EXTRACTION
+Write-Progress -Id $script:mainProgressId -Activity "Incident Response Collection" -Status "Phase 12/13: IOC Extraction" -PercentComplete 90
 Write-ColorOutput "`n[PHASE 11: IOC EXTRACTION]" "Progress"
 
 try {
@@ -1814,6 +1959,7 @@ try {
 }
 
 # SECTION 12: FINAL ANALYSIS AND REPORTING
+Write-Progress -Id $script:mainProgressId -Activity "Incident Response Collection" -Status "Phase 13/13: Final Analysis" -PercentComplete 95
 Write-ColorOutput "`n[PHASE 12: FINAL ANALYSIS]" "Progress"
 
 try {
@@ -1936,6 +2082,7 @@ try {
 } catch { }
 
 # Create ZIP archive
+Write-Progress -Id $script:mainProgressId -Activity "Incident Response Collection" -Status "Creating evidence archive..." -PercentComplete 98
 try {
     $zipPath = "C:\incident_${timestamp}_${env:COMPUTERNAME}.zip"
     Write-ColorOutput "Creating evidence archive..." "Progress"
@@ -1950,1018 +2097,8 @@ try {
     Write-ColorOutput "Failed to create archive: $_" "Error"
 }
 
-# FINAL OUTPUT - NO UNICODE
-Write-ColorOutput "`n================================================================================" "Success"
-Write-ColorOutput "              INCIDENT RESPONSE COLLECTION COMPLETE" "Success"
-Write-ColorOutput "================================================================================" "Success"
-Write-ColorOutput "" "Info"
-Write-ColorOutput "Threat Level: $threatLevel (Score: $threatScore/100)" $(if($threatScore -ge 70){"Alert"}else{"Info"})
-Write-ColorOutput "Total Alerts: $($global:alertCount)" $(if($global:alertCount -gt 10){"Alert"}else{"Info"})
-Write-ColorOutput "Evidence Location: $incidentPath" "Info"
-if (Test-Path $zipPath) {
-    Write-ColorOutput "Archive: $zipPath" "Info"
-}
-Write-ColorOutput "" "Info"
-
-switch ($threatLevel) {
-    "CRITICAL" {
-        Write-ColorOutput "CRITICAL ACTIONS REQUIRED:" "Alert" -Critical $true
-        Write-ColorOutput "1. ISOLATE SYSTEM IMMEDIATELY!" "Alert"
-        Write-ColorOutput "2. PRESERVE EVIDENCE!" "Alert"
-        Write-ColorOutput "3. CONTACT INCIDENT RESPONSE TEAM!" "Alert"
-    }
-    "HIGH" {
-        Write-ColorOutput "HIGH PRIORITY ACTIONS:" "Warning"
-        Write-ColorOutput "1. Isolate from sensitive networks" "Warning"
-        Write-ColorOutput "2. Review all alerts" "Warning"
-        Write-ColorOutput "3. Consider memory capture" "Warning"
-    }
-    default {
-        Write-ColorOutput "Next Steps:" "Info"
-        Write-ColorOutput "1. Review findings in $incidentPath\ALERTS\" "Info"
-        Write-ColorOutput "2. Analyze IOCs in $incidentPath\IOCs\" "Info"
-    }
-}
-
-Write-ColorOutput "`nCollection completed in $(if($Quick){'QUICK'}else{'STANDARD'}) mode" "Success"
-Write-ColorOutput "================================================================================" "Success"
-
-# Return summary object
-return @{
-    CollectionID = $timestamp
-    ThreatLevel = $threatLevel
-    ThreatScore = $threatScore
-    AlertCount = $global:alertCount
-    EvidencePath = $incidentPath
-    ArchivePath = if(Test-Path $zipPath -ErrorAction SilentlyContinue) {$zipPath} else {""}
-}, ''
-            if (Test-Path $basePath -ErrorAction SilentlyContinue) {
-                $subKeys = Get-ChildItem $basePath -Recurse -ErrorAction SilentlyContinue
-                foreach ($subKey in $subKeys) {
-                    CheckRegistryKey -KeyName "$keyName\$($subKey.PSChildName)" -KeyPath $subKey.PSPath
-                }
-            }
-        } else {
-            CheckRegistryKey -KeyName $keyName -KeyPath $keyPath
-        }
-    }
-    
-    if ($script:regPersistence) {
-        try {
-            $script:regPersistence | Export-Csv "$incidentPath\Persistence\Registry\registry_persistence.csv" -NoTypeInformation
-            $script:regPersistence | Where-Object {$_.Suspicious} | 
-                Export-Csv "$incidentPath\ALERTS\suspicious_registry_persistence.csv" -NoTypeInformation
-        } catch { }
-    }
-    
-    Write-ColorOutput "Found $($script:regPersistence.Count) registry persistence entries" "Info"
-    
-    # Scheduled Tasks Analysis (simplified in Quick mode)
-    Write-ColorOutput "Analyzing scheduled tasks..." "Progress"
-    
-    try {
-        if ($Quick) {
-            # Quick mode - just get basic info
-            $allTasks = @(Get-ScheduledTask -ErrorAction SilentlyContinue | Where-Object {$_.State -eq "Ready"})
-            $taskCount = $allTasks.Count
-            Write-ColorOutput "Found $taskCount active scheduled tasks (detailed analysis skipped in Quick mode)" "Info"
-            
-            # Check for obvious suspicious tasks
-            $suspiciousTasks = @($allTasks | Where-Object {
-                $_.Actions.Execute -match "powershell|cmd|wscript|cscript|mshta" -and
-                $_.Actions.Execute -match "\\Temp\\|\\AppData\\|\\Users\\Public\\"
-            })
-            
-            if ($suspiciousTasks) {
-                Write-ColorOutput "Found $($suspiciousTasks.Count) suspicious scheduled tasks!" "Alert"
-                $global:alertCount += $suspiciousTasks.Count
-            }
-        } else {
-            # Full analysis
-            $allTasks = @(Get-ScheduledTask -ErrorAction SilentlyContinue)
-            $taskAnalysis = @()
-            
-            foreach ($task in $allTasks) {
-                try {
-                    $info = Get-ScheduledTaskInfo -TaskName $task.TaskName -TaskPath $task.TaskPath -ErrorAction SilentlyContinue
-                    $suspicious = $false
-                    $suspicionReasons = @()
-                    
-                    # Check task properties
-                    if ($task.Actions.Execute -match "powershell|cmd|wscript|cscript|mshta|rundll32") {
-                        $suspicious = $true
-                        $suspicionReasons += "Executes scripting engine"
-                    }
-                    
-                    if ($task.Actions.Execute -match "\\Temp\\|\\AppData\\|\\Users\\Public\\") {
-                        $suspicious = $true
-                        $suspicionReasons += "Executes from suspicious location"
-                    }
-                    
-                    $taskAnalysis += [PSCustomObject]@{
-                        TaskName = $task.TaskName
-                        TaskPath = $task.TaskPath
-                        State = $task.State
-                        Actions = ($task.Actions | ForEach-Object {"$($_.Execute) $($_.Arguments)"}) -join "; "
-                        Triggers = ($task.Triggers | ForEach-Object {$_.CimClass.CimClassName}) -join "; "
-                        Suspicious = $suspicious
-                        SuspicionReasons = $suspicionReasons -join "; "
-                    }
-                    
-                    if ($suspicious) {
-                        Write-ColorOutput "SUSPICIOUS TASK: $($task.TaskName)" "Alert"
-                        $global:alertCount++
-                    }
-                } catch {
-                    continue
-                }
-            }
-            
-            if ($taskAnalysis) {
-                try {
-                    $taskAnalysis | Export-Csv "$incidentPath\Persistence\Tasks\all_scheduled_tasks.csv" -NoTypeInformation
-                    $taskAnalysis | Where-Object {$_.Suspicious} | 
-                        Export-Csv "$incidentPath\ALERTS\suspicious_scheduled_tasks.csv" -NoTypeInformation
-                } catch { }
-            }
-        }
-    } catch {
-        Write-ColorOutput "Warning: Could not analyze scheduled tasks" "Warning"
-    }
-    
-    # Services Analysis (basic in Quick mode)
-    Write-ColorOutput "Analyzing services..." "Progress"
-    
-    try {
-        if ($Quick) {
-            # Quick mode - just check for obvious issues
-            $suspiciousServices = @(Get-Service -ErrorAction SilentlyContinue | Where-Object {
-                $_.Status -eq "Running"
-            } | ForEach-Object {
-                try {
-                    $svc = Get-WmiObject Win32_Service -Filter "Name='$($_.Name)'" -ErrorAction SilentlyContinue
-                    if ($svc -and $svc.PathName -match "\\Temp\\|\\Users\\|cmd\.exe|powershell") {
-                        $_
-                    }
-                } catch { }
-            })
-            
-            if ($suspiciousServices) {
-                Write-ColorOutput "Found $($suspiciousServices.Count) suspicious running services!" "Alert"
-                $global:alertCount += $suspiciousServices.Count
-            }
-        } else {
-            # Full service analysis
-            $services = @(Get-WmiObject Win32_Service -ErrorAction SilentlyContinue)
-            $serviceAnalysis = @()
-            
-            foreach ($service in $services) {
-                try {
-                    $suspicious = $false
-                    $suspicionReasons = @()
-                    
-                    # Check service executable
-                    if ($service.PathName) {
-                        if ($service.PathName -match "\\Users\\|\\Temp\\|\\AppData\\") {
-                            $suspicious = $true
-                            $suspicionReasons += "Service executable in user directory"
-                        }
-                        
-                        if ($service.PathName -match "cmd\.exe|powershell|wscript|cscript|rundll32") {
-                            $suspicious = $true
-                            $suspicionReasons += "Service runs scripting engine"
-                        }
-                        
-                        # Check for unquoted paths with spaces
-                        if ($service.PathName -notmatch '^"' -and $service.PathName -match ' ') {
-                            $suspicious = $true
-                            $suspicionReasons += "Unquoted service path with spaces"
-                        }
-                    }
-                    
-                    $serviceAnalysis += [PSCustomObject]@{
-                        Name = $service.Name
-                        DisplayName = $service.DisplayName
-                        State = $service.State
-                        PathName = $service.PathName
-                        StartName = $service.StartName
-                        Suspicious = $suspicious
-                        SuspicionReasons = $suspicionReasons -join "; "
-                    }
-                    
-                    if ($suspicious -and $service.State -eq "Running") {
-                        Write-ColorOutput "SUSPICIOUS SERVICE: $($service.Name)" "Alert"
-                        $global:alertCount++
-                    }
-                } catch {
-                    continue
-                }
-            }
-            
-            if ($serviceAnalysis) {
-                try {
-                    $serviceAnalysis | Export-Csv "$incidentPath\System\all_services_analysis.csv" -NoTypeInformation
-                    $serviceAnalysis | Where-Object {$_.Suspicious} | 
-                        Export-Csv "$incidentPath\ALERTS\suspicious_services.csv" -NoTypeInformation
-                } catch { }
-            }
-        }
-    } catch {
-        Write-ColorOutput "Warning: Could not analyze services" "Warning"
-    }
-    
-} catch {
-    Write-ColorOutput "Error in persistence analysis: $_" "Error"
-}
-
-# SECTION 5: MEMORY FORENSICS (Skip in Quick mode)
-if (!$SkipMemory -and !$Quick) {
-    Write-ColorOutput "`n[PHASE 5: MEMORY FORENSICS]" "Progress"
-    
-    try {
-        # Process memory statistics
-        Write-ColorOutput "Analyzing process memory..." "Progress"
-        
-        $memoryAnalysis = @(Get-Process -ErrorAction SilentlyContinue | Select-Object ProcessName, Id,
-            @{N='WorkingSetMB';E={[math]::Round($_.WorkingSet64/1MB,2)}},
-            @{N='PrivateMemoryMB';E={[math]::Round($_.PrivateMemorySize64/1MB,2)}},
-            @{N='VirtualMemoryMB';E={[math]::Round($_.VirtualMemorySize64/1MB,2)}},
-            Handles, Threads | Sort-Object WorkingSetMB -Descending)
-        
-        if ($memoryAnalysis) {
-            try {
-                $memoryAnalysis | Export-Csv "$incidentPath\Memory\process_memory_analysis.csv" -NoTypeInformation
-            } catch { }
-        }
-        
-        # Identify memory anomalies
-        $memoryAnomalies = @($memoryAnalysis | Where-Object {
-            $_.WorkingSetMB -gt 1000 -or
-            $_.Handles -gt 10000 -or
-            $_.Threads -gt 500
-        })
-        
-        if ($memoryAnomalies) {
-            Write-ColorOutput "Memory anomalies detected!" "Alert"
-            try {
-                $memoryAnomalies | Export-Csv "$incidentPath\ALERTS\memory_anomalies.csv" -NoTypeInformation
-            } catch { }
-        }
-        
-    } catch {
-        Write-ColorOutput "Error in memory forensics: $_" "Error"
-    }
-} elseif ($Quick) {
-    Write-ColorOutput "`n[PHASE 5: MEMORY FORENSICS - SKIPPED (Quick Mode)]" "Info"
-} else {
-    Write-ColorOutput "`n[PHASE 5: MEMORY FORENSICS - SKIPPED]" "Warning"
-}
-
-# SECTION 6: FILE SYSTEM FORENSICS (Limited in Quick mode)
-if (!$SkipFileSystem) {
-    Write-ColorOutput "`n[PHASE 6: FILE SYSTEM FORENSICS]" "Progress"
-    
-    try {
-        # Recent file activity
-        Write-ColorOutput "Analyzing recent file system activity..." "Progress"
-        
-        $recentDate = if($Quick) {(Get-Date).AddDays(-1)} else {(Get-Date).AddDays(-$DaysBack)}
-        
-        # Critical paths - reduced set for Quick mode
-        $criticalPaths = if($Quick) {
-            @(
-                "$env:TEMP",
-                "$env:LOCALAPPDATA\Temp",
-                "$env:USERPROFILE\Downloads"
-            )
-        } else {
-            @(
-                "$env:TEMP",
-                "$env:APPDATA",
-                "$env:LOCALAPPDATA",
-                "$env:LOCALAPPDATA\Temp",
-                "$env:PUBLIC",
-                "$env:ProgramData",
-                "$env:USERPROFILE\Downloads",
-                "$env:USERPROFILE\Documents",
-                "$env:USERPROFILE\Desktop",
-                "C:\Windows\Temp"
-            )
-        }
-        
-        $recentFiles = @()
-        $suspiciousFiles = @()
-        $fileCount = 0
-        
-        foreach ($path in $criticalPaths) {
-            if (Test-Path $path -ErrorAction SilentlyContinue) {
-                Write-ColorOutput "  Scanning: $path" "Progress"
-                
-                try {
-                    # Limit depth in Quick mode
-                    $scanParams = @{
-                        Path = $path
-                        File = $true
-                        Force = $true
-                        ErrorAction = 'SilentlyContinue'
-                    }
-                    
-                    if (!$Quick) {
-                        $scanParams['Recurse'] = $true
-                    }
-                    
-                    $files = @(Get-ChildItem @scanParams |
-                        Where-Object {
-                            $_.CreationTime -gt $recentDate -or 
-                            $_.LastWriteTime -gt $recentDate
-                        })
-                    
-                    foreach ($file in $files) {
-                        $fileCount++
-                        if ($Quick -and $fileCount -gt 1000) {
-                            Write-ColorOutput "  File limit reached in Quick mode" "Info"
-                            break
-                        }
-                        
-                        try {
-                            $fileInfo = [PSCustomObject]@{
-                                FullPath = $file.FullName
-                                Directory = $file.DirectoryName
-                                FileName = $file.Name
-                                Extension = $file.Extension
-                                Size = $file.Length
-                                CreationTime = $file.CreationTime
-                                LastWriteTime = $file.LastWriteTime
-                                Hidden = ($file.Attributes -band [System.IO.FileAttributes]::Hidden) -ne 0
-                                MD5 = ""
-                                Suspicious = $false
-                                SuspicionReason = ""
-                            }
-                            
-                            # Check for suspicious patterns
-                            if ($file.Extension -match "\.exe$|\.dll$|\.scr$|\.bat$|\.cmd$|\.ps1$|\.vbs$|\.js$") {
-                                $fileInfo.Suspicious = $true
-                                $fileInfo.SuspicionReason = "Executable file"
-                                
-                                # Calculate hash for small executables
-                                if (!$Quick -and $file.Length -lt 10MB) {
-                                    try {
-                                        $fileInfo.MD5 = (Get-FileHash -Path $file.FullName -Algorithm MD5 -ErrorAction SilentlyContinue).Hash
-                                    } catch { }
-                                }
-                            }
-                            
-                            if ($file.Name -match "^[a-z]{8}\.(exe|dll)$|^[0-9]{6,}\.(exe|dll)$") {
-                                $fileInfo.Suspicious = $true
-                                $fileInfo.SuspicionReason += "; Random name pattern"
-                            }
-                            
-                            $recentFiles += $fileInfo
-                            
-                            if ($fileInfo.Suspicious) {
-                                $suspiciousFiles += $fileInfo
-                            }
-                        } catch {
-                            continue
-                        }
-                    }
-                } catch {
-                    Write-ColorOutput "  Warning: Error scanning $path" "Warning"
-                }
-            }
-        }
-        
-        # Export results
-        if ($recentFiles) {
-            try {
-                $recentFiles | Export-Csv "$incidentPath\FileSystem\recent_files.csv" -NoTypeInformation
-            } catch { }
-        }
-        
-        if ($suspiciousFiles) {
-            Write-ColorOutput "Found $($suspiciousFiles.Count) suspicious files!" "Alert"
-            try {
-                $suspiciousFiles | Export-Csv "$incidentPath\ALERTS\suspicious_files.csv" -NoTypeInformation
-            } catch { }
-            $global:alertCount++
-            
-            # Show most suspicious
-            $suspiciousFiles | Sort-Object CreationTime -Descending | Select-Object -First 5 | ForEach-Object {
-                Write-ColorOutput "  - $($_.FileName): $($_.SuspicionReason)" "Alert"
-            }
-        }
-        
-        # Ransomware detection (skip in Quick mode)
-        if (!$Quick) {
-            Write-ColorOutput "Checking for ransomware indicators..." "Progress"
-            
-            $ransomwareIndicators = @{
-                Extensions = @("\.encrypted$", "\.enc$", "\.locked$", "\.crypto$")
-                NoteFiles = @("README.txt", "DECRYPT_INSTRUCTIONS.txt", "HOW_TO_DECRYPT.txt")
-            }
-            
-            $ransomwareFiles = @()
-            
-            foreach ($ext in $ransomwareIndicators.Extensions) {
-                $encrypted = @($recentFiles | Where-Object {$_.Extension -match $ext})
-                if ($encrypted) {
-                    $ransomwareFiles += $encrypted
-                }
-            }
-            
-            if ($ransomwareFiles) {
-                Write-ColorOutput "RANSOMWARE INDICATORS DETECTED!" "Alert" -Critical $true
-                try {
-                    $ransomwareFiles | Export-Csv "$incidentPath\ALERTS\ransomware_files.csv" -NoTypeInformation
-                } catch { }
-                $global:alertCount += 10
-            }
-        }
-        
-    } catch {
-        Write-ColorOutput "Error in file system forensics: $_" "Error"
-    }
-} else {
-    Write-ColorOutput "`n[PHASE 6: FILE SYSTEM FORENSICS - SKIPPED]" "Warning"
-}
-
-# SECTION 7: BROWSER FORENSICS (Skip in Quick mode)
-if (!$SkipBrowser -and !$Quick) {
-    Write-ColorOutput "`n[PHASE 7: BROWSER FORENSICS]" "Progress"
-    
-    try {
-        # Browser paths
-        $browsers = @{
-            Chrome = @{
-                Extensions = "$env:LOCALAPPDATA\Google\Chrome\User Data\Default\Extensions"
-            }
-            Edge = @{
-                Extensions = "$env:LOCALAPPDATA\Microsoft\Edge\User Data\Default\Extensions"
-            }
-        }
-        
-        foreach ($browser in $browsers.GetEnumerator()) {
-            $browserName = $browser.Key
-            $paths = $browser.Value
-            
-            Write-ColorOutput "Checking $browserName..." "Progress"
-            
-            foreach ($item in $paths.GetEnumerator()) {
-                $itemName = $item.Key
-                $itemPath = $item.Value
-                
-                if (Test-Path $itemPath -ErrorAction SilentlyContinue) {
-                    $destPath = "$incidentPath\Browser\$browserName"
-                    try {
-                        $null = New-Item -ItemType Directory -Path $destPath -Force -ErrorAction SilentlyContinue
-                    } catch { }
-                    
-                    # Check extensions
-                    try {
-                        if ($itemName -eq "Extensions") {
-                            $extensions = @(Get-ChildItem $itemPath -Directory -ErrorAction SilentlyContinue)
-                            $extensionList = @()
-                            
-                            foreach ($ext in $extensions) {
-                                try {
-                                    $manifestPath = Get-ChildItem "$($ext.FullName)\*\manifest.json" -ErrorAction SilentlyContinue | Select-Object -First 1
-                                    if ($manifestPath) {
-                                        $manifest = Get-Content $manifestPath.FullName -ErrorAction SilentlyContinue | ConvertFrom-Json
-                                        
-                                        if ($manifest) {
-                                            $extensionList += [PSCustomObject]@{
-                                                ID = $ext.Name
-                                                Name = $manifest.name
-                                                Version = $manifest.version
-                                                Permissions = ($manifest.permissions -join "; ")
-                                            }
-                                        }
-                                    }
-                                } catch { }
-                            }
-                            
-                            if ($extensionList) {
-                                try {
-                                    $extensionList | Export-Csv "$destPath\extensions.csv" -NoTypeInformation
-                                } catch { }
-                                
-                                # Check for suspicious extensions
-                                $suspiciousExt = @($extensionList | Where-Object {
-                                    $_.Permissions -match "webRequest|tabs|cookies|all_urls"
-                                })
-                                
-                                if ($suspiciousExt) {
-                                    Write-ColorOutput "Suspicious browser extensions found!" "Alert"
-                                    try {
-                                        $suspiciousExt | Export-Csv "$incidentPath\ALERTS\suspicious_extensions.csv" -NoTypeInformation
-                                    } catch { }
-                                    $global:alertCount++
-                                }
-                            }
-                        }
-                    } catch { }
-                }
-            }
-        }
-        
-    } catch {
-        Write-ColorOutput "Error in browser forensics: $_" "Error"
-    }
-} elseif ($Quick) {
-    Write-ColorOutput "`n[PHASE 7: BROWSER FORENSICS - SKIPPED (Quick Mode)]" "Info"
-} else {
-    Write-ColorOutput "`n[PHASE 7: BROWSER FORENSICS - SKIPPED]" "Warning"
-}
-
-# SECTION 8: EVENT LOG FORENSICS (Limited in Quick mode)
-Write-ColorOutput "`n[PHASE 8: EVENT LOG FORENSICS]" "Progress"
-
-try {
-    # Define critical events to check
-    $criticalEvents = @{
-        "Security" = @{
-            "4624" = "Successful logon"
-            "4625" = "Failed logon"
-            "4672" = "Special privileges assigned"
-            "4688" = "Process creation"
-            "4697" = "Service installed"
-            "1102" = "Audit log cleared"
-        }
-        "System" = @{
-            "7045" = "Service installed"
-            "104" = "Event log cleared"
-        }
-    }
-    
-    # Add more events if not in Quick mode
-    if (!$Quick) {
-        $criticalEvents["Security"] += @{
-            "4634" = "Logoff"
-            "4698" = "Scheduled task created"
-            "4720" = "User account created"
-            "4732" = "Member added to security group"
-            "5140" = "Network share accessed"
-        }
-    }
-    
-    $logAnalysis = @()
-    $suspiciousEvents = @()
-    
-    # Limit time range in Quick mode
-    $logTimeRange = if($Quick) {1} else {$DaysBack}
-    
-    foreach ($logType in $criticalEvents.Keys) {
-        Write-ColorOutput "Analyzing $logType log..." "Progress"
-        
-        $eventIds = $criticalEvents[$logType].Keys | ForEach-Object {[int]$_}
-        
-        try {
-            # Limit events in Quick mode
-            $maxEvents = if($Quick) {1000} else {5000}
-            
-            $events = @(Get-WinEvent -FilterHashtable @{
-                LogName = $logType
-                ID = $eventIds
-                StartTime = (Get-Date).AddDays(-$logTimeRange)
-            } -MaxEvents $maxEvents -ErrorAction SilentlyContinue)
-            
-            if ($events) {
-                foreach ($event in $events) {
-                    try {
-                        $eventInfo = [PSCustomObject]@{
-                            TimeCreated = $event.TimeCreated
-                            Log = $logType
-                            EventID = $event.Id
-                            EventType = $criticalEvents[$logType][$event.Id.ToString()]
-                            Level = $event.LevelDisplayName
-                            Computer = $event.MachineName
-                            Message = if($event.Message) {$event.Message -replace "`r`n", " " -replace "\s+", " "} else {""}
-                        }
-                        
-                        $logAnalysis += $eventInfo
-                        
-                        # Detect suspicious patterns
-                        $suspicious = $false
-                        $reason = ""
-                        
-                        # Failed logons
-                        if ($event.Id -eq 4625) {
-                            $suspicious = $true
-                            $reason = "Failed logon attempt"
-                        }
-                        
-                        # Log cleared
-                        if ($event.Id -in @(1102, 104)) {
-                            $suspicious = $true
-                            $reason = "Event log cleared"
-                        }
-                        
-                        # Service/task creation
-                        if ($event.Id -in @(7045, 4697, 4698)) {
-                            if ($event.Message -match "powershell|cmd|wscript|cscript|mshta|rundll32") {
-                                $suspicious = $true
-                                $reason = "Suspicious service/task created"
-                            }
-                        }
-                        
-                        if ($suspicious) {
-                            $suspiciousEvents += [PSCustomObject]@{
-                                Event = $eventInfo
-                                Reason = $reason
-                            }
-                        }
-                    } catch {
-                        continue
-                    }
-                }
-            }
-        } catch {
-            Write-ColorOutput "  Error reading $logType log: $_" "Error"
-        }
-    }
-    
-    # Export results
-    if ($logAnalysis) {
-        try {
-            $logAnalysis | Export-Csv "$incidentPath\Logs\Windows\event_log_analysis.csv" -NoTypeInformation
-        } catch { }
-    }
-    
-    if ($suspiciousEvents) {
-        Write-ColorOutput "Found $($suspiciousEvents.Count) suspicious events!" "Alert"
-        try {
-            $suspiciousEvents | Select-Object -ExpandProperty Event | 
-                Export-Csv "$incidentPath\ALERTS\suspicious_events.csv" -NoTypeInformation
-        } catch { }
-        $global:alertCount++
-    }
-    
-    # Export full logs (skip in Quick mode)
-    if (!$Quick) {
-        Write-ColorOutput "Exporting full event logs..." "Progress"
-        
-        $exportLogs = @("Security", "System", "Application")
-        
-        foreach ($log in $exportLogs) {
-            try {
-                $logFile = $log -replace '/', '-'
-                wevtutil epl $log "$incidentPath\Logs\$logFile.evtx" /ow:true 2>$null
-            } catch { }
-        }
-    }
-    
-} catch {
-    Write-ColorOutput "Error in event log forensics: $_" "Error"
-}
-
-# SECTION 9: SECURITY ASSESSMENT
-Write-ColorOutput "`n[PHASE 9: SECURITY ASSESSMENT]" "Progress"
-
-try {
-    $securityStatus = @{}
-    
-    # Windows Defender status
-    Write-ColorOutput "Checking Windows Defender..." "Progress"
-    try {
-        $defender = Get-MpComputerStatus -ErrorAction SilentlyContinue
-        
-        if ($defender) {
-            $defenderStatus = [PSCustomObject]@{
-                AntivirusEnabled = $defender.AntivirusEnabled
-                RealTimeProtectionEnabled = $defender.RealTimeProtectionEnabled
-                AntivirusSignatureLastUpdated = $defender.AntivirusSignatureLastUpdated
-            }
-            
-            try {
-                $defenderStatus | Export-Csv "$incidentPath\System\Security\defender_status.csv" -NoTypeInformation
-            } catch { }
-            
-            if (!$defender.RealTimeProtectionEnabled) {
-                Write-ColorOutput "Real-time protection is DISABLED!" "Alert" -Critical $true
-                $securityStatus.DefenderDisabled = $true
-                $global:alertCount += 5
-            }
-        }
-    } catch {
-        Write-ColorOutput "Warning: Could not check Windows Defender status" "Warning"
-    }
-    
-    # Firewall status
-    Write-ColorOutput "Checking Windows Firewall..." "Progress"
-    try {
-        $fwProfiles = @(Get-NetFirewallProfile -ErrorAction SilentlyContinue)
-        
-        $fwDisabled = @($fwProfiles | Where-Object {!$_.Enabled})
-        if ($fwDisabled) {
-            Write-ColorOutput "Firewall disabled on profiles: $($fwDisabled.Name -join ', ')" "Alert"
-            $global:alertCount++
-        }
-    } catch {
-        Write-ColorOutput "Warning: Could not check firewall status" "Warning"
-    }
-    
-} catch {
-    Write-ColorOutput "Error in security assessment: $_" "Error"
-}
-
-# SECTION 10: REMOTE ACCESS INVESTIGATION (Basic in Quick mode)
-Write-ColorOutput "`n[PHASE 10: REMOTE ACCESS INVESTIGATION]" "Progress"
-
-try {
-    $remoteAccessFindings = @{
-        Tools = @()
-        Services = @()
-        Processes = @()
-    }
-    
-    # Common remote tool patterns
-    $remotePatterns = @(
-        "TeamViewer", "AnyDesk", "Chrome.*Remote", "LogMeIn",
-        "VNC", "RDP", "SSH", "Telnet",
-        "ngrok", "netcat", "nc\.exe",
-        "psexec", "paexec", "winexe"
-    )
-    
-    # Check running processes
-    Write-ColorOutput "Scanning for remote access processes..." "Progress"
-    try {
-        $remoteProcs = @(Get-Process -ErrorAction SilentlyContinue | Where-Object {
-            $procName = $_.ProcessName
-            if ($_.Description) { $procName += " " + $_.Description }
-            $matched = $false
-            foreach ($pattern in $remotePatterns) {
-                if ($procName -match $pattern) {
-                    $matched = $true
-                    break
-                }
-            }
-            $matched
-        })
-        
-        if ($remoteProcs) {
-            foreach ($proc in $remoteProcs) {
-                $remoteAccessFindings.Processes += [PSCustomObject]@{
-                    Name = $proc.ProcessName
-                    PID = $proc.Id
-                    Path = $proc.Path
-                }
-                
-                Write-ColorOutput "REMOTE TOOL: $($proc.ProcessName) [PID: $($proc.Id)]" "Alert"
-                $global:alertCount++
-            }
-        }
-    } catch {
-        Write-ColorOutput "Warning: Could not scan for remote processes" "Warning"
-    }
-    
-    # RDP sessions
-    try {
-        $rdpSessions = qwinsta 2>&1 | Select-String "Active|rdp-tcp#" -ErrorAction SilentlyContinue
-        if ($rdpSessions) {
-            Write-ColorOutput "Active RDP sessions detected!" "Alert"
-            $global:alertCount++
-        }
-    } catch { }
-    
-    # Export findings
-    if ($remoteAccessFindings.Processes) {
-        try {
-            $remoteAccessFindings.Processes | Export-Csv "$incidentPath\ALERTS\remote_access_processes.csv" -NoTypeInformation
-        } catch { }
-    }
-    
-} catch {
-    Write-ColorOutput "Error in remote access investigation: $_" "Error"
-}
-
-# SECTION 11: IOC EXTRACTION
-Write-ColorOutput "`n[PHASE 11: IOC EXTRACTION]" "Progress"
-
-try {
-    # Extract all IOCs from collected data
-    Write-ColorOutput "Extracting Indicators of Compromise..." "Progress"
-    
-    # IPs
-    if ($connectionDetails) {
-        $global:iocs.IPs = @($connectionDetails | 
-            Where-Object {$_.RemoteAddress -notmatch "^(10\.|172\.|192\.168\.|127\.|::1|0\.0\.0\.0)"} |
-            Select-Object -ExpandProperty RemoteAddress -Unique)
-    }
-    
-    # Domains
-    if ($dnsCache) {
-        $global:iocs.Domains = @($dnsCache | Select-Object -ExpandProperty Entry -Unique)
-    }
-    
-    # File hashes
-    if ($allProcesses) {
-        $global:iocs.Hashes = @($allProcesses | 
-            Where-Object {$_.MD5 -ne "N/A"} | 
-            Select-Object -ExpandProperty MD5 -Unique)
-    }
-    
-    # Process names
-    if ($suspiciousProcesses) {
-        $global:iocs.ProcessNames = @($suspiciousProcesses | 
-            Select-Object -ExpandProperty Name -Unique)
-    }
-    
-    # Create IOC report
-    $iocReport = @{
-        CollectionTime = Get-Date
-        System = $env:COMPUTERNAME
-        TotalIOCs = 0
-        IOCs = $global:iocs
-    }
-    
-    # Count total IOCs
-    $global:iocs.PSObject.Properties | ForEach-Object {
-        if ($_.Value) {
-            $iocReport.TotalIOCs += $_.Value.Count
-        }
-    }
-    
-    # Export IOCs
-    try {
-        $iocReport | ConvertTo-Json -Depth 5 | Out-File "$incidentPath\IOCs\all_iocs.json"
-    } catch { }
-    
-    # Create CSV for easy import
-    $csvIOCs = @()
-    
-    foreach ($ip in $global:iocs.IPs | Select-Object -First 100) {
-        $csvIOCs += [PSCustomObject]@{
-            Type = "IP"
-            Value = $ip
-            Context = "Suspicious outbound connection"
-        }
-    }
-    
-    foreach ($domain in $global:iocs.Domains | Select-Object -First 100) {
-        $csvIOCs += [PSCustomObject]@{
-            Type = "Domain"
-            Value = $domain
-            Context = "DNS resolution"
-        }
-    }
-    
-    foreach ($hash in $global:iocs.Hashes | Select-Object -First 50) {
-        $processName = ($allProcesses | Where-Object {$_.MD5 -eq $hash} | Select-Object -First 1).Name
-        $csvIOCs += [PSCustomObject]@{
-            Type = "MD5"
-            Value = $hash
-            Context = "Process: $processName"
-        }
-    }
-    
-    if ($csvIOCs) {
-        try {
-            $csvIOCs | Export-Csv "$incidentPath\IOCs\iocs_flat.csv" -NoTypeInformation
-        } catch { }
-    }
-    
-    Write-ColorOutput "Extracted $($iocReport.TotalIOCs) total IOCs" "Info"
-    
-} catch {
-    Write-ColorOutput "Error extracting IOCs: $_" "Error"
-}
-
-# SECTION 12: FINAL ANALYSIS AND REPORTING
-Write-ColorOutput "`n[PHASE 12: FINAL ANALYSIS]" "Progress"
-
-try {
-    # Calculate threat score
-    $threatScore = 0
-    $threatFactors = @()
-    
-    # Factor in various indicators
-    if ($global:alertCount -gt 0) {
-        $threatScore += [Math]::Min($global:alertCount * 5, 50)
-        $threatFactors += "Alerts: $($global:alertCount)"
-    }
-    
-    if ($criticalProcesses -and $criticalProcesses.Count -gt 0) {
-        $threatScore += $criticalProcesses.Count * 10
-        $threatFactors += "Critical processes: $($criticalProcesses.Count)"
-    }
-    
-    if ($detectedMalware -and $detectedMalware.Count -gt 0) {
-        $threatScore += 50
-        $threatFactors += "Malware detected: $($detectedMalware.Count)"
-    }
-    
-    if ($ransomwareFiles -and $ransomwareFiles.Count -gt 0) {
-        $threatScore += 80
-        $threatFactors += "Ransomware indicators: Yes"
-    }
-    
-    if ((!$defender -or !$defender.RealTimeProtectionEnabled) -or $fwDisabled) {
-        $threatScore += 30
-        $threatFactors += "Security disabled: Yes"
-    }
-    
-    # Determine threat level
-    $threatLevel = switch ($threatScore) {
-        {$_ -ge 100} { "CRITICAL" }
-        {$_ -ge 70} { "HIGH" }
-        {$_ -ge 40} { "MEDIUM" }
-        {$_ -ge 20} { "LOW" }
-        default { "MINIMAL" }
-    }
-    
-    # Generate executive summary - NO UNICODE
-    $executiveSummary = @"
-================================================================================
-                    INCIDENT RESPONSE EXECUTIVE SUMMARY
-================================================================================
-System: $env:COMPUTERNAME
-Date: $(Get-Date)
-Collection Mode: $(if($Quick){"QUICK"}elseif($Deep){"DEEP"}else{"STANDARD"})
-Collection ID: $timestamp
-
-THREAT ASSESSMENT
-=================
-Threat Level: $threatLevel (Score: $threatScore/100)
-Total Alerts: $($global:alertCount)
-
-KEY FINDINGS
-============
-$(if ($global:criticalAlerts -and $global:criticalAlerts.Count -gt 0) {
-"CRITICAL ALERTS:
-$($global:criticalAlerts | ForEach-Object {"- $_"} | Out-String)"
-})
-
-Network Activity:
-- Total Connections: $($allConnections.Count)
-- Suspicious Connections: $(if($suspiciousConnections){$suspiciousConnections.Count}else{0})
-
-Process Analysis:
-- Total Processes: $($allProcesses.Count)
-- Suspicious Processes: $(if($suspiciousProcesses){$suspiciousProcesses.Count}else{0})
-- Critical Threats: $(if($criticalProcesses){$criticalProcesses.Count}else{0})
-
-Security Status:
-- Windows Defender: $(if($defender -and $defender.RealTimeProtectionEnabled){"Enabled"}else{"DISABLED"})
-- Firewall: $(if($fwDisabled){"DISABLED on $($fwDisabled.Name -join ', ')"}else{"Enabled"})
-
-RECOMMENDED ACTIONS
-==================
-$(switch ($threatLevel) {
-    "CRITICAL" { "!!! IMMEDIATE ACTION REQUIRED !!!" }
-    "HIGH" { "** HIGH PRIORITY RESPONSE **" }
-    "MEDIUM" { "* ELEVATED MONITORING REQUIRED *" }
-    "LOW" { "- REVIEW AND MONITOR -" }
-    default { "- STANDARD MONITORING -" }
-})
-
-Evidence Location: $incidentPath
-================================================================================
-"@
-    
-    # Save executive summary
-    try {
-        $executiveSummary | Out-File "$incidentPath\EXECUTIVE_SUMMARY.txt"
-    } catch { }
-    
-    Write-Host $executiveSummary -ForegroundColor Cyan
-    
-} catch {
-    Write-ColorOutput "Error generating final report: $_" "Error"
-}
-
-# Wait for any background jobs
-$remainingJobs = @(Get-Job -ErrorAction SilentlyContinue)
-if ($remainingJobs) {
-    Write-ColorOutput "Waiting for background tasks..." "Progress"
-    $remainingJobs | ForEach-Object {
-        try {
-            $_ | Wait-Job -Timeout 10 | Out-Null
-            if ($_.State -eq "Running") {
-                $_ | Stop-Job
-            }
-            $_ | Remove-Job -Force
-        } catch { }
-    }
-}
-
-try {
-    Stop-Transcript -ErrorAction SilentlyContinue
-} catch { }
-
-# Create ZIP archive
-try {
-    $zipPath = "C:\incident_${timestamp}_${env:COMPUTERNAME}.zip"
-    Write-ColorOutput "Creating evidence archive..." "Progress"
-    
-    Compress-Archive -Path "$incidentPath\*" -DestinationPath $zipPath -CompressionLevel Optimal -Force
-    
-    $zipInfo = Get-Item $zipPath
-    Write-ColorOutput "Evidence archive created: $zipPath" "Success"
-    Write-ColorOutput "Archive size: $([math]::Round($zipInfo.Length/1MB, 2)) MB" "Info"
-    
-} catch {
-    Write-ColorOutput "Failed to create archive: $_" "Error"
-}
+# Complete main progress
+Write-Progress -Id $script:mainProgressId -Completed
 
 # FINAL OUTPUT - NO UNICODE
 Write-ColorOutput "`n================================================================================" "Success"
