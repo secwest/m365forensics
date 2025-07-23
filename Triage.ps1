@@ -1,251 +1,410 @@
-# INCIDENT RESPONSE TRIAGE SCRIPT - Active Attacker Collection
-# Run as Administrator for full access
+# INCIDENT RESPONSE TRIAGE SCRIPT - ROBUST VERSION
+# Run as Administrator: powershell -ExecutionPolicy Bypass -File .\Triage.ps1
 
-# Initialize incident response
+param(
+    [switch]$SkipDNS = $true,  # Skip DNS resolution by default for speed
+    [switch]$Quick = $false,    # Quick mode - essential data only
+    [int]$TimeoutSeconds = 30   # Timeout for long operations
+)
+
+# Initialize
+$ErrorActionPreference = "SilentlyContinue"
+$ProgressPreference = "Continue"
 $timestamp = Get-Date -Format "yyyyMMdd_HHmmss"
 $incidentPath = "C:\incident_$timestamp"
-New-Item -ItemType Directory -Path $incidentPath -Force | Out-Null
-Start-Transcript -Path "$incidentPath\collection_log.txt"
+
+# Create incident folder
+try {
+    New-Item -ItemType Directory -Path $incidentPath -Force | Out-Null
+    Start-Transcript -Path "$incidentPath\collection_log.txt" -Force
+} catch {
+    Write-Host "ERROR: Cannot create incident folder. Exiting." -ForegroundColor Red
+    exit 1
+}
 
 Write-Host "=== INCIDENT RESPONSE COLLECTION STARTED: $timestamp ===" -ForegroundColor Yellow
+Write-Host "Output directory: $incidentPath" -ForegroundColor Cyan
+if ($Quick) { Write-Host "Running in QUICK mode" -ForegroundColor Yellow }
 
-# SECTION 1: ACTIVE NETWORK CONNECTIONS & REMOTE ACCESS
-Write-Host "`n[1] COLLECTING NETWORK CONNECTIONS & REMOTE ACCESS DATA" -ForegroundColor Cyan
-
-# Enhanced network connections with DNS resolution and process details
-Get-NetTCPConnection | Where-Object {$_.State -eq "Established" -or $_.State -eq "Listen"} | 
-    ForEach-Object {
-        $proc = Get-Process -Id $_.OwningProcess -ErrorAction SilentlyContinue
-        $dns = try { [System.Net.Dns]::GetHostEntry($_.RemoteAddress).HostName } catch { $_.RemoteAddress }
-        [PSCustomObject]@{
-            LocalAddress = $_.LocalAddress
-            LocalPort = $_.LocalPort
-            RemoteAddress = $_.RemoteAddress
-            RemoteDNS = $dns
-            RemotePort = $_.RemotePort
-            State = $_.State
-            ProcessName = $proc.ProcessName
-            ProcessId = $_.OwningProcess
-            ProcessPath = $proc.Path
-            ProcessStart = $proc.StartTime
-            ProcessCmdLine = (Get-WmiObject Win32_Process -Filter "ProcessId=$($_.OwningProcess)").CommandLine
-        }
-    } | Export-Csv "$incidentPath\network_connections_enhanced.csv" -NoTypeInformation
-
-# Comprehensive netstat output
-netstat -anob > "$incidentPath\netstat_full.txt"
-netstat -rn > "$incidentPath\routing_table.txt"
-
-# Active sessions and logged-in users
-@"
-=== RDP SESSIONS ===
-$(qwinsta)
-
-=== LOGGED IN USERS ===
-$(quser)
-
-=== NET SESSIONS ===
-$(net session 2>$null)
-
-=== POWERSHELL REMOTING CONFIG ===
-$(Get-WSManInstance -ResourceURI winrm/config/service -ErrorAction SilentlyContinue | Out-String)
-$(Get-PSSessionConfiguration | Out-String)
-"@ | Out-File "$incidentPath\active_sessions.txt"
-
-# Check for remote access tools and suspicious services
-$remoteTools = "TeamViewer|AnyDesk|Chrome Remote|LogMeIn|VNC|RDP|WinRM|SSH|ScreenConnect|Splashtop|GoToMyPC|Radmin|DameWare|pcAnywhere|Ammyy|UltraVNC|TightVNC|RealVNC"
-Get-Service | Where-Object {$_.Name -match $remoteTools -or $_.DisplayName -match $remoteTools} | 
-    Select-Object Name, DisplayName, Status, StartType, 
-    @{Name="Path";Expression={(Get-WmiObject Win32_Service -Filter "Name='$($_.Name)'").PathName}} |
-    Export-Csv "$incidentPath\remote_access_services.csv" -NoTypeInformation
-
-# SECTION 2: PROCESS ANALYSIS
-Write-Host "`n[2] COLLECTING PROCESS INFORMATION" -ForegroundColor Cyan
-
-# All processes with enhanced details
-Get-WmiObject Win32_Process | Select-Object Name, ProcessId, ParentProcessId, 
-    @{Name="ParentName";Expression={
-        $parent = Get-WmiObject Win32_Process -Filter "ProcessId=$($_.ParentProcessId)" -ErrorAction SilentlyContinue
-        if($parent) { $parent.Name } else { "N/A" }
-    }},
-    CommandLine, CreationDate, ExecutablePath,
-    @{Name="Owner";Expression={$_.GetOwner().User}},
-    @{Name="OwnerDomain";Expression={$_.GetOwner().Domain}} |
-    Export-Csv "$incidentPath\all_processes_detailed.csv" -NoTypeInformation
-
-# Processes with network connections
-$netProcs = (Get-NetTCPConnection).OwningProcess | Select-Object -Unique
-Get-Process | Where-Object {$_.Id -in $netProcs} | 
-    Select-Object ProcessName, Id, StartTime, Path, Company, Description,
-    @{Name="Connections";Expression={
-        (Get-NetTCPConnection -OwningProcess $_.Id | Measure-Object).Count
-    }} | Export-Csv "$incidentPath\network_processes.csv" -NoTypeInformation
-
-# Recently started processes (last 2 hours)
-Get-Process | Where-Object {$_.StartTime -gt (Get-Date).AddHours(-2)} | 
-    Select-Object ProcessName, Id, StartTime, Path, Company |
-    Export-Csv "$incidentPath\recent_processes.csv" -NoTypeInformation
-
-# Suspicious process indicators
-$suspiciousProcs = Get-Process | Where-Object {
-    $_.Path -match "\\AppData\\|\\Temp\\|\\Users\\Public\\" -or
-    $_.ProcessName -match "^[a-z]{8}$|^[0-9]{4,}$" -or
-    ($_.ProcessName -eq "svchost" -and $_.Path -notmatch "\\System32\\")
-}
-$suspiciousProcs | Select-Object ProcessName, Id, Path, StartTime | 
-    Export-Csv "$incidentPath\suspicious_processes.csv" -NoTypeInformation
-
-# SECTION 3: PERSISTENCE MECHANISMS
-Write-Host "`n[3] CHECKING PERSISTENCE MECHANISMS" -ForegroundColor Cyan
-
-# Scheduled tasks with details
-Get-ScheduledTask | Where-Object {$_.State -ne "Disabled"} | 
-    ForEach-Object {
-        $task = $_
-        $info = Get-ScheduledTaskInfo -TaskName $task.TaskName -TaskPath $task.TaskPath -ErrorAction SilentlyContinue
-        [PSCustomObject]@{
-            TaskName = $task.TaskName
-            TaskPath = $task.TaskPath
-            State = $task.State
-            Author = $task.Author
-            Description = $task.Description
-            LastRunTime = $info.LastRunTime
-            NextRunTime = $info.NextRunTime
-            Actions = ($task.Actions | ForEach-Object { $_.Execute + " " + $_.Arguments }) -join "; "
-        }
-    } | Export-Csv "$incidentPath\scheduled_tasks_detailed.csv" -NoTypeInformation
-
-# Registry persistence locations
-$regPersistence = @{
-    "HKLM_Run" = "HKLM:\Software\Microsoft\Windows\CurrentVersion\Run"
-    "HKLM_RunOnce" = "HKLM:\Software\Microsoft\Windows\CurrentVersion\RunOnce"
-    "HKLM_RunServices" = "HKLM:\Software\Microsoft\Windows\CurrentVersion\RunServices"
-    "HKLM_RunServicesOnce" = "HKLM:\Software\Microsoft\Windows\CurrentVersion\RunServicesOnce"
-    "HKCU_Run" = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Run"
-    "HKCU_RunOnce" = "HKCU:\Software\Microsoft\Windows\CurrentVersion\RunOnce"
-    "HKLM_Winlogon" = "HKLM:\Software\Microsoft\Windows NT\CurrentVersion\Winlogon"
-    "HKCU_Winlogon" = "HKCU:\Software\Microsoft\Windows NT\CurrentVersion\Winlogon"
-    "HKLM_RunOnceEx" = "HKLM:\Software\Microsoft\Windows\CurrentVersion\RunOnceEx"
-    "HKCU_RunOnceEx" = "HKCU:\Software\Microsoft\Windows\CurrentVersion\RunOnceEx"
+# Progress tracking function
+function Show-Progress {
+    param($Activity, $Status)
+    Write-Host "[$([DateTime]::Now.ToString('HH:mm:ss'))] $Activity - $Status" -ForegroundColor Green
 }
 
-$regResults = @()
-foreach ($key in $regPersistence.GetEnumerator()) {
-    $values = Get-ItemProperty $key.Value -ErrorAction SilentlyContinue
-    if ($values) {
-        $values.PSObject.Properties | Where-Object { $_.Name -notmatch "^PS" } | ForEach-Object {
-            $regResults += [PSCustomObject]@{
-                Location = $key.Name
-                Name = $_.Name
-                Value = $_.Value
+# SECTION 1: CRITICAL - ACTIVE CONNECTIONS & SUSPICIOUS PROCESSES
+Show-Progress "SECTION 1" "Collecting active network connections"
+
+try {
+    # Fast network collection without DNS
+    $connections = Get-NetTCPConnection | Where-Object {$_.State -eq "Established" -or $_.State -eq "Listen"}
+    $connections | Select-Object LocalAddress, LocalPort, RemoteAddress, RemotePort, State, OwningProcess |
+        Export-Csv "$incidentPath\network_connections_fast.csv" -NoTypeInformation
+    
+    Write-Host "  - Found $($connections.Count) active connections" -ForegroundColor Gray
+    
+    # Get process details for network connections
+    $netPids = $connections.OwningProcess | Select-Object -Unique
+    $networkProcesses = @()
+    
+    foreach ($pid in $netPids) {
+        $proc = Get-Process -Id $pid -ErrorAction SilentlyContinue
+        if ($proc) {
+            $wmiProc = Get-WmiObject Win32_Process -Filter "ProcessId=$pid" -ErrorAction SilentlyContinue
+            $networkProcesses += [PSCustomObject]@{
+                ProcessName = $proc.ProcessName
+                ProcessId = $pid
+                Path = $proc.Path
+                StartTime = $proc.StartTime
+                CommandLine = $wmiProc.CommandLine
+                ParentProcessId = $wmiProc.ParentProcessId
+                ConnectionCount = ($connections | Where-Object {$_.OwningProcess -eq $pid}).Count
             }
         }
     }
-}
-$regResults | Export-Csv "$incidentPath\registry_persistence.csv" -NoTypeInformation
-
-# WMI persistence
-Get-WmiObject -Namespace root\subscription -Class __EventFilter | 
-    Export-Csv "$incidentPath\wmi_event_filters.csv" -NoTypeInformation
-Get-WmiObject -Namespace root\subscription -Class __EventConsumer | 
-    Export-Csv "$incidentPath\wmi_event_consumers.csv" -NoTypeInformation
-Get-WmiObject -Namespace root\subscription -Class __FilterToConsumerBinding | 
-    Export-Csv "$incidentPath\wmi_bindings.csv" -NoTypeInformation
-
-# Startup folders
-Get-ChildItem "C:\ProgramData\Microsoft\Windows\Start Menu\Programs\StartUp" -ErrorAction SilentlyContinue |
-    Export-Csv "$incidentPath\all_users_startup.csv" -NoTypeInformation
-Get-ChildItem "$env:APPDATA\Microsoft\Windows\Start Menu\Programs\Startup" -ErrorAction SilentlyContinue |
-    Export-Csv "$incidentPath\current_user_startup.csv" -NoTypeInformation
-
-# SECTION 4: EVENT LOG ANALYSIS
-Write-Host "`n[4] EXTRACTING EVENT LOGS" -ForegroundColor Cyan
-
-# Security events - expanded ID list
-$securityEvents = @{
-    LogName = 'Security'
-    ID = 1102,4624,4625,4634,4647,4648,4672,4688,4697,4698,4699,4700,4701,4702,4719,4720,4732,4738,4776,4778,4779,5140,5145,7045
-    StartTime = (Get-Date).AddDays(-7)
-}
-Get-WinEvent -FilterHashtable $securityEvents -ErrorAction SilentlyContinue | 
-    Select-Object TimeCreated, Id, Message, UserId |
-    Export-Csv "$incidentPath\security_events_week.csv" -NoTypeInformation
-
-# PowerShell logs - both classic and operational
-Get-WinEvent -LogName "Windows PowerShell" -MaxEvents 1000 -ErrorAction SilentlyContinue |
-    Export-Csv "$incidentPath\powershell_classic_logs.csv" -NoTypeInformation
-Get-WinEvent -LogName "Microsoft-Windows-PowerShell/Operational" -MaxEvents 1000 -ErrorAction SilentlyContinue |
-    Export-Csv "$incidentPath\powershell_operational_logs.csv" -NoTypeInformation
-
-# RDP and Terminal Services logs
-$rdpLogs = @(
-    "Microsoft-Windows-TerminalServices-RemoteConnectionManager/Operational",
-    "Microsoft-Windows-TerminalServices-LocalSessionManager/Operational",
-    "Microsoft-Windows-RemoteDesktopServices-RdpCoreTS/Operational"
-)
-foreach ($log in $rdpLogs) {
-    Get-WinEvent -LogName $log -MaxEvents 500 -ErrorAction SilentlyContinue |
-        Export-Csv "$incidentPath\rdp_$($log.Replace('/','-')).csv" -NoTypeInformation
+    
+    $networkProcesses | Export-Csv "$incidentPath\network_processes.csv" -NoTypeInformation
+    Write-Host "  - Identified $($networkProcesses.Count) processes with network activity" -ForegroundColor Gray
+    
+    # Check specific suspicious PIDs if provided in earlier analysis
+    $suspiciousPids = @(6640, 11492, 2072, 5300)  # From your netstat
+    Show-Progress "SECTION 1" "Checking known suspicious PIDs"
+    
+    $suspiciousDetails = @()
+    foreach ($pid in $suspiciousPids) {
+        $proc = Get-WmiObject Win32_Process -Filter "ProcessId=$pid" -ErrorAction SilentlyContinue
+        if ($proc) {
+            $suspiciousDetails += $proc | Select-Object ProcessId, Name, ExecutablePath, CommandLine, ParentProcessId, @{N='CreationDate';E={$_.ConvertToDateTime($_.CreationDate)}}
+            Write-Host "  - Found suspicious PID $pid : $($proc.Name)" -ForegroundColor Yellow
+        }
+    }
+    if ($suspiciousDetails) {
+        $suspiciousDetails | Export-Csv "$incidentPath\suspicious_pids_detailed.csv" -NoTypeInformation
+    }
+    
+} catch {
+    Write-Host "ERROR in network collection: $_" -ForegroundColor Red
 }
 
-# Export full event logs
-wevtutil epl Security "$incidentPath\Security.evtx"
-wevtutil epl Application "$incidentPath\Application.evtx"
-wevtutil epl System "$incidentPath\System.evtx"
-wevtutil epl "Microsoft-Windows-PowerShell/Operational" "$incidentPath\PowerShell-Operational.evtx" 2>$null
-wevtutil epl "Microsoft-Windows-Sysmon/Operational" "$incidentPath\Sysmon-Operational.evtx" 2>$null
+# Quick netstat for established connections
+Show-Progress "SECTION 1" "Running netstat for established connections"
+try {
+    $netstatJob = Start-Job -ScriptBlock { netstat -ano | Select-String "ESTABLISHED|LISTEN" }
+    $result = Wait-Job $netstatJob -Timeout $TimeoutSeconds
+    if ($result) {
+        Receive-Job $netstatJob | Out-File "$incidentPath\netstat_established.txt"
+    } else {
+        Stop-Job $netstatJob -Force
+        "Netstat timed out after $TimeoutSeconds seconds" | Out-File "$incidentPath\netstat_established.txt"
+    }
+    Remove-Job $netstatJob -Force
+} catch {
+    Write-Host "WARNING: Netstat failed" -ForegroundColor Yellow
+}
 
-# SECTION 5: SYSTEM STATE & ADDITIONAL CHECKS
-Write-Host "`n[5] COLLECTING SYSTEM STATE INFORMATION" -ForegroundColor Cyan
+# SECTION 2: REMOTE ACCESS & SESSIONS
+Show-Progress "SECTION 2" "Checking remote access and sessions"
 
-# System information
-systeminfo > "$incidentPath\systeminfo.txt"
-Get-ComputerInfo | Export-Csv "$incidentPath\computer_info.csv" -NoTypeInformation
+try {
+    $sessionInfo = @"
+=== COLLECTION TIME: $(Get-Date) ===
 
-# Active ports and firewall rules
-Get-NetFirewallRule | Where-Object {$_.Enabled -eq $true -and $_.Direction -eq "Inbound"} |
-    Select-Object DisplayName, Profile, Action, Protocol, LocalPort |
-    Export-Csv "$incidentPath\firewall_rules_inbound.csv" -NoTypeInformation
+=== RDP SESSIONS (qwinsta) ===
+$(qwinsta 2>&1)
 
-# DNS cache (might show attacker domains)
-Get-DnsClientCache | Export-Csv "$incidentPath\dns_cache.csv" -NoTypeInformation
+=== LOGGED IN USERS (quser) ===
+$(quser 2>&1)
 
-# ARP cache
-arp -a > "$incidentPath\arp_cache.txt"
+=== NETWORK SESSIONS (net session) ===
+$(net session 2>&1)
 
-# Currently loaded drivers (rootkit detection)
-Get-WmiObject Win32_PnPSignedDriver | Select-Object DeviceName, DriverVersion, DriverDate, IsSigned |
-    Export-Csv "$incidentPath\loaded_drivers.csv" -NoTypeInformation
+=== NETWORK SHARES (net share) ===
+$(net share 2>&1)
 
-# Shadow copies (in case attacker deleted them)
-vssadmin list shadows > "$incidentPath\shadow_copies.txt" 2>&1
-
-# SECTION 6: QUICK ANALYSIS SUMMARY
-Write-Host "`n[6] GENERATING QUICK ANALYSIS SUMMARY" -ForegroundColor Cyan
-
-$summary = @"
-INCIDENT RESPONSE QUICK SUMMARY
-Generated: $(Get-Date)
-
-SUSPICIOUS INDICATORS FOUND:
-- Suspicious Processes: $($suspiciousProcs.Count)
-- Active Network Connections: $((Get-NetTCPConnection | Where-Object {$_.State -eq "Established"}).Count)
-- Remote Access Services: $((Get-Service | Where-Object {$_.Name -match $remoteTools}).Count)
-- Recent Logins: Check security_events_week.csv for details
-
-RECOMMENDED IMMEDIATE ACTIONS:
-1. Review network_connections_enhanced.csv for unknown external IPs
-2. Check suspicious_processes.csv for potential malware
-3. Examine scheduled_tasks_detailed.csv for persistence
-4. Analyze security_events_week.csv for lateral movement
-
-Files collected to: $incidentPath
+=== REMOTE CONNECTIONS (net use) ===
+$(net use 2>&1)
 "@
+    $sessionInfo | Out-File "$incidentPath\remote_sessions.txt"
+    
+    # Check for remote access tools
+    Show-Progress "SECTION 2" "Scanning for remote access tools"
+    $remoteTools = "TeamViewer|AnyDesk|Chrome.*Remote|LogMeIn|VNC|WinRM|SSH|ScreenConnect|Splashtop|GoToMyPC|Radmin|DameWare|pcAnywhere|Ammyy|UltraVNC|TightVNC|RealVNC|RemotePC|Zoho|Supremo|ISL|ShowMyPC|BeAnywhere|Mikogo|Bomgar|ConnectWise|N-able|Datto|Kaseya|AutoTask|Mesh.*Central|TakeControl|GoToAssist|WebEx|Join\.me|RemoteUtilities|NoMachine|AeroAdmin|Iperius|Thinfinity|TSplus|2X|Parallels|Citrix|VMware.*Horizon"
+    
+    $remoteServices = Get-Service | Where-Object {$_.Name -match $remoteTools -or $_.DisplayName -match $remoteTools}
+    if ($remoteServices) {
+        $remoteServices | Select-Object Name, DisplayName, Status, StartType | 
+            Export-Csv "$incidentPath\remote_access_services.csv" -NoTypeInformation
+        Write-Host "  - Found $($remoteServices.Count) remote access services" -ForegroundColor Yellow
+    }
+    
+    $remoteProcs = Get-Process | Where-Object {$_.ProcessName -match $remoteTools -or $_.Description -match $remoteTools}
+    if ($remoteProcs) {
+        $remoteProcs | Select-Object ProcessName, Id, Path, Description |
+            Export-Csv "$incidentPath\remote_access_processes.csv" -NoTypeInformation
+        Write-Host "  - Found $($remoteProcs.Count) remote access processes" -ForegroundColor Yellow
+    }
+    
+} catch {
+    Write-Host "WARNING: Session collection incomplete: $_" -ForegroundColor Yellow
+}
 
-$summary | Out-File "$incidentPath\SUMMARY.txt"
-Write-Host $summary -ForegroundColor Green
+# SECTION 3: PROCESS ANALYSIS
+if (!$Quick) {
+    Show-Progress "SECTION 3" "Analyzing all processes"
+    
+    try {
+        # All processes with details
+        $allProcesses = Get-WmiObject Win32_Process | Select-Object Name, ProcessId, ParentProcessId, 
+            CommandLine, ExecutablePath,
+            @{N='CreationDate';E={if($_.CreationDate){$_.ConvertToDateTime($_.CreationDate)}else{'Unknown'}}},
+            @{N='Owner';E={$_.GetOwner().User}},
+            @{N='Domain';E={$_.GetOwner().Domain}}
+        
+        $allProcesses | Export-Csv "$incidentPath\all_processes.csv" -NoTypeInformation
+        Write-Host "  - Collected $($allProcesses.Count) total processes" -ForegroundColor Gray
+        
+        # Recent processes (last 2 hours)
+        $recentTime = (Get-Date).AddHours(-2)
+        $recentProcs = Get-Process | Where-Object {$_.StartTime -gt $recentTime}
+        if ($recentProcs) {
+            $recentProcs | Select-Object ProcessName, Id, StartTime, Path, Company |
+                Export-Csv "$incidentPath\recent_processes_2hr.csv" -NoTypeInformation
+            Write-Host "  - Found $($recentProcs.Count) processes started in last 2 hours" -ForegroundColor Gray
+        }
+        
+        # Suspicious locations
+        Show-Progress "SECTION 3" "Checking suspicious process locations"
+        $suspiciousLocs = Get-Process | Where-Object {
+            $_.Path -match "\\AppData\\|\\Temp\\|\\Users\\Public\\|\\ProgramData\\|\\Windows\\Temp\\|\\Recycle|\\Users\\[^\\]+\\[^\\]+$" -and
+            $_.Path -notmatch "\\AppData\\Local\\Microsoft\\|\\AppData\\Local\\Google\\|\\AppData\\Roaming\\Microsoft\\"
+        }
+        if ($suspiciousLocs) {
+            $suspiciousLocs | Select-Object ProcessName, Id, Path, StartTime |
+                Export-Csv "$incidentPath\suspicious_locations.csv" -NoTypeInformation
+            Write-Host "  - Found $($suspiciousLocs.Count) processes in suspicious locations" -ForegroundColor Yellow
+        }
+        
+    } catch {
+        Write-Host "WARNING: Process analysis incomplete: $_" -ForegroundColor Yellow
+    }
+}
 
+# SECTION 4: PERSISTENCE MECHANISMS
+Show-Progress "SECTION 4" "Checking persistence mechanisms"
+
+try {
+    # Scheduled tasks
+    $tasks = Get-ScheduledTask | Where-Object {$_.State -ne "Disabled"}
+    $taskDetails = @()
+    
+    foreach ($task in $tasks) {
+        try {
+            $info = Get-ScheduledTaskInfo -TaskName $task.TaskName -TaskPath $task.TaskPath -ErrorAction SilentlyContinue
+            $taskDetails += [PSCustomObject]@{
+                TaskName = $task.TaskName
+                TaskPath = $task.TaskPath
+                State = $task.State
+                Author = $task.Author
+                LastRunTime = $info.LastRunTime
+                NextRunTime = $info.NextRunTime
+                Actions = ($task.Actions.Execute -join "; ")
+                Arguments = ($task.Actions.Arguments -join "; ")
+            }
+        } catch { }
+    }
+    
+    $taskDetails | Export-Csv "$incidentPath\scheduled_tasks.csv" -NoTypeInformation
+    Write-Host "  - Found $($taskDetails.Count) active scheduled tasks" -ForegroundColor Gray
+    
+    # Registry persistence - simplified
+    Show-Progress "SECTION 4" "Checking registry persistence"
+    $regResults = @()
+    $regKeys = @(
+        "HKLM:\Software\Microsoft\Windows\CurrentVersion\Run",
+        "HKCU:\Software\Microsoft\Windows\CurrentVersion\Run",
+        "HKLM:\Software\Microsoft\Windows\CurrentVersion\RunOnce",
+        "HKCU:\Software\Microsoft\Windows\CurrentVersion\RunOnce"
+    )
+    
+    foreach ($key in $regKeys) {
+        try {
+            $values = Get-ItemProperty $key -ErrorAction SilentlyContinue
+            if ($values) {
+                $values.PSObject.Properties | Where-Object { $_.Name -notmatch "^PS" } | ForEach-Object {
+                    $regResults += "$key\$($_.Name) = $($_.Value)"
+                }
+            }
+        } catch { }
+    }
+    
+    $regResults | Out-File "$incidentPath\registry_autoruns.txt"
+    Write-Host "  - Found $($regResults.Count) registry autorun entries" -ForegroundColor Gray
+    
+    # WMI Persistence check
+    try {
+        $wmiFilters = Get-WmiObject -Namespace root\subscription -Class __EventFilter -ErrorAction SilentlyContinue
+        if ($wmiFilters) {
+            $wmiFilters | Export-Csv "$incidentPath\wmi_persistence.csv" -NoTypeInformation
+            Write-Host "  - Found $($wmiFilters.Count) WMI event filters" -ForegroundColor Yellow
+        }
+    } catch { }
+    
+} catch {
+    Write-Host "WARNING: Persistence check incomplete: $_" -ForegroundColor Yellow
+}
+
+# SECTION 5: EVENT LOGS
+if (!$Quick) {
+    Show-Progress "SECTION 5" "Collecting event logs"
+    
+    try {
+        # Key security events
+        $secEvents = Get-WinEvent -FilterHashtable @{
+            LogName = 'Security'
+            ID = 4624,4625,4648,4672,4688,4720,4732,4776,7045
+            StartTime = (Get-Date).AddHours(-24)
+        } -MaxEvents 1000 -ErrorAction SilentlyContinue
+        
+        if ($secEvents) {
+            $secEvents | Select-Object TimeCreated, Id, Message |
+                Export-Csv "$incidentPath\security_events_24hr.csv" -NoTypeInformation
+            Write-Host "  - Collected $($secEvents.Count) security events" -ForegroundColor Gray
+        }
+        
+        # Export full logs
+        Show-Progress "SECTION 5" "Exporting full event logs"
+        $logs = @("Security", "System", "Application")
+        foreach ($log in $logs) {
+            $exportJob = Start-Job -ScriptBlock {
+                param($log, $path)
+                wevtutil epl $log "$path\$log.evtx" 2>$null
+            } -ArgumentList $log, $incidentPath
+            
+            $result = Wait-Job $exportJob -Timeout 30
+            if (!$result) {
+                Stop-Job $exportJob -Force
+                Write-Host "  - WARNING: $log log export timed out" -ForegroundColor Yellow
+            }
+            Remove-Job $exportJob -Force
+        }
+        
+    } catch {
+        Write-Host "WARNING: Event log collection incomplete: $_" -ForegroundColor Yellow
+    }
+}
+
+# SECTION 6: SYSTEM STATE
+Show-Progress "SECTION 6" "Collecting system state"
+
+try {
+    # Basic system info
+    systeminfo | Select-Object -First 50 | Out-File "$incidentPath\systeminfo.txt"
+    
+    # Network configuration
+    ipconfig /all > "$incidentPath\ipconfig.txt" 2>&1
+    route print > "$incidentPath\routes.txt" 2>&1
+    arp -a > "$incidentPath\arp_cache.txt" 2>&1
+    
+    # DNS cache
+    Get-DnsClientCache | Export-Csv "$incidentPath\dns_cache.csv" -NoTypeInformation
+    
+    # Firewall rules
+    Get-NetFirewallRule | Where-Object {$_.Enabled -eq $true -and $_.Direction -eq "Inbound"} |
+        Select-Object DisplayName, Action, Protocol, 
+        @{N='LocalPort';E={($_ | Get-NetFirewallPortFilter).LocalPort}} |
+        Export-Csv "$incidentPath\firewall_rules.csv" -NoTypeInformation
+    
+    # Currently open files/handles (useful for ransomware detection)
+    try {
+        handle.exe -a -nobanner 2>$null | Out-File "$incidentPath\open_handles.txt"
+    } catch {
+        openfiles /query /fo csv 2>$null | Out-File "$incidentPath\open_files.csv"
+    }
+    
+} catch {
+    Write-Host "WARNING: System state collection incomplete: $_" -ForegroundColor Yellow
+}
+
+# SECTION 7: QUICK ANALYSIS & SUMMARY
+Show-Progress "ANALYSIS" "Generating summary"
+
+try {
+    # Analyze collected data
+    $establishedConns = Import-Csv "$incidentPath\network_connections_fast.csv" -ErrorAction SilentlyContinue | 
+        Where-Object {$_.State -eq "Established"}
+    $suspiciousLocs = Import-Csv "$incidentPath\suspicious_locations.csv" -ErrorAction SilentlyContinue
+    $remoteTools = Import-Csv "$incidentPath\remote_access_services.csv" -ErrorAction SilentlyContinue
+    
+    # Look for IOCs
+    $iocFindings = @()
+    
+    # Check for common backdoor ports
+    $backdoorPorts = @(4444,4445,5555,6666,7777,8888,9999,31337,12345,54321)
+    $suspiciousPorts = $establishedConns | Where-Object {$_.LocalPort -in $backdoorPorts -or $_.RemotePort -in $backdoorPorts}
+    if ($suspiciousPorts) {
+        $iocFindings += "CRITICAL: Found connections on known backdoor ports"
+        $suspiciousPorts | Export-Csv "$incidentPath\ALERT_backdoor_ports.csv" -NoTypeInformation
+    }
+    
+    # Check for PowerShell listeners
+    $psListeners = $networkProcesses | Where-Object {$_.ProcessName -eq "powershell" -or $_.ProcessName -eq "pwsh"}
+    if ($psListeners) {
+        $iocFindings += "WARNING: PowerShell processes with network connections"
+        $psListeners | Export-Csv "$incidentPath\ALERT_powershell_network.csv" -NoTypeInformation
+    }
+    
+    # Generate summary
+    $summary = @"
+INCIDENT RESPONSE SUMMARY
+=========================
+Generated: $(Get-Date)
+Hostname: $env:COMPUTERNAME
+User: $env:USERDOMAIN\$env:USERNAME
+
+QUICK STATISTICS:
+- Active Network Connections: $(if($establishedConns){$establishedConns.Count}else{0})
+- Total Processes: $(if($allProcesses){$allProcesses.Count}else{'Not collected'})
+- Processes in Suspicious Locations: $(if($suspiciousLocs){$suspiciousLocs.Count}else{0})
+- Remote Access Tools Found: $(if($remoteTools){$remoteTools.Count}else{0})
+- Active Scheduled Tasks: $(if($taskDetails){$taskDetails.Count}else{0})
+
+SUSPECTED MALICIOUS PIDs INVESTIGATED:
+$(if($suspiciousDetails){
+    $suspiciousDetails | ForEach-Object {
+        "- PID $($_.ProcessId): $($_.Name) [$($_.ExecutablePath)]"
+    } | Out-String
+}else{"- None found from list: 6640, 11492, 2072, 5300"})
+
+IOC FINDINGS:
+$(if($iocFindings){$iocFindings -join "`n"}else{"- No automatic IOCs detected"})
+
+RECOMMENDED ACTIONS:
+1. Review network_connections_fast.csv for unknown IPs
+2. Investigate any processes in suspicious_locations.csv
+3. Check scheduled_tasks.csv for recent additions
+4. Examine remote_access_* files for unauthorized tools
+5. Review ALERT_* files for critical findings
+
+All data saved to: $incidentPath
+"@
+    
+    $summary | Out-File "$incidentPath\SUMMARY.txt"
+    Write-Host "`n$summary" -ForegroundColor Cyan
+    
+} catch {
+    Write-Host "WARNING: Summary generation incomplete" -ForegroundColor Yellow
+}
+
+# Cleanup
 Stop-Transcript
-Write-Host "`n=== COLLECTION COMPLETE ===" -ForegroundColor Yellow
-Write-Host "Data saved to: $incidentPath" -ForegroundColor Green
-Write-Host "Recommend immediate network isolation after reviewing active connections!" -ForegroundColor Red
+Write-Host "`n=== COLLECTION COMPLETE ===" -ForegroundColor Green
+Write-Host "Data location: $incidentPath" -ForegroundColor Green
+Write-Host "`nRECOMMENDATION: If remote access confirmed, disconnect network immediately!" -ForegroundColor Red
+
+# Create a quick ZIP if possible
+try {
+    Compress-Archive -Path "$incidentPath\*" -DestinationPath "$incidentPath.zip" -Force
+    Write-Host "Archive created: $incidentPath.zip" -ForegroundColor Green
+} catch {
+    Write-Host "Could not create ZIP archive" -ForegroundColor Yellow
+}
