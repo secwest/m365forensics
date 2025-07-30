@@ -13,7 +13,475 @@ function Invoke-SPOCommandWithRetry {
     $retryCount = 0
     $delay = $InitialDelay
     
+    while ($retryCount -lt $MaxRetries) {# Enhanced SharePoint User Audit Script
+# Parameterized and auto-detecting version
+
+[CmdletBinding()]
+param(
+    [Parameter(Mandatory=$false)]
+    [string]$TenantName,
+    
+    [Parameter(Mandatory=$false)]
+    [string]$AdminUrl,
+    
+    [Parameter(Mandatory=$false)]
+    [string]$ExportPath = (Join-Path $env:USERPROFILE "Documents\SharePointAudits"),
+    
+    [Parameter(Mandatory=$false)]
+    [int]$MaxRetries = 3,
+    
+    [Parameter(Mandatory=$false)]
+    [int]$InitialRetryDelay = 2,
+    
+    [Parameter(Mandatory=$false)]
+    [int]$SiteDelay = 500,
+    
+    [Parameter(Mandatory=$false)]
+    [int]$BatchPauseInterval = 20,
+    
+    [Parameter(Mandatory=$false)]
+    [int]$BatchPauseDuration = 10,
+    
+    [Parameter(Mandatory=$false)]
+    [switch]$IncludePersonalSites = $true,
+    
+    [Parameter(Mandatory=$false)]
+    [switch]$ExportOnly,
+    
+    [Parameter(Mandatory=$false)]
+    [string[]]$SiteFilter = @(),
+    
+    [Parameter(Mandatory=$false)]
+    [switch]$SkipSystemAccounts,
+    
+    [Parameter(Mandatory=$false)]
+    [hashtable]$CustomUserPatterns = @{}
+)
+
+# Function to detect tenant from existing connection
+function Get-SPOTenantInfo {
+    try {
+        $context = Get-SPOSite -Limit 1 -ErrorAction SilentlyContinue
+        if ($context) {
+            $url = $context.Url
+            if ($url -match "https://([^-]+)") {
+                return $matches[1]
+            }
+        }
+    }
+    catch {
+        return $null
+    }
+    return $null
+}
+
+# Function to prompt for parameters interactively
+function Get-ScriptParameters {
+    Write-Host "`n=== SharePoint User Audit Configuration ===" -ForegroundColor Cyan
+    
+    # Tenant detection/prompt
+    if (-not $TenantName -and -not $AdminUrl) {
+        $detectedTenant = Get-SPOTenantInfo
+        if ($detectedTenant) {
+            $useDetected = Read-Host "Detected tenant: '$detectedTenant'. Use this? (Y/n)"
+            if ($useDetected -ne 'n') {
+                $script:TenantName = $detectedTenant
+            }
+        }
+        
+        if (-not $TenantName) {
+            $script:TenantName = Read-Host "Enter your tenant name (e.g., 'contoso' from contoso.sharepoint.com)"
+        }
+    }
+    
+    # Build admin URL if not provided
+    if (-not $AdminUrl -and $TenantName) {
+        $script:AdminUrl = "https://$TenantName-admin.sharepoint.com"
+    }
+    
+    # Export path
+    $useDefaultPath = Read-Host "Use default export path '$ExportPath'? (Y/n)"
+    if ($useDefaultPath -eq 'n') {
+        $script:ExportPath = Read-Host "Enter export path"
+    }
+    
+    # Performance tuning
+    Write-Host "`nPerformance Settings (press Enter to use defaults):" -ForegroundColor Yellow
+    $customRetries = Read-Host "Max retries per operation [$MaxRetries]"
+    if ($customRetries) { $script:MaxRetries = [int]$customRetries }
+    
+    $customDelay = Read-Host "Delay between sites in ms [$SiteDelay]"
+    if ($customDelay) { $script:SiteDelay = [int]$customDelay }
+    
+    # Filter options
+    $filterSites = Read-Host "`nFilter to specific sites? (y/N)"
+    if ($filterSites -eq 'y') {
+        $script:SiteFilter = @()
+        Write-Host "Enter site URLs (one per line, empty line to finish):"
+        while ($true) {
+            $site = Read-Host
+            if ([string]::IsNullOrWhiteSpace($site)) { break }
+            $script:SiteFilter += $site
+        }
+    }
+    
+    $skipSystem = Read-Host "Skip system/service accounts? (y/N)"
+    if ($skipSystem -eq 'y') {
+        $script:SkipSystemAccounts = $true
+    }
+}
+
+# Enhanced retry function with telemetry
+function Invoke-SPOCommandWithRetry {
+    param(
+        [ScriptBlock]$Command,
+        [int]$MaxRetries = $script:MaxRetries,
+        [int]$InitialDelay = $script:InitialRetryDelay,
+        [string]$OperationName = "Operation"
+    )
+    
+    $retryCount = 0
+    $delay = $InitialDelay
+    $stopwatch = [System.Diagnostics.Stopwatch]::StartNew()
+    
     while ($retryCount -lt $MaxRetries) {
+        try {
+            $result = & $Command
+            $stopwatch.Stop()
+            
+            if ($retryCount -gt 0) {
+                Write-Verbose "    $OperationName succeeded after $retryCount retries (${stopwatch.ElapsedMilliseconds}ms)"
+            }
+            
+            return $result
+        }
+        catch {
+            $errorType = switch -Regex ($_.Exception.Message) {
+                "429|Too Many Requests" { "RateLimit" }
+                "401|Unauthorized" { "Auth" }
+                "503|Service Unavailable" { "ServiceDown" }
+                default { "Other" }
+            }
+            
+            if ($errorType -eq "RateLimit" -and $retryCount -lt $MaxRetries - 1) {
+                $retryCount++
+                Write-Host "    Rate limited on $OperationName. Waiting $delay seconds (attempt $retryCount/$MaxRetries)..." -ForegroundColor Yellow
+                Start-Sleep -Seconds $delay
+                $delay = [Math]::Min($delay * 2, 60)  # Cap at 60 seconds
+            }
+            elseif ($errorType -eq "Auth") {
+                Write-Host "    Authentication error. Attempting reconnection..." -ForegroundColor Red
+                Connect-SPOService -Url $AdminUrl
+                $retryCount++
+            }
+            else {
+                throw $_
+            }
+        }
+    }
+}
+
+# Configurable user type detection
+function Get-UserType {
+    param([string]$LoginName)
+    
+    # Check custom patterns first
+    foreach ($pattern in $CustomUserPatterns.GetEnumerator()) {
+        if ($LoginName -match $pattern.Key) {
+            return $pattern.Value
+        }
+    }
+    
+    # Default patterns
+    switch -Regex ($LoginName) {
+        "#EXT#" { return "Guest User" }
+        "app@sharepoint|\.app\." { return "SharePoint App" }
+        "spo-grid-all-users|spocsid-" { return "System Account" }
+        "c:0[\(\.]\.s\||c:0\.t\|" { return "Security Group" }
+        "SHAREPOINT\\system|NT AUTHORITY" { return "System Account" }
+        "@.*\.onmicrosoft\.com$" { return "Internal User" }
+        "^i:0#\.f\|membership\|" { return "Forms Auth User" }
+        "^i:0e\.t\|" { return "SAML User" }
+        default { 
+            if ($LoginName -match "@.*\.(com|org|net|edu)$") {
+                return "External User"
+            }
+            return "Other"
+        }
+    }
+}
+
+# Main execution
+try {
+    # Interactive parameter collection if needed
+    if (-not $PSBoundParameters.Count -or -not $AdminUrl) {
+        Get-ScriptParameters
+    }
+    
+    # Ensure export directory exists
+    if (!(Test-Path $ExportPath)) {
+        New-Item -ItemType Directory -Path $ExportPath -Force | Out-Null
+    }
+    
+    # Connection with retry
+    Write-Host "`nConnecting to SharePoint Online..." -ForegroundColor Cyan
+    Invoke-SPOCommandWithRetry -Command {
+        Connect-SPOService -Url $AdminUrl -ErrorAction Stop
+    } -OperationName "SPO Connection"
+    
+    Write-Host "Connected successfully!" -ForegroundColor Green
+    
+    # Get all sites
+    Write-Host "`nRetrieving sites..." -ForegroundColor Cyan
+    $getSitesParams = @{
+        Limit = "All"
+        IncludePersonalSite = $IncludePersonalSites
+    }
+    
+    $allSites = Invoke-SPOCommandWithRetry -Command {
+        Get-SPOSite @getSitesParams
+    } -OperationName "Get Sites"
+    
+    # Apply site filter if specified
+    if ($SiteFilter.Count -gt 0) {
+        $allSites = $allSites | Where-Object { $_.Url -in $SiteFilter }
+        Write-Host "Filtered to $($allSites.Count) sites" -ForegroundColor Yellow
+    } else {
+        Write-Host "Found $($allSites.Count) total sites" -ForegroundColor Green
+    }
+    
+    # Initialize collections
+    $fullReport = @()
+    $processedCount = 0
+    $failedSites = @()
+    $totalSites = $allSites.Count
+    $statistics = @{
+        StartTime = Get-Date
+        TotalAPICallsAttempted = 0
+        TotalAPICallsSucceeded = 0
+        RateLimitHits = 0
+    }
+    
+    # Progress tracking
+    $progress = @{
+        Activity = "SharePoint User Audit"
+        Status = "Processing sites..."
+        PercentComplete = 0
+    }
+    
+    # Process each site
+    foreach ($site in $allSites) {
+        $processedCount++
+        $progress.PercentComplete = [int](($processedCount / $totalSites) * 100)
+        $progress.CurrentOperation = "Site $processedCount of $totalSites: $($site.Url)"
+        Write-Progress @progress
+        
+        if (-not $ExportOnly) {
+            Write-Host "`n[$processedCount/$totalSites] Processing: $($site.Url)" -ForegroundColor Green
+            $siteType = if($site.Url -like "*-my.sharepoint.com/personal/*") {"OneDrive"} else {"SharePoint"}
+            Write-Host "Type: $siteType | Title: $($site.Title)" -ForegroundColor Gray
+        }
+        
+        # Adaptive delay based on failure rate
+        if ($statistics.RateLimitHits -gt 5) {
+            $adaptiveDelay = $SiteDelay * 2
+            Write-Verbose "Increasing delay due to rate limits"
+        } else {
+            $adaptiveDelay = $SiteDelay
+        }
+        Start-Sleep -Milliseconds $adaptiveDelay
+        
+        try {
+            $statistics.TotalAPICallsAttempted++
+            $users = Invoke-SPOCommandWithRetry -Command {
+                Get-SPOUser -Site $site.Url -Limit All
+            } -OperationName "Get Users"
+            
+            $statistics.TotalAPICallsSucceeded++
+            
+            if ($users) {
+                $siteUsers = @()
+                
+                foreach ($user in $users) {
+                    $userType = Get-UserType -LoginName $user.LoginName
+                    
+                    # Skip if filtering system accounts
+                    if ($SkipSystemAccounts -and $userType -in @("System Account", "SharePoint App")) {
+                        continue
+                    }
+                    
+                    # Determine guest source
+                    $guestSource = ""
+                    if ($userType -eq "Guest User" -or $userType -eq "External User") {
+                        $guestSource = switch -Regex ($user.LoginName) {
+                            "gmail\.com" { "Gmail" }
+                            "outlook\.com|live\.com" { "Microsoft Personal" }
+                            "hotmail\.com" { "Hotmail" }
+                            "yahoo\." { "Yahoo" }
+                            "@([^.]+\.[^.]+)#EXT#" { $matches[1] }
+                            default { "Other External" }
+                        }
+                    }
+                    
+                    # Get group memberships
+                    $groups = Invoke-SPOCommandWithRetry -Command {
+                        Get-SPOSiteGroup -Site $site.Url
+                    } -OperationName "Get Groups" -MaxRetries 2
+                    
+                    $userGroups = @()
+                    foreach ($group in $groups) {
+                        try {
+                            $groupMembers = Get-SPOUser -Site $site.Url -Group $group.LoginName -ErrorAction Stop
+                            if ($groupMembers.LoginName -contains $user.LoginName) {
+                                $permissionLevel = switch -Wildcard ($group.Title) {
+                                    "*Owner*" { "Full Control" }
+                                    "*Member*" { "Edit" }
+                                    "*Visitor*" { "Read" }
+                                    "*Contribute*" { "Contribute" }
+                                    "*Design*" { "Design" }
+                                    "*Limited*" { "Limited Access" }
+                                    default { "Custom" }
+                                }
+                                
+                                $userGroups += [PSCustomObject]@{
+                                    GroupName = $group.Title
+                                    Permission = $permissionLevel
+                                }
+                            }
+                        }
+                        catch {
+                            # Group access error - skip
+                        }
+                    }
+                    
+                    # Create user record(s)
+                    if ($userGroups.Count -gt 0) {
+                        foreach ($userGroup in $userGroups) {
+                            $fullReport += [PSCustomObject]@{
+                                Site = $site.Url
+                                SiteType = $siteType
+                                SiteTitle = $site.Title
+                                UserName = $user.DisplayName
+                                UserLogin = $user.LoginName
+                                UserType = $userType
+                                GuestSource = $guestSource
+                                Group = $userGroup.GroupName
+                                Permission = $userGroup.Permission
+                                IsSiteAdmin = $user.IsSiteAdmin
+                                ProcessedDate = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
+                            }
+                        }
+                    } else {
+                        $fullReport += [PSCustomObject]@{
+                            Site = $site.Url
+                            SiteType = $siteType
+                            SiteTitle = $site.Title
+                            UserName = $user.DisplayName
+                            UserLogin = $user.LoginName
+                            UserType = $userType
+                            GuestSource = $guestSource
+                            Group = "Direct Permission"
+                            Permission = if ($user.IsSiteAdmin) { "Site Admin" } else { "Custom" }
+                            IsSiteAdmin = $user.IsSiteAdmin
+                            ProcessedDate = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
+                        }
+                    }
+                    
+                    $siteUsers += $user.DisplayName
+                }
+                
+                if (-not $ExportOnly -and $siteUsers.Count -gt 0) {
+                    Write-Host "  Found $($siteUsers.Count) users$(if($SkipSystemAccounts){' (excluding system accounts)'})" -ForegroundColor White
+                }
+            }
+        }
+        catch {
+            Write-Host "  Error: $_" -ForegroundColor Red
+            $failedSites += [PSCustomObject]@{
+                Site = $site.Url
+                Error = $_.Exception.Message
+                Timestamp = Get-Date
+            }
+        }
+        
+        # Batch pause
+        if ($processedCount % $BatchPauseInterval -eq 0 -and $processedCount -lt $totalSites) {
+            Write-Host "`nBatch pause: Processed $processedCount/$totalSites sites. Pausing $BatchPauseDuration seconds..." -ForegroundColor Magenta
+            Start-Sleep -Seconds $BatchPauseDuration
+        }
+    }
+    
+    Write-Progress -Activity "SharePoint User Audit" -Completed
+    
+    # Generate reports
+    $timestamp = Get-Date -Format "yyyyMMdd_HHmmss"
+    $reportPrefix = "SPOUserAudit_${TenantName}_${timestamp}"
+    
+    # Export main report
+    $mainReportPath = Join-Path $ExportPath "${reportPrefix}_Full.csv"
+    $fullReport | Export-Csv -Path $mainReportPath -NoTypeInformation
+    Write-Host "`nExported full report: $mainReportPath" -ForegroundColor Green
+    
+    # Summary statistics
+    $statistics.EndTime = Get-Date
+    $statistics.Duration = $statistics.EndTime - $statistics.StartTime
+    $statistics.ProcessedSites = $processedCount
+    $statistics.FailedSites = $failedSites.Count
+    $statistics.TotalUsers = ($fullReport | Select-Object -Unique UserLogin).Count
+    $statistics.TotalAssignments = $fullReport.Count
+    
+    # Generate summary report
+    $summaryReport = @"
+SharePoint User Audit Summary
+=============================
+Tenant: $TenantName
+Run Date: $(Get-Date -Format "yyyy-MM-dd HH:mm:ss")
+Duration: $($statistics.Duration.ToString("hh\:mm\:ss"))
+
+Sites Processed: $($statistics.ProcessedSites)
+Sites Failed: $($statistics.FailedSites)
+Total Unique Users: $($statistics.TotalUsers)
+Total Assignments: $($statistics.TotalAssignments)
+
+User Type Breakdown:
+$($fullReport | Group-Object UserType | ForEach-Object { "  $($_.Name): $($_.Count)" } | Out-String)
+
+Permission Level Summary:
+$($fullReport | Group-Object Permission | ForEach-Object { "  $($_.Name): $($_.Count)" } | Out-String)
+"@
+    
+    $summaryPath = Join-Path $ExportPath "${reportPrefix}_Summary.txt"
+    $summaryReport | Out-File -FilePath $summaryPath
+    Write-Host "Exported summary: $summaryPath" -ForegroundColor Green
+    
+    # Export specialized reports
+    $guestUsers = $fullReport | Where-Object { $_.UserType -in @("Guest User", "External User") }
+    if ($guestUsers) {
+        $guestPath = Join-Path $ExportPath "${reportPrefix}_GuestUsers.csv"
+        $guestUsers | Export-Csv -Path $guestPath -NoTypeInformation
+        Write-Host "Exported guest users: $guestPath" -ForegroundColor Green
+    }
+    
+    if ($failedSites) {
+        $failedPath = Join-Path $ExportPath "${reportPrefix}_FailedSites.csv"
+        $failedSites | Export-Csv -Path $failedPath -NoTypeInformation
+        Write-Host "Exported failed sites: $failedPath" -ForegroundColor Yellow
+    }
+    
+    # Display summary unless export-only mode
+    if (-not $ExportOnly) {
+        Write-Host "`n$summaryReport" -ForegroundColor Cyan
+    }
+    
+    Write-Host "`nAudit complete! All reports saved to: $ExportPath" -ForegroundColor Green
+    
+} catch {
+    Write-Host "`nFATAL ERROR: $_" -ForegroundColor Red
+    Write-Host $_.ScriptStackTrace -ForegroundColor Red
+} finally {
+    # Disconnect
+    Disconnect-SPOService -ErrorAction SilentlyContinue
+}
         try {
             $result = & $Command
             return $result
