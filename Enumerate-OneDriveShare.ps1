@@ -76,7 +76,7 @@ foreach ($site in $allSites) {
                     "app@sharepoint" { "SharePoint App" }
                     "spo-grid-all-users" { "System Account" }
                     "c:0(.s|.t)" { "Security Group" }
-                    "@matrixcoca.onmicrosoft.com$" { "Internal User" }
+                    "@<tenant>.onmicrosoft.com$" { "Internal User" }
                     "SHAREPOINT\\system" { "System Account" }
                     default { "Other" }
                 }
@@ -85,8 +85,6 @@ foreach ($site in $allSites) {
                 $guestSource = ""
                 if ($userType -eq "Guest User") {
                     $guestSource = switch -Regex ($user.LoginName) {
-                        "matrixhelicopter" { "MatrixHelicopter" }
-                        "matrixco.ca" { "MatrixCo.ca" }
                         "gmail.com" { "Gmail" }
                         "outlook.com" { "Outlook" }
                         "hotmail.com" { "Hotmail" }
@@ -240,7 +238,7 @@ if ($failedSites.Count -gt 0) {
                         "app@sharepoint" { "SharePoint App" }
                         "spo-grid-all-users" { "System Account" }
                         "c:0(.s|.t)" { "Security Group" }
-                        "@matrixcoca.onmicrosoft.com$" { "Internal User" }
+                        "@<tenant>.onmicrosoft.com$" { "Internal User" }
                         "SHAREPOINT\\system" { "System Account" }
                         default { "Other" }
                     }
