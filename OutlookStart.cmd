@@ -56,3 +56,8 @@ Remove-Item "$env:APPDATA\Microsoft\Outlook\*.srs" -Force
 ********
 # Run as admin
 Remove-Item -Path "HKCU:\Software\Microsoft\Office\16.0\Outlook\Profiles\*" -Recurse -Force
+
+
+*****
+Installer
+https://www.microsoft.com/en-us/download/details.aspx?id=49117
