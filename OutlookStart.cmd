@@ -5,5 +5,6 @@ reg delete "HKCU\Software\Microsoft\OneDrive\Accounts" /f
 reg delete "HKCU\Software\Microsoft\OneDrive\Tenants" /f
 reg delete "HKCU\Software\Microsoft\OneDrive\IdentityCache" /f
 reg delete "HKCU\Software\Microsoft\OneDrive\Business1" /f
+"C:\Program Files\Microsoft Office\root\Office16\OUTLOOK.EXE" /signout
 "C:\Program Files\Microsoft Office\root\Office16\OUTLOOK.EXE" /resetnavpane /resetfolders
 "C:\Program Files\Microsoft Office\root\Office16\OUTLOOK.EXE" /profiles
