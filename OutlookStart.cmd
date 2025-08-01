@@ -52,3 +52,7 @@ Remove-Item "$env:APPDATA\Microsoft\Outlook\*.srs" -Force
 # Download and run Microsoft Support and Recovery Assistant
 # Or use the Office uninstall support tool:
 # https://aka.ms/SaRA-officeUninstallFromPC
+
+********
+# Run as admin
+Remove-Item -Path "HKCU:\Software\Microsoft\Office\16.0\Outlook\Profiles\*" -Recurse -Force
