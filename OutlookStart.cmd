@@ -11,3 +11,29 @@ reg delete "HKCU\Software\Microsoft\OneDrive\Business1" /f
 
 # Repair Office installation
 "C:\Program Files\Common Files\microsoft shared\ClickToRun\OfficeClickToRun.exe" scenario=Repair platform=x64 culture=en-us RepairType=QuickRepair
+
+echo Resetting all Office/Outlook authentication...
+
+:: Step 1: Kill everything
+taskkill /F /IM outlook.exe 2>nul
+taskkill /F /IM HxOutlook.exe 2>nul
+taskkill /F /IM HxTsr.exe 2>nul
+taskkill /F /IM OfficeClickToRun.exe 2>nul
+timeout /t 2
+
+:: Step 2: Clear system-wide auth
+echo Y | powershell -Command "Get-ChildItem 'HKCU:\Software\Microsoft\Office\16.0\Common\Identity\Identities' | Remove-Item -Recurse -Force"
+echo Y | powershell -Command "Remove-Item -Path '$env:LOCALAPPDATA\Microsoft\Office\16.0\Licensing' -Recurse -Force -ErrorAction SilentlyContinue"
+echo Y | powershell -Command "Remove-Item -Path '$env:LOCALAPPDATA\Microsoft\Office\Licenses' -Recurse -Force -ErrorAction SilentlyContinue"
+
+:: Step 3: Clear stored passwords from Windows
+rundll32.exe keymgr.dll,KRShowKeyMgr
+echo Please manually delete any Microsoft/Office entries, then press any key
+pause
+
+:: Step 4: Reset Office activation
+cscript //NoLogo "C:\Program Files\Microsoft Office\Office16\ospp.vbs" /dstatus
+cscript //NoLogo "C:\Program Files\Microsoft Office\Office16\ospp.vbs" /unpkey:all
+
+:: Step 5: Start fresh
+start outlook.exe /safe /nocustomize
