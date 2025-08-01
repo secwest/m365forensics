@@ -37,3 +37,12 @@ cscript //NoLogo "C:\Program Files\Microsoft Office\Office16\ospp.vbs" /unpkey:a
 
 :: Step 5: Start fresh
 start outlook.exe /safe /nocustomize
+
+
+
+********
+# PowerShell script to reset without uninstalling
+Stop-Process -Name outlook -Force -ErrorAction SilentlyContinue
+Remove-Item "HKCU:\Software\Microsoft\Office\16.0\Outlook" -Recurse -Force
+Remove-Item "$env:LOCALAPPDATA\Microsoft\Outlook\*" -Recurse -Force
+Remove-Item "$env:APPDATA\Microsoft\Outlook\*.srs" -Force
