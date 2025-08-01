@@ -61,3 +61,7 @@ Remove-Item -Path "HKCU:\Software\Microsoft\Office\16.0\Outlook\Profiles\*" -Rec
 *****
 Installer
 https://www.microsoft.com/en-us/download/details.aspx?id=49117
+
+
+https://learn.microsoft.com/en-us/troubleshoot/sharepoint/sync/sign-into-onedrive-sync-app-error
+
