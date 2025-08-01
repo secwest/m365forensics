@@ -46,3 +46,9 @@ Stop-Process -Name outlook -Force -ErrorAction SilentlyContinue
 Remove-Item "HKCU:\Software\Microsoft\Office\16.0\Outlook" -Recurse -Force
 Remove-Item "$env:LOCALAPPDATA\Microsoft\Outlook\*" -Recurse -Force
 Remove-Item "$env:APPDATA\Microsoft\Outlook\*.srs" -Force
+
+
+********
+# Download and run Microsoft Support and Recovery Assistant
+# Or use the Office uninstall support tool:
+# https://aka.ms/SaRA-officeUninstallFromPC
