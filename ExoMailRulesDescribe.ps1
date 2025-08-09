@@ -109,8 +109,11 @@ function Describe-TransportRule {
   foreach ($m in $PredicateFields) {
     $pv = $r.($m.P)
     if ($null -ne $pv -and ($pv -isnot [bool] -or $pv)) {
-      if ($pv -is [System.Collections.IEnumerable] -and -not ($pv -is [string])) { $pv = @($pv) }
-      $val = ($pv -is [array]) ? ($pv -join ", ") : "$pv"
+      if ($pv -is [System.Collections.IEnumerable] -and -not ($pv -is [string])) {
+        $pv = @($pv)
+      }
+      $val = ""
+      if ($pv -is [System.Array]) { $val = ($pv -join ", ") } else { $val = "$pv" }
       $condPairs += ("  - {0}: {1}" -f $m.P, $val)
     }
   }
@@ -126,8 +129,11 @@ function Describe-TransportRule {
   foreach ($m in $ActionFields) {
     $pv = $r.($m.P)
     if ($null -ne $pv -and ($pv -isnot [bool] -or $pv)) {
-      if ($pv -is [System.Collections.IEnumerable] -and -not ($pv -is [string])) { $pv = @($pv) }
-      $val = ($pv -is [array]) ? ($pv -join ", ") : "$pv"
+      if ($pv -is [System.Collections.IEnumerable] -and -not ($pv -is [string])) {
+        $pv = @($pv)
+      }
+      $val = ""
+      if ($pv -is [System.Array]) { $val = ($pv -join ", ") } else { $val = "$pv" }
       $actPairs += ("  - {0}: {1}" -f $m.P, $val)
     }
   }
@@ -141,14 +147,19 @@ function Describe-TransportRule {
   # Recreate command
   $parts = @()
   $parts += ("New-TransportRule -Name " + (J $r.Name))
-  $parts += ("-Enabled " + (if($r.Enabled){'$true'}else{'$false'}))
-  if ($r.Mode)     { $parts += ("-Mode " + (J $r.Mode)) }
+
+  $enabledStr = '$false'
+  if ($r.Enabled) { $enabledStr = '$true' }
+  $parts += ("-Enabled " + $enabledStr)
+
+  if ($r.Mode) { $parts += ("-Mode " + (J $r.Mode)) }
   if ($r.Priority -ne $null) { $parts += ("-Priority {0}" -f [int]$r.Priority) }
+
   foreach ($m in $PredicateFields) {
     $pv = $r.($m.P)
     if ($null -ne $pv -and ($pv -isnot [bool] -or $pv)) {
       if ($pv -is [System.Collections.IEnumerable] -and -not ($pv -is [string])) { $pv = @($pv) }
-      if ($pv -is [array]) { $parts += ("{0} {1}" -f $m.K, (JA $pv)) }
+      if ($pv -is [System.Array]) { $parts += ("{0} {1}" -f $m.K, (JA $pv)) }
       else { $parts += ("{0} {1}" -f $m.K, (J $pv)) }
     }
   }
@@ -156,8 +167,9 @@ function Describe-TransportRule {
     $pv = $r.($m.P)
     if ($null -ne $pv -and ($pv -isnot [bool] -or $pv)) {
       if ($pv -is [System.Collections.IEnumerable] -and -not ($pv -is [string])) { $pv = @($pv) }
-      if ($pv -is [array]) { $parts += ("{0} {1}" -f $m.K, (JA $pv)) }
-      else {
+      if ($pv -is [System.Array]) {
+        $parts += ("{0} {1}" -f $m.K, (JA $pv))
+      } else {
         if ($pv -is [bool]) {
           if ($pv) { $parts += $m.K }
         } else {
@@ -193,10 +205,14 @@ function Print-MailboxPosture {
     Write-Host ("ForwardingSMTPAddress: {0}" -f $mbx.ForwardingSMTPAddress)
     Write-Host ("DeliverToMailboxAndForward: {0}" -f $mbx.DeliverToMailboxAndForward)
     Write-Host ("ForwardingSMTPAddressIsExternal: {0}" -f $ext)
+
+    $deliverStr = '$false'
+    if ($mbx.DeliverToMailboxAndForward) { $deliverStr = '$true' }
+
     $cmd = @(
       "Set-Mailbox -Identity", (J $upn),
       "-ForwardingSMTPAddress", (J $mbx.ForwardingSMTPAddress.ToString()),
-      "-DeliverToMailboxAndForward", (if($mbx.DeliverToMailboxAndForward){'$true'}else{'$false'})
+      "-DeliverToMailboxAndForward", $deliverStr
     ) -join " "
     Write-Host ("Recreate: " + $cmd) -ForegroundColor Yellow
   } else {
@@ -272,7 +288,10 @@ function Describe-InboxRule {
   } else { Write-Host "Then: <none>" }
 
   # Recreate
-  $cmd = @("New-InboxRule -Mailbox", (J $mailbox), "-Name", (J $ir.Name), "-Priority", ([int]$ir.Priority), "-Enabled", (if($ir.Enabled){'$true'}else{'$false'}))
+  $enabledRuleStr = '$false'
+  if ($ir.Enabled) { $enabledRuleStr = '$true' }
+
+  $cmd = @("New-InboxRule -Mailbox", (J $mailbox), "-Name", (J $ir.Name), "-Priority", ([int]$ir.Priority), "-Enabled", $enabledRuleStr)
   if ($ir.From)                      { $cmd += @("-From", (JA @($ir.From))) }
   if ($ir.SenderAddressContainsWords){ $cmd += @("-SenderAddressContainsWords", (JA @($ir.SenderAddressContainsWords))) }
   if ($ir.SubjectContainsWords)      { $cmd += @("-SubjectContainsWords", (JA @($ir.SubjectContainsWords))) }
