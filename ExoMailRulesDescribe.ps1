@@ -1,19 +1,11 @@
 #!/usr/bin/env pwsh
-# ExoMailRuleDescribe.ps1
-# Prints reconstructable console descriptions of:
-#  - Exchange Online Transport Rules
-#  - Mailbox-level forwarding/delegation
-#  - (optional) Inbox Rules per mailbox
+# ExoMailRuleDescribe.ps1 (robust)
+# Console descriptions + reconstructable commands for:
+#   - Exchange Online Transport Rules
+#   - Mailbox forwarding/delegation
+#   - (optional) Inbox Rules
 #
-# Requires: ExchangeOnlineManagement (>= 3.2.0)
-# Usage:
-#   pwsh ./ExoMailRuleDescribe.ps1
-#   pwsh ./ExoMailRuleDescribe.ps1 -InboxRules
-#
-# Notes:
-#  - Output is deterministic and ASCII-clean.
-#  - "Recreate" lines approximate the minimal parameter set to reproduce the visible behavior.
-#  - Extend the predicate/action maps if you use rarer fields.
+# Requirements: ExchangeOnlineManagement (>= 3.2.0)
 
 param(
   [switch]$InboxRules
@@ -33,9 +25,27 @@ function Ensure-Module {
 
 function Connect-ExoSafe {
   Write-Host "Connecting to Exchange Online..." -ForegroundColor Cyan
-  Connect-ExchangeOnline -ShowProgress $true
+  Connect-ExchangeOnline -ShowProgress:$true
 }
 
+# ----- Safe access helpers -----
+function Has-Prop {
+  param($obj, [string]$Name)
+  if ($null -eq $obj) { return $false }
+  try {
+    $m = $obj | Get-Member -Name $Name -ErrorAction Stop
+    return $null -ne $m
+  } catch { return $false }
+}
+function Get-Prop {
+  param($obj, [string]$Name, $Default = $null)
+  if (Has-Prop $obj $Name) {
+    try { return $obj.$Name } catch { return $Default }
+  }
+  return $Default
+}
+
+# ----- Quoting helpers (PS5/7 clean) -----
 function J {
   param($v)
   if ($null -eq $v) { return '$null' }
@@ -46,12 +56,20 @@ function J {
   $s = ($v.ToString() -replace "'", "''")
   return "'$s'"
 }
-
 function JA {
   param([object[]]$arr)
   if (-not $arr -or $arr.Count -eq 0) { return '@()' }
   $q = $arr | ForEach-Object { J $_ }
   return "@(" + ($q -join ", ") + ")"
+}
+function To-Flat {
+  param($v)
+  if ($null -eq $v) { return "" }
+  if ($v -is [System.Collections.IEnumerable] -and -not ($v -is [string])) {
+    $a = @($v)
+    return ($a -join ", ")
+  }
+  return "$v"
 }
 
 function Print-Header($text) {
@@ -60,7 +78,7 @@ function Print-Header($text) {
   Write-Host ("-" * $text.Length)
 }
 
-# Map selected predicates/actions we will render. Extend as needed.
+# Maps we render (extend as needed)
 $PredicateFields = @(
   @{ P = "FromAddressContainsWords";            K = "-FromAddressContainsWords" },
   @{ P = "SenderDomainIs";                      K = "-SenderDomainIs" },
@@ -79,7 +97,6 @@ $PredicateFields = @(
   @{ P = "ExceptIfHeaderMatchesMessageHeader";  K = "-ExceptIfHeaderMatchesMessageHeader" },
   @{ P = "ExceptIfHeaderMatchesPatterns";       K = "-ExceptIfHeaderMatchesPatterns" }
 )
-
 $ActionFields = @(
   @{ P = "RedirectMessageTo";                   K = "-RedirectMessageTo" },
   @{ P = "BlindCopyTo";                         K = "-BlindCopyTo" },
@@ -98,22 +115,39 @@ function Describe-TransportRule {
   param($r)
 
   Write-Host "BEGIN EXO-TRANSPORT-RULE"
-  Write-Host ("Name: "      + $r.Name)
-  Write-Host ("Enabled: "   + $r.Enabled)
-  Write-Host ("Mode: "      + $r.Mode)            # Enforce, Audit, TestWith/WithoutPolicyTips
-  Write-Host ("Priority: "  + $r.Priority)
-  if ($r.Comments) { Write-Host ("Comments: " + ($r.Comments -replace "`r?`n"," | ")) }
+  Write-Host ("Name: " + (Get-Prop $r 'Name' '<unknown>'))
+
+  # Enabled is not always present; some builds have State: Enabled/Disabled
+  $enabledBool = $null
+  if (Has-Prop $r 'Enabled') {
+    $enabledBool = [bool](Get-Prop $r 'Enabled' $false)
+  } elseif (Has-Prop $r 'State') {
+    $st = (Get-Prop $r 'State' '')
+    if ($st -is [string]) { $enabledBool = ($st -eq 'Enabled') }
+    else { $enabledBool = ($st.ToString() -eq 'Enabled') }
+  } else {
+    $enabledBool = $null
+  }
+  if ($null -ne $enabledBool) {
+    Write-Host ("Enabled: " + $enabledBool)
+  } else {
+    Write-Host "Enabled: <unknown>"
+  }
+
+  if (Has-Prop $r 'Mode') { Write-Host ("Mode: " + (Get-Prop $r 'Mode' '')) } else { Write-Host "Mode: <none>" }
+  if (Has-Prop $r 'Priority') { Write-Host ("Priority: " + (Get-Prop $r 'Priority' '')) } else { Write-Host "Priority: <unknown>" }
+
+  $comments = Get-Prop $r 'Comments' $null
+  if ($comments) { Write-Host ("Comments: " + ($comments -replace "`r?`n"," | ")) }
 
   # Conditions
   $condPairs = @()
   foreach ($m in $PredicateFields) {
-    $pv = $r.($m.P)
-    if ($null -ne $pv -and ($pv -isnot [bool] -or $pv)) {
-      if ($pv -is [System.Collections.IEnumerable] -and -not ($pv -is [string])) {
-        $pv = @($pv)
-      }
-      $val = ""
-      if ($pv -is [System.Array]) { $val = ($pv -join ", ") } else { $val = "$pv" }
+    $v = $null
+    if (Has-Prop $r $m.P) { $v = Get-Prop $r $m.P }
+    if ($null -ne $v -and ($v -isnot [bool] -or $v)) {
+      $val = To-Flat $v
+      if ([string]::IsNullOrWhiteSpace($val)) { continue }
       $condPairs += ("  - {0}: {1}" -f $m.P, $val)
     }
   }
@@ -127,14 +161,14 @@ function Describe-TransportRule {
   # Actions
   $actPairs = @()
   foreach ($m in $ActionFields) {
-    $pv = $r.($m.P)
-    if ($null -ne $pv -and ($pv -isnot [bool] -or $pv)) {
-      if ($pv -is [System.Collections.IEnumerable] -and -not ($pv -is [string])) {
-        $pv = @($pv)
-      }
-      $val = ""
-      if ($pv -is [System.Array]) { $val = ($pv -join ", ") } else { $val = "$pv" }
+    $v = $null
+    if (Has-Prop $r $m.P) { $v = Get-Prop $r $m.P }
+    if ($null -ne $v -and ($v -isnot [bool] -or $v)) {
+      $val = To-Flat $v
+      if ([string]::IsNullOrWhiteSpace($val)) { continue }
       $actPairs += ("  - {0}: {1}" -f $m.P, $val)
+    } elseif ($v -is [bool] -and $v) {
+      $actPairs += ("  - {0}: True" -f $m.P)
     }
   }
   if ($actPairs.Count -gt 0) {
@@ -146,35 +180,38 @@ function Describe-TransportRule {
 
   # Recreate command
   $parts = @()
-  $parts += ("New-TransportRule -Name " + (J $r.Name))
-
-  $enabledStr = '$false'
-  if ($r.Enabled) { $enabledStr = '$true' }
-  $parts += ("-Enabled " + $enabledStr)
-
-  if ($r.Mode) { $parts += ("-Mode " + (J $r.Mode)) }
-  if ($r.Priority -ne $null) { $parts += ("-Priority {0}" -f [int]$r.Priority) }
+  $parts += ("New-TransportRule -Name " + (J (Get-Prop $r 'Name' 'Rule')))
+  if ($null -ne $enabledBool) {
+    if ($enabledBool) { $parts += "-Enabled $true" } else { $parts += "-Enabled $false" }
+  }
+  if (Has-Prop $r 'Mode')     { $parts += ("-Mode " + (J (Get-Prop $r 'Mode'))) }
+  if (Has-Prop $r 'Priority') { $parts += ("-Priority {0}" -f [int](Get-Prop $r 'Priority' 0)) }
 
   foreach ($m in $PredicateFields) {
-    $pv = $r.($m.P)
-    if ($null -ne $pv -and ($pv -isnot [bool] -or $pv)) {
-      if ($pv -is [System.Collections.IEnumerable] -and -not ($pv -is [string])) { $pv = @($pv) }
-      if ($pv -is [System.Array]) { $parts += ("{0} {1}" -f $m.K, (JA $pv)) }
-      else { $parts += ("{0} {1}" -f $m.K, (J $pv)) }
+    if (Has-Prop $r $m.P) {
+      $pv = Get-Prop $r $m.P
+      if ($null -ne $pv -and ($pv -isnot [bool] -or $pv)) {
+        if ($pv -is [System.Collections.IEnumerable] -and -not ($pv -is [string])) { $pv = @($pv) }
+        if ($pv -is [System.Array]) { $parts += ("{0} {1}" -f $m.K, (JA $pv)) }
+        else { $parts += ("{0} {1}" -f $m.K, (J $pv)) }
+      }
     }
   }
   foreach ($m in $ActionFields) {
-    $pv = $r.($m.P)
-    if ($null -ne $pv -and ($pv -isnot [bool] -or $pv)) {
-      if ($pv -is [System.Collections.IEnumerable] -and -not ($pv -is [string])) { $pv = @($pv) }
-      if ($pv -is [System.Array]) {
-        $parts += ("{0} {1}" -f $m.K, (JA $pv))
-      } else {
-        if ($pv -is [bool]) {
-          if ($pv) { $parts += $m.K }
-        } else {
-          $parts += ("{0} {1}" -f $m.K, (J $pv))
+    if (Has-Prop $r $m.P) {
+      $pv = Get-Prop $r $m.P
+      if ($null -ne $pv -and ($pv -isnot [bool] -or $pv)) {
+        if ($pv -is [System.Collections.IEnumerable] -and -not ($pv -is [string])) { $pv = @($pv) }
+        if ($pv -is [System.Array]) { $parts += ("{0} {1}" -f $m.K, (JA $pv)) }
+        else {
+          if ($pv -is [bool]) {
+            if ($pv) { $parts += $m.K }
+          } else {
+            $parts += ("{0} {1}" -f $m.K, (J $pv))
+          }
         }
+      } elseif ($pv -is [bool] -and $pv) {
+        $parts += $m.K
       }
     }
   }
@@ -195,23 +232,23 @@ function Is-ExternalAddress {
 function Print-MailboxPosture {
   param($mbx, [string[]]$AcceptedDomains)
 
-  $upn = $mbx.PrimarySmtpAddress
+  $upn = Get-Prop $mbx 'PrimarySmtpAddress' '<unknown>'
   Write-Host ("BEGIN MAILBOX-POSTURE " + $upn)
-  Write-Host ("RecipientTypeDetails: " + $mbx.RecipientTypeDetails)
-  Write-Host ("AuditEnabled: " + $mbx.AuditEnabled)
+  Write-Host ("RecipientTypeDetails: " + (Get-Prop $mbx 'RecipientTypeDetails' ''))
+  Write-Host ("AuditEnabled: " + (Get-Prop $mbx 'AuditEnabled' ''))
 
-  if ($mbx.ForwardingSMTPAddress) {
-    $ext = Is-ExternalAddress -Address $mbx.ForwardingSMTPAddress -AcceptedDomains $AcceptedDomains
-    Write-Host ("ForwardingSMTPAddress: {0}" -f $mbx.ForwardingSMTPAddress)
-    Write-Host ("DeliverToMailboxAndForward: {0}" -f $mbx.DeliverToMailboxAndForward)
+  $fwdSmtp = Get-Prop $mbx 'ForwardingSMTPAddress' $null
+  $deliver = [bool](Get-Prop $mbx 'DeliverToMailboxAndForward' $false)
+  if ($fwdSmtp) {
+    $ext = Is-ExternalAddress -Address $fwdSmtp -AcceptedDomains $AcceptedDomains
+    Write-Host ("ForwardingSMTPAddress: {0}" -f $fwdSmtp)
+    Write-Host ("DeliverToMailboxAndForward: {0}" -f $deliver)
     Write-Host ("ForwardingSMTPAddressIsExternal: {0}" -f $ext)
 
-    $deliverStr = '$false'
-    if ($mbx.DeliverToMailboxAndForward) { $deliverStr = '$true' }
-
+    $deliverStr = '$false'; if ($deliver) { $deliverStr = '$true' }
     $cmd = @(
       "Set-Mailbox -Identity", (J $upn),
-      "-ForwardingSMTPAddress", (J $mbx.ForwardingSMTPAddress.ToString()),
+      "-ForwardingSMTPAddress", (J $fwdSmtp.ToString()),
       "-DeliverToMailboxAndForward", $deliverStr
     ) -join " "
     Write-Host ("Recreate: " + $cmd) -ForegroundColor Yellow
@@ -219,11 +256,12 @@ function Print-MailboxPosture {
     Write-Host "ForwardingSMTPAddress: <none>"
   }
 
-  if ($mbx.ForwardingAddress) {
-    Write-Host ("ForwardingAddress (directory object): {0}" -f $mbx.ForwardingAddress)
+  $fwdAddr = Get-Prop $mbx 'ForwardingAddress' $null
+  if ($fwdAddr) {
+    Write-Host ("ForwardingAddress (directory object): {0}" -f $fwdAddr)
     $cmd2 = @(
       "Set-Mailbox -Identity", (J $upn),
-      "-ForwardingAddress", (J $mbx.ForwardingAddress.ToString())
+      "-ForwardingAddress", (J $fwdAddr.ToString())
     ) -join " "
     Write-Host ("Recreate: " + $cmd2) -ForegroundColor Yellow
   } else {
@@ -231,20 +269,28 @@ function Print-MailboxPosture {
   }
 
   # Delegations
-  $sendAs = (Get-RecipientPermission -Identity $upn -ErrorAction SilentlyContinue |
-              Where-Object { $_.Trustee -ne "NT AUTHORITY\SELF" -and $_.AccessRights -contains "SendAs" }) |
-              Select-Object -ExpandProperty Trustee -ErrorAction SilentlyContinue
-  $mailboxPerm = (Get-MailboxPermission -Identity $upn -ErrorAction SilentlyContinue |
-                  Where-Object { -not $_.IsInherited -and $_.User -notmatch '^S-1-5-' -and $_.User -ne "NT AUTHORITY\SELF" })
+  try {
+    $sendAs = (Get-RecipientPermission -Identity $upn -ErrorAction Stop |
+      Where-Object { $_.Trustee -ne "NT AUTHORITY\SELF" -and $_.AccessRights -contains "SendAs" }) |
+      Select-Object -ExpandProperty Trustee -ErrorAction SilentlyContinue
+    if ($sendAs) { Write-Host ("SendAs: " + ($sendAs -join ", ")) } else { Write-Host "SendAs: <none>" }
+  } catch {
+    Write-Warning ("Get-RecipientPermission failed for {0}: {1}" -f $upn, $_.Exception.Message)
+  }
 
-  if ($sendAs) { Write-Host ("SendAs: " + ($sendAs -join ", ")) } else { Write-Host "SendAs: <none>" }
-  if ($mailboxPerm) {
-    Write-Host "MailboxPermissions:"
-    foreach ($p in $mailboxPerm) {
-      Write-Host ("  - {0}: {1}" -f $p.User, ($p.AccessRights -join "+"))
+  try {
+    $mailboxPerm = (Get-MailboxPermission -Identity $upn -ErrorAction Stop |
+      Where-Object { -not $_.IsInherited -and $_.User -notmatch '^S-1-5-' -and $_.User -ne "NT AUTHORITY\SELF" })
+    if ($mailboxPerm) {
+      Write-Host "MailboxPermissions:"
+      foreach ($p in $mailboxPerm) {
+        Write-Host ("  - {0}: {1}" -f $p.User, ($p.AccessRights -join "+"))
+      }
+    } else {
+      Write-Host "MailboxPermissions: <none>"
     }
-  } else {
-    Write-Host "MailboxPermissions: <none>"
+  } catch {
+    Write-Warning ("Get-MailboxPermission failed for {0}: {1}" -f $upn, $_.Exception.Message)
   }
 
   Write-Host "END MAILBOX-POSTURE"
@@ -254,44 +300,36 @@ function Print-MailboxPosture {
 function Describe-InboxRule {
   param($ir, $mailbox)
 
-  Write-Host ("BEGIN INBOX-RULE {0} :: {1}" -f $mailbox, $ir.Name)
-  Write-Host ("Enabled: " + $ir.Enabled)
-  Write-Host ("Priority: " + $ir.Priority)
-  Write-Host ("StopProcessing: " + $ir.StopProcessingRules)
+  Write-Host ("BEGIN INBOX-RULE {0} :: {1}" -f $mailbox, (Get-Prop $ir 'Name' '<unnamed>'))
+  Write-Host ("Enabled: " + (Get-Prop $ir 'Enabled' ''))
+  Write-Host ("Priority: " + (Get-Prop $ir 'Priority' ''))
+  Write-Host ("StopProcessing: " + (Get-Prop $ir 'StopProcessingRules' ''))
 
-  # Conditions (subset commonly used; extend as needed)
   $conds = @()
-  if ($ir.From) { $conds += ("From: " + ($ir.From -join ", ")) }
-  if ($ir.SenderAddressContainsWords) { $conds += ("SenderAddressContainsWords: " + ($ir.SenderAddressContainsWords -join ", ")) }
-  if ($ir.SubjectContainsWords) { $conds += ("SubjectContainsWords: " + ($ir.SubjectContainsWords -join ", ")) }
-  if ($ir.BodyContainsWords) { $conds += ("BodyContainsWords: " + ($ir.BodyContainsWords -join ", ")) }
-  if ($ir.MyNameInToOrCcBox) { $conds += "MyNameInToOrCcBox: True" }
-  if ($ir.HasAttachment) { $conds += "HasAttachment: True" }
-  if ($conds.Count -gt 0) {
-    Write-Host "When:"
-    $conds | ForEach-Object { Write-Host ("  - " + $_) }
-  } else { Write-Host "When: <none>" }
+  if (Has-Prop $ir 'From' -and $ir.From) { $conds += ("From: " + (To-Flat $ir.From)) }
+  if (Has-Prop $ir 'SenderAddressContainsWords' -and $ir.SenderAddressContainsWords) { $conds += ("SenderAddressContainsWords: " + (To-Flat $ir.SenderAddressContainsWords)) }
+  if (Has-Prop $ir 'SubjectContainsWords' -and $ir.SubjectContainsWords) { $conds += ("SubjectContainsWords: " + (To-Flat $ir.SubjectContainsWords)) }
+  if (Has-Prop $ir 'BodyContainsWords' -and $ir.BodyContainsWords) { $conds += ("BodyContainsWords: " + (To-Flat $ir.BodyContainsWords)) }
+  if (Has-Prop $ir 'MyNameInToOrCcBox' -and $ir.MyNameInToOrCcBox) { $conds += "MyNameInToOrCcBox: True" }
+  if (Has-Prop $ir 'HasAttachment' -and $ir.HasAttachment) { $conds += "HasAttachment: True" }
+  if ($conds.Count -gt 0) { Write-Host "When:"; $conds | ForEach-Object { Write-Host ("  - " + $_) } } else { Write-Host "When: <none>" }
 
-  # Actions
   $acts = @()
-  if ($ir.RedirectTo)      { $acts += ("RedirectTo: " + ($ir.RedirectTo -join ", ")) }
-  if ($ir.ForwardTo)       { $acts += ("ForwardTo: " + ($ir.ForwardTo -join ", ")) }
-  if ($ir.MoveToFolder)    { $acts += ("MoveToFolder: " + $ir.MoveToFolder) }
-  if ($ir.CopyToFolder)    { $acts += ("CopyToFolder: " + $ir.CopyToFolder) }
-  if ($ir.DeleteMessage)   { $acts += "DeleteMessage: True" }
-  if ($ir.PermanentDelete) { $acts += "PermanentDelete: True" }
-  if ($ir.MarkAsRead)      { $acts += "MarkAsRead: True" }
-  if ($ir.AssignCategories){ $acts += ("AssignCategories: " + ($ir.AssignCategories -join ", ")) }
-  if ($acts.Count -gt 0) {
-    Write-Host "Then:"
-    $acts | ForEach-Object { Write-Host ("  - " + $_) }
-  } else { Write-Host "Then: <none>" }
+  if (Has-Prop $ir 'RedirectTo' -and $ir.RedirectTo) { $acts += ("RedirectTo: " + (To-Flat $ir.RedirectTo)) }
+  if (Has-Prop $ir 'ForwardTo' -and $ir.ForwardTo) { $acts += ("ForwardTo: " + (To-Flat $ir.ForwardTo)) }
+  if (Has-Prop $ir 'MoveToFolder' -and $ir.MoveToFolder) { $acts += ("MoveToFolder: " + $ir.MoveToFolder) }
+  if (Has-Prop $ir 'CopyToFolder' -and $ir.CopyToFolder) { $acts += ("CopyToFolder: " + $ir.CopyToFolder) }
+  if (Has-Prop $ir 'DeleteMessage' -and $ir.DeleteMessage) { $acts += "DeleteMessage: True" }
+  if (Has-Prop $ir 'PermanentDelete' -and $ir.PermanentDelete) { $acts += "PermanentDelete: True" }
+  if (Has-Prop $ir 'MarkAsRead' -and $ir.MarkAsRead) { $acts += "MarkAsRead: True" }
+  if (Has-Prop $ir 'AssignCategories' -and $ir.AssignCategories) { $acts += ("AssignCategories: " + (To-Flat $ir.AssignCategories)) }
+  if ($acts.Count -gt 0) { Write-Host "Then:"; $acts | ForEach-Object { Write-Host ("  - " + $_) } } else { Write-Host "Then: <none>" }
 
   # Recreate
-  $enabledRuleStr = '$false'
-  if ($ir.Enabled) { $enabledRuleStr = '$true' }
+  $enabledRuleStr = '$false'; if ((Get-Prop $ir 'Enabled' $false)) { $enabledRuleStr = '$true' }
+  $prio = [int](Get-Prop $ir 'Priority' 0)
 
-  $cmd = @("New-InboxRule -Mailbox", (J $mailbox), "-Name", (J $ir.Name), "-Priority", ([int]$ir.Priority), "-Enabled", $enabledRuleStr)
+  $cmd = @("New-InboxRule -Mailbox", (J $mailbox), "-Name", (J (Get-Prop $ir 'Name' 'Rule')), "-Priority", $prio, "-Enabled", $enabledRuleStr)
   if ($ir.From)                      { $cmd += @("-From", (JA @($ir.From))) }
   if ($ir.SenderAddressContainsWords){ $cmd += @("-SenderAddressContainsWords", (JA @($ir.SenderAddressContainsWords))) }
   if ($ir.SubjectContainsWords)      { $cmd += @("-SubjectContainsWords", (JA @($ir.SubjectContainsWords))) }
@@ -317,32 +355,60 @@ function Main {
   Ensure-Module -Name ExchangeOnlineManagement -MinVersion "3.2.0"
   Connect-ExoSafe
 
-  # Accepted domains for external detection (used in mailbox posture)
-  $acceptedDomains = (Get-AcceptedDomain | Select-Object -ExpandProperty DomainName) | ForEach-Object { $_.ToLowerInvariant() }
+  # Accepted domains for external detection
+  $acceptedDomains = @()
+  try {
+    $acceptedDomains = (Get-AcceptedDomain -ErrorAction Stop | Select-Object -ExpandProperty DomainName) | ForEach-Object { $_.ToLowerInvariant() }
+  } catch {
+    Write-Warning ("Get-AcceptedDomain failed: {0}" -f $_.Exception.Message)
+    $acceptedDomains = @()
+  }
 
   Print-Header "Transport Rules"
-  $trs = Get-TransportRule -ResultSize Unlimited
+  $trs = @()
+  try {
+    $trs = Get-TransportRule -ResultSize Unlimited -ErrorAction Stop
+  } catch {
+    Write-Warning ("Get-TransportRule failed: {0}" -f $_.Exception.Message)
+  }
   foreach ($r in $trs | Sort-Object Priority) {
-    Describe-TransportRule -r $r
+    try {
+      Describe-TransportRule -r $r
+    } catch {
+      Write-Warning ("Describe-TransportRule error for '{0}': {1}" -f (Get-Prop $r 'Name' '<unknown>'), $_.Exception.Message)
+    }
   }
 
   Print-Header "Mailbox Forwarding / Delegation"
-  $mbxs = Get-ExoMailbox -ResultSize Unlimited -Properties ForwardingSMTPAddress,ForwardingAddress,DeliverToMailboxAndForward,RecipientTypeDetails,AuditEnabled,PrimarySmtpAddress
+  $mbxs = @()
+  try {
+    $mbxs = Get-ExoMailbox -ResultSize Unlimited -Properties ForwardingSMTPAddress,ForwardingAddress,DeliverToMailboxAndForward,RecipientTypeDetails,AuditEnabled,PrimarySmtpAddress -ErrorAction Stop
+  } catch {
+    Write-Warning ("Get-ExoMailbox failed: {0}" -f $_.Exception.Message)
+  }
   foreach ($m in $mbxs | Sort-Object PrimarySmtpAddress) {
-    Print-MailboxPosture -mbx $m -AcceptedDomains $acceptedDomains
+    try {
+      Print-MailboxPosture -mbx $m -AcceptedDomains $acceptedDomains
+    } catch {
+      Write-Warning ("Mailbox posture error for '{0}': {1}" -f (Get-Prop $m 'PrimarySmtpAddress' '<unknown>'), $_.Exception.Message)
+    }
   }
 
   if ($InboxRules) {
     Print-Header "Inbox Rules (Per Mailbox)"
     foreach ($m in $mbxs) {
-      $upn = $m.PrimarySmtpAddress
+      $upn = Get-Prop $m 'PrimarySmtpAddress' '<unknown>'
       try {
         $rules = Get-InboxRule -Mailbox $upn -ErrorAction Stop
         foreach ($ir in $rules | Sort-Object Priority) {
-          Describe-InboxRule -ir $ir -mailbox $upn
+          try {
+            Describe-InboxRule -ir $ir -mailbox $upn
+          } catch {
+            Write-Warning ("Describe-InboxRule error for {0}: {1}" -f $upn, $_.Exception.Message)
+          }
         }
       } catch {
-        Write-Warning ("Failed to enumerate Inbox rules for {0}: {1}" -f $upn, $_.Exception.Message)
+        Write-Warning ("Get-InboxRule failed for {0}: {1}" -f $upn, $_.Exception.Message)
       }
     }
   }
